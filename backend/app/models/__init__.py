@@ -6,6 +6,7 @@ from backend.app.models.candidate import Candidate
 from backend.app.models.score import Score
 from backend.app.models.feedback import Feedback
 from backend.app.models.golden_set import GoldenSet
+from backend.app.models.audit_log import AuditLog
 
 __all__ = ["Base", "TimestampMixin", "User", "JD", "RuleVersion",
-           "Candidate", "Score", "Feedback", "GoldenSet"]
+           "Candidate", "Score", "Feedback", "GoldenSet", "AuditLog"]

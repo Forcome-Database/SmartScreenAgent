@@ -51,3 +51,12 @@ def test_feedback_columns():
 def test_golden_set_columns():
     cols = {c.name for c in GoldenSet.__table__.columns}
     assert {"id", "candidate_id", "jd_id", "label", "imported_at", "imported_by_user_id"} <= cols
+
+
+from backend.app.models import AuditLog
+
+
+def test_audit_log_columns():
+    cols = {c.name for c in AuditLog.__table__.columns}
+    assert {"id", "event_type", "actor", "target_type", "target_id",
+            "payload", "rule_version_id", "created_at"} <= cols
