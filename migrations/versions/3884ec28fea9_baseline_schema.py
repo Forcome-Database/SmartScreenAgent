@@ -162,6 +162,17 @@ def upgrade() -> None:
     op.create_index(op.f('ix_feedback_score_id'), 'feedback', ['score_id'], unique=False)
     # ### end Alembic commands ###
 
+    # Deferred FK: jds.active_rule_version_id -> rule_versions.id.
+    # The inline `use_alter=True` ForeignKeyConstraint inside create_table('jds') is silently dropped
+    # by current Alembic autogenerate, so we must emit it explicitly here AFTER both tables exist.
+    op.create_foreign_key(
+        "fk_jd_active_rule",
+        "jds",
+        "rule_versions",
+        ["active_rule_version_id"],
+        ["id"],
+    )
+
 
 def downgrade() -> None:
     """Downgrade schema."""
