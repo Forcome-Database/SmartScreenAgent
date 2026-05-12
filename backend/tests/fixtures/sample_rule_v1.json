@@ -1,0 +1,48 @@
+{
+  "version": "v1",
+  "jd_code": "FOREIGN_TRADE",
+  "total_score": 100,
+  "passing_threshold": 40,
+  "hard_filters": [
+    {"id": "age_max", "rule": "age <= 45", "action": "reject", "audit_tag": "AGE"}
+  ],
+  "rule_dimensions": [
+    {
+      "id": "north_america",
+      "name": "熟悉北美市场",
+      "weight": 60,
+      "method": "tiered_keyword_match",
+      "tiers": [
+        {"label": "high", "score": 60, "keywords": ["北美 五金"], "min_years": 2},
+        {"label": "mid", "score": 30, "keywords": ["北美 外贸"], "min_years": 1},
+        {"label": "low", "score": 0, "keywords": []}
+      ]
+    },
+    {
+      "id": "education",
+      "name": "学历",
+      "weight": 30,
+      "method": "lookup",
+      "table": {"本科": 30, "专升本": 20, "大专": 10}
+    }
+  ],
+  "judge_dimensions": [
+    {
+      "id": "independence",
+      "name": "独立处理事务",
+      "weight": 10,
+      "prompt_hint": "证据：简历中明确写过独立负责模块",
+      "tiers": [
+        {"label": "high", "score": 10},
+        {"label": "mid", "score": 5},
+        {"label": "low", "score": 0},
+        {"label": "unknown", "score": null, "note": "建议面试时考察"}
+      ]
+    }
+  ],
+  "grade_thresholds": [
+    {"grade": "L5", "min": 90, "label": "顶尖"},
+    {"grade": "L3", "min": 65, "label": "胜任"},
+    {"grade": "L1", "min": 40, "label": "经验较浅"}
+  ]
+}
