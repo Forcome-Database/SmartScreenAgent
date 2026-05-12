@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# uv
+.uv/
+uv-cache/
+
+# Env
+.env
+.env.local
+*.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Project
+uploads/
+*.log
+backend/instance/
+docs/specs/research/*.draft.md
+
+# HR business data (do not commit)
+*.xlsx
