@@ -3,6 +3,8 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.app.main import app
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.asyncio
 async def test_healthz_returns_ok():

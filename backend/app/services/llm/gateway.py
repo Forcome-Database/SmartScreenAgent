@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import logging
 
-from openai import AsyncOpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
+import httpx
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from backend.app.config import get_settings
 from backend.app.services.llm.schemas import LLMResponse
@@ -21,7 +22,13 @@ class LLMGateway:
             timeout=60.0,
         )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=1, max=10),
+        retry=retry_if_exception_type(
+            (APIConnectionError, APITimeoutError, RateLimitError, httpx.HTTPError)
+        ),
+    )
     async def _call_once(
         self,
         model: str,

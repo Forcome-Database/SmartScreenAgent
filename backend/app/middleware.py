@@ -16,6 +16,16 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         structlog.contextvars.bind_contextvars(trace_id=trace_id)
         try:
             response: Response = await call_next(request)
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info(
+                "request",
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                elapsed_ms=round(elapsed_ms, 2),
+            )
+            response.headers["x-trace-id"] = trace_id
+            return response
         except Exception:
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.error(
@@ -25,14 +35,5 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
                 elapsed_ms=round(elapsed_ms, 2),
             )
             raise
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        logger.info(
-            "request",
-            method=request.method,
-            path=request.url.path,
-            status=response.status_code,
-            elapsed_ms=round(elapsed_ms, 2),
-        )
-        response.headers["x-trace-id"] = trace_id
-        structlog.contextvars.clear_contextvars()
-        return response
+        finally:
+            structlog.contextvars.clear_contextvars()
