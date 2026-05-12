@@ -43,6 +43,7 @@ testpaths = ["backend/tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
 addopts = "-v --tb=short"
+pythonpath = ["."]
 markers = [
     "integration: requires external services (PG/Redis/MinIO/network)",
 ]
