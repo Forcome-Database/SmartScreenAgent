@@ -3,5 +3,9 @@ from backend.app.models.user import User
 from backend.app.models.jd import JD
 from backend.app.models.rule_version import RuleVersion
 from backend.app.models.candidate import Candidate
+from backend.app.models.score import Score
+from backend.app.models.feedback import Feedback
+from backend.app.models.golden_set import GoldenSet
 
-__all__ = ["Base", "TimestampMixin", "User", "JD", "RuleVersion", "Candidate"]
+__all__ = ["Base", "TimestampMixin", "User", "JD", "RuleVersion",
+           "Candidate", "Score", "Feedback", "GoldenSet"]

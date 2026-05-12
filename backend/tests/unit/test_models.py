@@ -30,3 +30,24 @@ def test_candidate_columns():
     expected = {"id", "source", "source_external_id", "name_cipher", "phone_cipher",
                 "email_cipher", "raw_file_key", "parsed_markdown", "extracted_json", "pii_hash"}
     assert expected <= cols
+
+
+from backend.app.models import Score, Feedback, GoldenSet
+
+
+def test_score_columns():
+    cols = {c.name for c in Score.__table__.columns}
+    assert {"id", "candidate_id", "jd_id", "rule_version_id", "total_score", "grade",
+            "hard_filter_result", "rule_dimensions", "judge_dimensions",
+            "cross_engine_diff", "is_suspicious", "llm_model_main", "llm_model_extract",
+            "cost_tokens", "cost_cny"} <= cols
+
+
+def test_feedback_columns():
+    cols = {c.name for c in Feedback.__table__.columns}
+    assert {"id", "score_id", "reviewer_user_id", "decision", "reason", "ai_agreed"} <= cols
+
+
+def test_golden_set_columns():
+    cols = {c.name for c in GoldenSet.__table__.columns}
+    assert {"id", "candidate_id", "jd_id", "label", "imported_at", "imported_by_user_id"} <= cols
