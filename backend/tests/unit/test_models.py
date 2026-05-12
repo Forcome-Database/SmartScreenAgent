@@ -20,3 +20,13 @@ def test_rule_version_columns():
     cols = {c.name for c in RuleVersion.__table__.columns}
     assert {"id", "jd_id", "version", "schema_json", "published_at", "published_by_user_id",
             "notes", "golden_set_metrics"} <= cols
+
+
+from backend.app.models import Candidate
+
+
+def test_candidate_columns():
+    cols = {c.name for c in Candidate.__table__.columns}
+    expected = {"id", "source", "source_external_id", "name_cipher", "phone_cipher",
+                "email_cipher", "raw_file_key", "parsed_markdown", "extracted_json", "pii_hash"}
+    assert expected <= cols
