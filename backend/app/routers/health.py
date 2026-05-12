@@ -25,8 +25,10 @@ async def healthz(db: AsyncSession = Depends(get_db)) -> dict:
     # Redis
     try:
         r = aioredis.from_url(settings.REDIS_URL)
-        pong = await r.ping()
-        await r.close()
+        try:
+            pong = await r.ping()
+        finally:
+            await r.aclose()
         checks["redis"] = "ok" if pong else "fail"
     except Exception as e:  # noqa: BLE001
         checks["redis"] = f"fail: {e}"
