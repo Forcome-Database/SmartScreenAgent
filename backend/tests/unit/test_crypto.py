@@ -1,5 +1,6 @@
 import pytest
-from backend.app.security.crypto import encrypt_pii, decrypt_pii, hash_pii
+
+from backend.app.security.crypto import decrypt_pii, encrypt_pii, hash_pii
 
 
 def test_encrypt_decrypt_roundtrip():

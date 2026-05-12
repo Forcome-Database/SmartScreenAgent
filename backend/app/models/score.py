@@ -1,6 +1,7 @@
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Numeric, String, Integer
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+
 from backend.app.models.base import Base, TimestampMixin
 
 
@@ -8,9 +9,13 @@ class Score(Base, TimestampMixin):
     __tablename__ = "scores"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    candidate_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("candidates.id"), nullable=False, index=True)
+    candidate_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("candidates.id"), nullable=False, index=True
+    )
     jd_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("jds.id"), nullable=False, index=True)
-    rule_version_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("rule_versions.id"), nullable=False)
+    rule_version_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("rule_versions.id"), nullable=False
+    )
 
     total_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
     grade: Mapped[str] = mapped_column(String(16), nullable=False)

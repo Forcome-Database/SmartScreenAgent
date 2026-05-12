@@ -1,14 +1,18 @@
 from unittest.mock import AsyncMock
+
 import pytest
+
 from backend.app.services.llm.gateway import LLMGateway, LLMResponse
 
 
 @pytest.mark.asyncio
 async def test_extract_calls_extract_model(monkeypatch):
     gateway = LLMGateway()
-    fake = AsyncMock(return_value=LLMResponse(
-        content='{"name":"张三"}', model="deepseek-v4", input_tokens=100, output_tokens=20
-    ))
+    fake = AsyncMock(
+        return_value=LLMResponse(
+            content='{"name":"张三"}', model="deepseek-v4", input_tokens=100, output_tokens=20
+        )
+    )
     monkeypatch.setattr(gateway, "_call_with_fallback", fake)
     result = await gateway.extract("简历文本", schema={"type": "object"})
     assert result.content == '{"name":"张三"}'

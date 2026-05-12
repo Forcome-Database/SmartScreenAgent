@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 from datetime import timedelta
 from typing import BinaryIO
+
 from minio import Minio
 from minio.error import S3Error
+
 from backend.app.config import get_settings
 
 

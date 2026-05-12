@@ -1,6 +1,7 @@
 from sqlalchemy import BigInteger, ForeignKey, Index, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+
 from backend.app.models.base import Base, TimestampMixin
 
 
@@ -15,6 +16,4 @@ class AuditLog(Base, TimestampMixin):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     rule_version_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("rule_versions.id"))
 
-    __table_args__ = (
-        Index("ix_audit_event_created", "event_type", "created_at"),
-    )
+    __table_args__ = (Index("ix_audit_event_created", "event_type", "created_at"),)

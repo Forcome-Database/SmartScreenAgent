@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
+
 import jwt
+
 from backend.app.config import get_settings
 
 _settings = get_settings()

@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from backend.app.config import get_settings
 from backend.app.logging_config import configure_logging
 from backend.app.middleware import AccessLogMiddleware

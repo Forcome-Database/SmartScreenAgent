@@ -1,7 +1,10 @@
 """端到端：起 app → 命中 /healthz → DB / Redis / MinIO 都活着。"""
+
 import io
+
 import pytest
 from httpx import ASGITransport, AsyncClient
+
 from backend.app.main import app
 from backend.app.services.storage.minio_client import MinIOStorage
 
@@ -29,4 +32,5 @@ async def test_full_smoke():
 @pytest.mark.skip(reason="requires running celery worker; run manually after `celery worker` is up")
 def test_celery_ping_when_worker_up():
     from backend.app.tasks.celery_app import ping
+
     assert ping.delay().get(timeout=10) == "pong"

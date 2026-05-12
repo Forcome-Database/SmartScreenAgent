@@ -1,6 +1,7 @@
 from sqlalchemy import BigInteger, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+
 from backend.app.models.base import Base, TimestampMixin
 
 
@@ -18,6 +19,4 @@ class Candidate(Base, TimestampMixin):
     extracted_json: Mapped[dict | None] = mapped_column(JSONB)
     pii_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
 
-    __table_args__ = (
-        Index("ix_candidates_source_external", "source", "source_external_id"),
-    )
+    __table_args__ = (Index("ix_candidates_source_external", "source", "source_external_id"),)

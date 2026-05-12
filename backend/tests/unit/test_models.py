@@ -1,4 +1,15 @@
-from backend.app.models import Base, JD, RuleVersion, User
+from backend.app.models import (
+    JD,
+    AuditLog,
+    Base,
+    Candidate,
+    CandidateEmbedding,
+    Feedback,
+    GoldenSet,
+    RuleVersion,
+    Score,
+    User,
+)
 
 
 def test_user_model_has_required_columns():
@@ -18,29 +29,54 @@ def test_jd_columns():
 
 def test_rule_version_columns():
     cols = {c.name for c in RuleVersion.__table__.columns}
-    assert {"id", "jd_id", "version", "schema_json", "published_at", "published_by_user_id",
-            "notes", "golden_set_metrics"} <= cols
-
-
-from backend.app.models import Candidate
+    assert {
+        "id",
+        "jd_id",
+        "version",
+        "schema_json",
+        "published_at",
+        "published_by_user_id",
+        "notes",
+        "golden_set_metrics",
+    } <= cols
 
 
 def test_candidate_columns():
     cols = {c.name for c in Candidate.__table__.columns}
-    expected = {"id", "source", "source_external_id", "name_cipher", "phone_cipher",
-                "email_cipher", "raw_file_key", "parsed_markdown", "extracted_json", "pii_hash"}
+    expected = {
+        "id",
+        "source",
+        "source_external_id",
+        "name_cipher",
+        "phone_cipher",
+        "email_cipher",
+        "raw_file_key",
+        "parsed_markdown",
+        "extracted_json",
+        "pii_hash",
+    }
     assert expected <= cols
-
-
-from backend.app.models import Score, Feedback, GoldenSet
 
 
 def test_score_columns():
     cols = {c.name for c in Score.__table__.columns}
-    assert {"id", "candidate_id", "jd_id", "rule_version_id", "total_score", "grade",
-            "hard_filter_result", "rule_dimensions", "judge_dimensions",
-            "cross_engine_diff", "is_suspicious", "llm_model_main", "llm_model_extract",
-            "cost_tokens", "cost_cny"} <= cols
+    assert {
+        "id",
+        "candidate_id",
+        "jd_id",
+        "rule_version_id",
+        "total_score",
+        "grade",
+        "hard_filter_result",
+        "rule_dimensions",
+        "judge_dimensions",
+        "cross_engine_diff",
+        "is_suspicious",
+        "llm_model_main",
+        "llm_model_extract",
+        "cost_tokens",
+        "cost_cny",
+    } <= cols
 
 
 def test_feedback_columns():
@@ -53,16 +89,18 @@ def test_golden_set_columns():
     assert {"id", "candidate_id", "jd_id", "label", "imported_at", "imported_by_user_id"} <= cols
 
 
-from backend.app.models import AuditLog
-
-
 def test_audit_log_columns():
     cols = {c.name for c in AuditLog.__table__.columns}
-    assert {"id", "event_type", "actor", "target_type", "target_id",
-            "payload", "rule_version_id", "created_at"} <= cols
-
-
-from backend.app.models import CandidateEmbedding
+    assert {
+        "id",
+        "event_type",
+        "actor",
+        "target_type",
+        "target_id",
+        "payload",
+        "rule_version_id",
+        "created_at",
+    } <= cols
 
 
 def test_candidate_embedding_columns():

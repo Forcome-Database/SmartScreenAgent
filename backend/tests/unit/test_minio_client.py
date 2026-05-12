@@ -1,7 +1,9 @@
 # 注：虽然放在 unit/ 目录，本组测试是 integration 性质（需 MinIO 容器）。
 # 用 pytest.mark.integration 标记，CI 可分阶段跑。
 import io
+
 import pytest
+
 from backend.app.services.storage.minio_client import MinIOStorage
 
 pytestmark = pytest.mark.integration

@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import json
 import logging
+
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
+
 from backend.app.config import get_settings
 from backend.app.services.llm.schemas import LLMResponse
 

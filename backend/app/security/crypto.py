@@ -1,6 +1,8 @@
 # backend/app/security/crypto.py
 import hashlib
+
 from cryptography.fernet import Fernet, InvalidToken
+
 from backend.app.config import get_settings
 
 _settings = get_settings()

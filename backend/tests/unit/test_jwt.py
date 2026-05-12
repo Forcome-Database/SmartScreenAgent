@@ -1,4 +1,5 @@
 import pytest
+
 from backend.app.security.jwt import create_access_token, decode_token
 
 

@@ -1,6 +1,7 @@
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from backend.app.database import get_db
 from backend.app.models import User
 from backend.app.security.jwt import decode_token
@@ -12,7 +13,7 @@ async def get_current_user(
 ) -> User:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Bearer token")
-    token = authorization[len("Bearer "):]
+    token = authorization[len("Bearer ") :]
     try:
         payload = decode_token(token)
     except ValueError as e:

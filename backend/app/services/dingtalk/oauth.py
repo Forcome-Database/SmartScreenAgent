@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+
 import httpx
+
 from backend.app.config import get_settings
 
 
@@ -9,6 +11,7 @@ class DingTalkUserInfo:
     用 union_id 作为我们 User.dingtalk_userid 的来源。
     Source: docs/specs/research/dingtalk-oauth.md
     """
+
     union_id: str
     open_id: str
     display_name: str
