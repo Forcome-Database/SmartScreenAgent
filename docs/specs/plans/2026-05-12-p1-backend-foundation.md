@@ -1149,7 +1149,12 @@ def decrypt_pii(ciphertext: str) -> str:
 
 
 def hash_pii(phone: str, name: str) -> str:
-    """生成稳定哈希用于去重（不可逆）。"""
+    """生成稳定哈希用于去重（不可逆）。
+
+    实现注意：手机号搜索空间只有 ~10^11，攻击者拿到库后可用 GPU 爆破 SHA-256。
+    若威胁模型要求抗 DB 读取攻击者，升级到 HMAC-SHA-256 并引入独立 PII_INDEX_KEY env var。
+    P1 阶段先用 SHA-256 维持简单；安全审计若提出再升级。
+    """
     h = hashlib.sha256()
     h.update(phone.encode("utf-8"))
     h.update(b"|")

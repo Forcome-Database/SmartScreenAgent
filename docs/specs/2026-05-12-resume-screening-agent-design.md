@@ -672,7 +672,7 @@ Web 端"系统配置"页可让管理员切换主备链。
 
 ### 11.1 PII 保护
 
-- `candidates.name/phone/email` 字段在 PostgreSQL 中用 `pgcrypto` 列级加密
+- `candidates.name/phone/email` 字段在应用层用 `cryptography.fernet`（AES-128-CBC + HMAC-SHA-256）加密；选择 Fernet 而非 pgcrypto 的理由见 `docs/specs/research/pgcrypto.md`（核心：pgcrypto 需把密钥作为 SQL 参数传入，会泄漏到 `pg_stat_activity` / `log_statement` / `pg_stat_statements`）
 - 解密只发生在"展示给已登录 HR" 时，每次解密写 `audit_logs(event_type='pii_decrypt')`
 - 简历原文文件存 MinIO，bucket 设私有；下载链接用 5 分钟有效期的预签名 URL
 - 数据保留期：候选人未通过 6 个月后归档；归档版只保留哈希用于去重，PII 字段清空
