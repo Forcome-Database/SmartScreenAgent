@@ -31,3 +31,4 @@ docs/specs/research/*.draft.md
 
 # HR business data (do not commit)
 *.xlsx
+.tmp_*.json
