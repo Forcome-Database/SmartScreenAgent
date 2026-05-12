@@ -60,3 +60,11 @@ def test_audit_log_columns():
     cols = {c.name for c in AuditLog.__table__.columns}
     assert {"id", "event_type", "actor", "target_type", "target_id",
             "payload", "rule_version_id", "created_at"} <= cols
+
+
+from backend.app.models import CandidateEmbedding
+
+
+def test_candidate_embedding_columns():
+    cols = {c.name for c in CandidateEmbedding.__table__.columns}
+    assert {"candidate_id", "embedding", "model_name", "created_at"} <= cols
