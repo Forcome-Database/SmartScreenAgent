@@ -106,3 +106,46 @@ def test_tiered_keyword_falls_back_to_low_when_no_hits():
     out = score_dimensions(candidate, dims)
     assert out[0]["tier"] == "low"
     assert out[0]["score"] == 0
+
+
+def test_experience_years_high_tier():
+    from backend.app.rules.schema import RuleDimension, Tier
+    from backend.app.scoring.rule_engine import score_dimensions
+    dims = [
+        RuleDimension(
+            id="trade",
+            name="外贸全流程",
+            weight=25,
+            method="experience_years",
+            tiers=[
+                Tier(label="high", score=25, min_years=3, required_keywords=["报关", "订舱", "单证"]),
+                Tier(label="mid", score=12, min_years=1),
+                Tier(label="low", score=0),
+            ],
+        )
+    ]
+    candidate = {
+        "experiences": [
+            {
+                "company": "X",
+                "title": "外贸",
+                "description": "全面负责报关、订舱、单证",
+                "start": "2019-01",
+                "end": "2024-01",
+            }
+        ]
+    }
+    out = score_dimensions(candidate, dims)
+    assert out[0]["tier"] == "high"
+    assert out[0]["score"] == 25
+
+
+def test_experience_years_total_years_helper_handles_present():
+    from backend.app.scoring.methods.experience_years import total_years_for_keywords
+    candidate = {
+        "experiences": [
+            {"description": "北美五金", "start": "2022-05", "end": None},
+        ]
+    }
+    y = total_years_for_keywords(candidate, ["北美五金"], today="2024-05-01")
+    assert 1.9 < y < 2.1
