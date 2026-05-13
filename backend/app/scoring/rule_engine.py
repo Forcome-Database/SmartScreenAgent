@@ -4,7 +4,8 @@ from typing import Any, Callable
 
 from backend.app.rules.schema import RuleDimension
 
-# 注册表延迟到 Task 8-10 各方法 import 后填充
+# 全局方法注册表。方法模块（lookup/tiered_keyword/experience_years）在文件底部
+# 被显式 import，触发各自的 @register 装饰器填充本字典。
 METHODS: dict[str, Callable[[dict[str, Any], RuleDimension], dict[str, Any]]] = {}
 
 
@@ -28,7 +29,7 @@ def score_dimensions(
     return out
 
 
-# TODO(Task 10): uncomment after lookup/tiered_keyword/experience_years modules exist
+# Method modules: importing each runs its @register decorator → populates METHODS.
 from backend.app.scoring.methods import lookup  # noqa: F401,E402
 from backend.app.scoring.methods import tiered_keyword  # noqa: F401,E402
 from backend.app.scoring.methods import experience_years  # noqa: F401,E402
