@@ -29,6 +29,6 @@ def score_dimensions(
 
 
 # TODO(Task 10): uncomment after lookup/tiered_keyword/experience_years modules exist
-# from backend.app.scoring.methods import lookup  # noqa: F401,E402
+from backend.app.scoring.methods import lookup  # noqa: F401,E402
 # from backend.app.scoring.methods import tiered_keyword  # noqa: F401,E402
 # from backend.app.scoring.methods import experience_years  # noqa: F401,E402
