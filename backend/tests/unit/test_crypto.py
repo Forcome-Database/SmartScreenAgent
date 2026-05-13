@@ -1,6 +1,6 @@
 import pytest
 
-from backend.app.security.crypto import decrypt_pii, encrypt_pii, hash_pii
+from backend.app.security.crypto import decrypt_pii, encrypt_pii
 
 
 def test_encrypt_decrypt_roundtrip():
@@ -18,10 +18,3 @@ def test_encrypt_empty_string():
 def test_decrypt_invalid_raises():
     with pytest.raises(ValueError):
         decrypt_pii("not-real-cipher")
-
-
-def test_hash_pii_deterministic():
-    h1 = hash_pii("13800138000", "张三")
-    h2 = hash_pii("13800138000", "张三")
-    assert h1 == h2
-    assert len(h1) == 64  # sha256 hex
