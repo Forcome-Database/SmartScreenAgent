@@ -48,3 +48,61 @@ def test_lookup_missing_education():
     out = score_dimensions({"education": None}, dims)
     assert out[0]["score"] == 0
     assert out[0]["tier"] == "low"
+
+
+def test_tiered_keyword_high_tier_hits():
+    from backend.app.rules.schema import RuleDimension, Tier
+    from backend.app.scoring.rule_engine import score_dimensions
+    dims = [
+        RuleDimension(
+            id="na",
+            name="北美市场",
+            weight=30,
+            method="tiered_keyword_match",
+            tiers=[
+                Tier(label="high", score=30, keywords=["北美 五金", "深耕北美"], min_years=2),
+                Tier(label="mid", score=15, keywords=["北美 外贸"], min_years=1),
+                Tier(label="low", score=0, keywords=[]),
+            ],
+        )
+    ]
+    candidate = {
+        "experiences": [
+            {
+                "company": "Acme",
+                "title": "外贸业务",
+                "description": "深耕北美五金市场 5 年",
+                "start": "2019-01",
+                "end": "2024-01",
+            }
+        ]
+    }
+    out = score_dimensions(candidate, dims)
+    assert out[0]["tier"] == "high"
+    assert out[0]["score"] == 30
+
+
+def test_tiered_keyword_falls_back_to_low_when_no_hits():
+    from backend.app.rules.schema import RuleDimension, Tier
+    from backend.app.scoring.rule_engine import score_dimensions
+    dims = [
+        RuleDimension(
+            id="na",
+            name="北美市场",
+            weight=30,
+            method="tiered_keyword_match",
+            tiers=[
+                Tier(label="high", score=30, keywords=["北美 五金"], min_years=2),
+                Tier(label="mid", score=15, keywords=["北美 外贸"], min_years=1),
+                Tier(label="low", score=0, keywords=[]),
+            ],
+        )
+    ]
+    candidate = {
+        "experiences": [
+            {"company": "X", "title": "Y", "description": "欧洲电子市场销售", "start": None, "end": None}
+        ]
+    }
+    out = score_dimensions(candidate, dims)
+    assert out[0]["tier"] == "low"
+    assert out[0]["score"] == 0
