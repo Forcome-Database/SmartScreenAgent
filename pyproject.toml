@@ -28,6 +28,9 @@ dependencies = [
     "typer>=0.12,<1",
 ]
 
+[project.scripts]
+smartscreen = "backend.app.cli.import_rules:cli"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",
