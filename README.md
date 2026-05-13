@@ -92,3 +92,46 @@ backend/
 - Celery + Redis broker
 - 结构化日志 + trace id 中间件
 - CORS（默认放行 localhost:3000，P3 用）
+
+## P2 — 评分引擎
+
+P2 完成了简历评分核心闭环：Excel 规则导入 → 解析 → 抽取 → 三段评分 → API。
+
+### 一次性导入岗位规则
+
+```bash
+# 6 个岗位（外贸/物流/采购/QC/SQE/项目工程师）从 Excel 一键导入
+uv run python -m backend.app.cli.import_rules import-rules 招聘JD整理-智能筛简历.xlsx
+```
+
+### 上传简历 + 评分（同步）
+
+```bash
+# 上传简历（PDF/Word/图片），返回 candidate_id
+curl -F "file=@resume.pdf" http://localhost:8000/api/v1/candidates/upload
+
+# 对指定岗位评分
+curl -X POST http://localhost:8000/api/v1/candidates/<id>/score \
+  -H "Content-Type: application/json" \
+  -d '{"jd_code": "FOREIGN_TRADE"}'
+```
+
+### MinerU 解析器三种模式
+
+`MINERU_MODE` 环境变量：
+
+- `stub` — 本地开发/测试，返回固定 markdown
+- `http` — 调远端 mineru-api 服务（推荐生产）；需要 `MINERU_BASE_URL`、`MINERU_API_KEY`
+- `library` — 直接 import mineru 库（暂未实现，留 P3）
+
+详见 `docs/specs/research/mineru.md`。
+
+### P2 未覆盖范围（→ P3）
+
+- 段 D 双引擎交叉打分（cross_engine_diff / is_suspicious 字段已存模型，本期始终 None/False）
+- What-If 规则模拟、规则版本 diff、黄金集回归（设计 §6）
+- 钉钉招聘文档 API 同步任务（设计 §8.2）
+- 评分卡 Web UI 与所有前端页面（设计 §10）
+- HR 复核反馈回流（设计 §7）
+- **API 暂未挂 JWT/RBAC**（设计 §11.3）—— 切勿直接公网部署，P3 接入 DingTalk OAuth 后启用
+- Prompt injection 清洗仅覆盖 3 个经典 pattern；P3 单独做 `docs/specs/research/prompt-injection.md` 调研扩展
