@@ -8,6 +8,7 @@ celery_app = Celery(
     "smartscreen",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
+    include=["backend.app.tasks.ingest"],
 )
 
 celery_app.conf.update(
