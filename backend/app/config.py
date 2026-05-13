@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     DAILY_LLM_BUDGET_CNY: float = 100.0
     MONTHLY_LLM_BUDGET_CNY: float = 1500.0
 
+    # Resume parser (MinerU)
+    MINERU_MODE: str = "http"  # http | stub
+    MINERU_BASE_URL: str = ""
+    MINERU_API_KEY: str = ""
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 
