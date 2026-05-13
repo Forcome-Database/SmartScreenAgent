@@ -100,3 +100,15 @@ async def db_session():
                 await session.commit()
             except Exception:
                 await session.rollback()
+
+
+@pytest_asyncio.fixture
+async def client():
+    """Async HTTP client bound to the FastAPI app via ASGITransport."""
+    import httpx
+
+    from backend.app.main import app
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        yield c
