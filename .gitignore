@@ -25,6 +25,8 @@ uv-cache/
 
 # Project
 uploads/
+.worktrees
+.worktrees/
 *.log
 backend/instance/
 docs/specs/research/*.draft.md
