@@ -57,6 +57,28 @@ async def test_upload_returns_candidate_id(client, db_session, monkeypatch):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_upload_parser_failure_returns_502(client, db_session, monkeypatch):
+    from backend.app.services.parser.mineru_client import MinerUParseError
+
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(side_effect=MinerUParseError("missing markdown"))
+        ),
+    )
+    resp = await client.post(
+        "/api/v1/candidates/upload",
+        files={"file": ("r.pdf", b"%PDF-1.4 dummy", "application/pdf")},
+    )
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "Resume parser failed"
+    assert "missing markdown" not in resp.text
+    assert "mineru.example.com" not in resp.text
+    assert "r.pdf" not in resp.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_score_endpoint_returns_total(client, db_session, monkeypatch):
     """Score endpoint: given existing candidate + JD with active rule, returns total + grade."""
     import json

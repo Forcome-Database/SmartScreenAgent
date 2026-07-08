@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.database import get_db
 from backend.app.models import JD
 from backend.app.scoring.pipeline import ScoringPipeline
+from backend.app.services.parser.mineru_client import MinerUParseError
 from backend.app.tasks.ingest import run_parse_and_score
 
 router = APIRouter(prefix="/api/v1/candidates", tags=["candidates"])
@@ -41,13 +42,16 @@ async def upload_resume(
         tmp.write(await file.read())
         tmp_path = tmp.name
     background.add_task(_unlink_safe, tmp_path)
-    candidate_id = await run_parse_and_score(
-        db=db,
-        file_path=tmp_path,
-        source="upload",
-        source_external_id=None,
-        jd_code=jd_code,
-    )
+    try:
+        candidate_id = await run_parse_and_score(
+            db=db,
+            file_path=tmp_path,
+            source="upload",
+            source_external_id=None,
+            jd_code=jd_code,
+        )
+    except MinerUParseError as e:
+        raise HTTPException(status_code=502, detail="Resume parser failed") from e
     return UploadResponse(candidate_id=candidate_id, status="parsed")
 
 
