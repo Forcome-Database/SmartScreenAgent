@@ -57,7 +57,7 @@ class RuleSchema(BaseModel):
     grade_thresholds: list[GradeThreshold]
 
     @model_validator(mode="after")
-    def _weights_sum_to_total(self) -> "RuleSchema":
+    def _weights_sum_to_total(self) -> RuleSchema:
         s = sum(d.weight for d in self.rule_dimensions) + sum(
             d.weight for d in self.judge_dimensions
         )

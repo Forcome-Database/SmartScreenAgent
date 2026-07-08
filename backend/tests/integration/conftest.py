@@ -9,7 +9,6 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 

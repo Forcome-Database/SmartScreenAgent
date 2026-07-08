@@ -1,8 +1,8 @@
-from backend.app.rules.schema import HardFilter, RuleSchema
-from backend.app.scoring.hard_filter import HardFilterResult, run_hard_filters
-
 import json
 from pathlib import Path
+
+from backend.app.rules.schema import RuleSchema
+from backend.app.scoring.hard_filter import run_hard_filters
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json"
 RULE = RuleSchema.model_validate(json.loads(FIXTURE.read_text(encoding="utf-8")))

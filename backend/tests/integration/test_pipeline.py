@@ -6,10 +6,9 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
-from backend.app.models import AuditLog, Candidate, JD, RuleVersion, Score
+from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
 from backend.app.scoring.pipeline import ScoringPipeline
 from backend.app.services.parser.pii import compute_pii_hash, encrypt_pii
-
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json"
 

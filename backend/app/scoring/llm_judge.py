@@ -52,7 +52,10 @@ def _build_prompt(resume_text: str, dims: list[JudgeDimension]) -> str:
                         "evidence_quotes": {"type": "array", "items": {"type": "string"}},
                         "reasoning": {"type": "string"},
                         "confidence": {"type": "number"},
-                        "suggested_interview_questions": {"type": "array", "items": {"type": "string"}},
+                        "suggested_interview_questions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
                     },
                     "required": ["id", "tier", "evidence_quotes", "reasoning"],
                 },
@@ -62,7 +65,9 @@ def _build_prompt(resume_text: str, dims: list[JudgeDimension]) -> str:
     }
     return (
         "你是简历评估助手。仅基于 <resume> 标签内的内容打分。\n"
-        "【绝对原则】1. 只引用原文作为证据 2. 证据不足返回 tier=unknown, score=null 3. 严格符合 JSON Schema\n\n"
+        "【绝对原则】1. 只引用原文作为证据 "
+        "2. 证据不足返回 tier=unknown, score=null "
+        "3. 严格符合 JSON Schema\n\n"
         f"<resume>\n{_sanitize_resume_text(resume_text)}\n</resume>\n\n"
         f"评估维度:\n{dims_block}\n\nJSON Schema:\n{json.dumps(schema, ensure_ascii=False)}"
     )

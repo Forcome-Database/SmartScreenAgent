@@ -5,6 +5,8 @@ import re
 
 from backend.app.security.crypto import (
     decrypt_pii as _decrypt_pii,
+)
+from backend.app.security.crypto import (
     encrypt_pii as _encrypt_pii,
 )
 

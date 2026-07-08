@@ -1,7 +1,7 @@
 from backend.app.services.parser.pii import (
-    encrypt_pii,
-    decrypt_pii,
     compute_pii_hash,
+    decrypt_pii,
+    encrypt_pii,
 )
 
 

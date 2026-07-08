@@ -1,10 +1,8 @@
-import io
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 
 XLSX = Path(__file__).parents[3] / "招聘JD整理-智能筛简历.xlsx"
 
@@ -18,7 +16,7 @@ async def test_full_p2_flow(client, db_session, monkeypatch):
 
     from backend.app.models import JD, RuleVersion
     from backend.app.rules.excel_importer import import_workbook
-    from backend.app.services.parser.extractor import ExtractedResume, Experience
+    from backend.app.services.parser.extractor import Experience, ExtractedResume
     from backend.app.services.parser.mineru_client import ParseResult
 
     # Mock all external dependencies: MinerU stub, ResumeExtractor, LLMJudge

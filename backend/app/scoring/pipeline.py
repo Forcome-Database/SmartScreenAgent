@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models import AuditLog, Candidate, JD, RuleVersion, Score
+from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
 from backend.app.rules.schema import RuleSchema
 from backend.app.scoring.hard_filter import run_hard_filters
 from backend.app.scoring.llm_judge import LLMJudge

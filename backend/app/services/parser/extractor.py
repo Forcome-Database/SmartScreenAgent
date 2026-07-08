@@ -6,7 +6,6 @@ from typing import Any
 
 from backend.app.services.llm.gateway import LLMGateway
 
-
 EXTRACT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -55,7 +54,7 @@ class ExtractedResume:
     model: str = ""
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ExtractedResume":
+    def from_dict(cls, d: dict[str, Any]) -> ExtractedResume:
         return cls(
             name=d.get("name"),
             phone=d.get("phone"),

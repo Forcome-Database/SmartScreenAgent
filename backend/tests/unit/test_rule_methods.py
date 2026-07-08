@@ -35,7 +35,16 @@ def test_dispatcher_calls_lookup_method():
 def test_lookup_education_bachelor():
     from backend.app.rules.schema import RuleDimension
     from backend.app.scoring.rule_engine import score_dimensions
-    dims = [RuleDimension(id="e", name="学历", weight=12, method="lookup", table={"本科": 12, "大专": 6})]
+
+    dims = [
+        RuleDimension(
+            id="e",
+            name="学历",
+            weight=12,
+            method="lookup",
+            table={"本科": 12, "大专": 6},
+        )
+    ]
     out = score_dimensions({"education": "大专"}, dims)
     assert out[0]["score"] == 6
     assert out[0]["tier"] == "high"
@@ -100,7 +109,13 @@ def test_tiered_keyword_falls_back_to_low_when_no_hits():
     ]
     candidate = {
         "experiences": [
-            {"company": "X", "title": "Y", "description": "欧洲电子市场销售", "start": None, "end": None}
+            {
+                "company": "X",
+                "title": "Y",
+                "description": "欧洲电子市场销售",
+                "start": None,
+                "end": None,
+            }
         ]
     }
     out = score_dimensions(candidate, dims)
@@ -118,7 +133,12 @@ def test_experience_years_high_tier():
             weight=25,
             method="experience_years",
             tiers=[
-                Tier(label="high", score=25, min_years=3, required_keywords=["报关", "订舱", "单证"]),
+                Tier(
+                    label="high",
+                    score=25,
+                    min_years=3,
+                    required_keywords=["报关", "订舱", "单证"],
+                ),
                 Tier(label="mid", score=12, min_years=1),
                 Tier(label="low", score=0),
             ],

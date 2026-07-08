@@ -1,3 +1,5 @@
+import inspect
+
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
@@ -26,7 +28,11 @@ async def healthz(db: AsyncSession = Depends(get_db)) -> dict:
     try:
         r = aioredis.from_url(settings.REDIS_URL)
         try:
-            pong = await r.ping()
+            ping_result = r.ping()
+            if inspect.isawaitable(ping_result):
+                pong = await ping_result
+            else:
+                pong = ping_result
         finally:
             await r.aclose()
         checks["redis"] = "ok" if pong else "fail"

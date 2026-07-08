@@ -1,6 +1,9 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from backend.app.rules.schema import RuleDimension
 
@@ -30,6 +33,4 @@ def score_dimensions(
 
 
 # Method modules: importing each runs its @register decorator → populates METHODS.
-from backend.app.scoring.methods import lookup  # noqa: F401,E402
-from backend.app.scoring.methods import tiered_keyword  # noqa: F401,E402
-from backend.app.scoring.methods import experience_years  # noqa: F401,E402
+from backend.app.scoring.methods import experience_years, lookup, tiered_keyword  # noqa: F401

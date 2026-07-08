@@ -1,4 +1,3 @@
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,7 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from backend.app.models import Candidate
-from backend.app.services.parser.extractor import ExtractedResume, Experience
+from backend.app.services.parser.extractor import Experience, ExtractedResume
 from backend.app.services.parser.mineru_client import ParseResult
 
 

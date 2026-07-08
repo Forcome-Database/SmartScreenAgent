@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.app.services.parser.extractor import ResumeExtractor, ExtractedResume
 from backend.app.services.llm.schemas import LLMResponse
+from backend.app.services.parser.extractor import ExtractedResume, ResumeExtractor
 
 SAMPLE = (Path(__file__).parents[1] / "fixtures" / "sample_resume.md").read_text(encoding="utf-8")
 

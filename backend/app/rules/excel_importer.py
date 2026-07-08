@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Literal
 
 import openpyxl
 
@@ -64,6 +65,7 @@ SHEET_LAYOUT: dict[str, SheetLayout] = {
 }
 
 JUDGE_DIM_KEYWORDS = ("独立处理", "情绪稳定", "抗压", "团队", "责任心")
+RuleMethod = Literal["tiered_keyword_match", "experience_years", "lookup"]
 
 _SPLITTER = re.compile(r"[、,，/\s]+")
 _SCORE_NUM = re.compile(r"(\d+(?:\.\d+)?)")
@@ -187,7 +189,7 @@ def _parse_grade_thresholds(
     labels = [f"L{i + 1}" for i in range(n)]
     out: list[GradeThreshold] = []
     range_pat = re.compile(r"(\d+)\s*[~～\-]\s*(\d+)")
-    for idx, (grade, col) in enumerate(zip(labels, layout.tier_cols)):
+    for grade, col in zip(labels, layout.tier_cols, strict=True):
         cell = score_row[col] if col < len(score_row) else None
         if not cell:
             continue
@@ -206,7 +208,7 @@ def _parse_grade_thresholds(
     return out
 
 
-def _pick_method(name: str, keywords: list[str]) -> str:
+def _pick_method(name: str, keywords: list[str]) -> RuleMethod:
     if "学历" in name:
         return "lookup"
     if "经验" in name or "全流程" in name:
@@ -257,7 +259,9 @@ def import_sheet(
         )
 
         tiers: list[Tier] = []
-        for idx, (col, label) in enumerate(zip(layout.tier_cols, layout.tier_labels)):
+        for idx, (col, label) in enumerate(
+            zip(layout.tier_cols, layout.tier_labels, strict=True)
+        ):
             sc = _parse_score(score_row[col]) if col < len(score_row) else None
             if sc is None:
                 continue
@@ -309,10 +313,10 @@ def import_sheet(
     total = sum(d.weight for d in rule_dims) + sum(d.weight for d in judge_dims)
     if total and abs(total - 100) > 0.5:
         factor = 100 / total
-        for d in rule_dims:
-            d.weight = round(d.weight * factor, 2)
-        for d in judge_dims:
-            d.weight = round(d.weight * factor, 2)
+        for rule_dim in rule_dims:
+            rule_dim.weight = round(rule_dim.weight * factor, 2)
+        for judge_dim in judge_dims:
+            judge_dim.weight = round(judge_dim.weight * factor, 2)
 
     return RuleSchema(
         version="v1",
