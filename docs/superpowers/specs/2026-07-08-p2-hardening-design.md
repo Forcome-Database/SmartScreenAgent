@@ -86,6 +86,22 @@ SmartScreenAgent 当前已经完成 P1 后端地基与 P2 评分闭环：
 
 这个方案比移动文件更小，避免因测试路径调整引入额外变更。
 
+MinIO 可达性判定：
+
+| 场景 | 判定 | 测试行为 |
+|---|---|---|
+| `localhost:9000` TCP 连接失败或超时 | 服务不可达 | `pytest.skip("MinIO not reachable")` |
+| 能连接，但认证失败 | 环境配置错误 | 测试失败 |
+| 能连接，但 bucket 操作失败 | 服务行为异常 | 测试失败 |
+| 能连接，`ensure_bucket()` 成功 | 服务可用 | 继续执行 put/get/presigned URL 测试 |
+
+实现粒度：
+
+- 在 `backend/tests/unit/test_minio_client.py` 内部增加模块级或 fixture 级可达性检查。
+- 连接超时控制在 1-2 秒，避免未启动容器时测试长时间卡住。
+- 不复用 integration 目录的 PostgreSQL session fixture，MinIO 测试只关心 MinIO。
+- `uv run pytest -m integration` 在只缺 MinIO 时跳过 MinIO 用例；在 MinIO 已启动但行为异常时失败。
+
 ### 3. MinerU 契约加固
 
 `MinerUClient` 当前已按调研结论选择 HTTP 服务模式，但代码注释仍标记 `/file_parse` response schema 需要运行时验证。
@@ -96,6 +112,40 @@ SmartScreenAgent 当前已经完成 P1 后端地基与 P2 评分闭环：
 - 对 `{markdown, layout}`、常见嵌套字段或缺失字段给出明确处理策略。
 - 响应无法解析时在系统边界抛出清晰错误，包含足够定位信息，但不泄露文件内容。
 - 单元测试覆盖成功响应和无效响应。
+
+响应契约：
+
+| HTTP body 形状 | 解析结果 | 说明 |
+|---|---|---|
+| `{"markdown": "...", "layout": {...}}` | `ParseResult(markdown=body["markdown"], layout=body.get("layout", {}), source="http")` | 当前客户端已有的最小契约 |
+| `{"data": {"markdown": "...", "layout": {...}}}` | 读取 `data` 内字段 | 兼容常见 API 包装 |
+| `{"result": {"markdown": "...", "layout": {...}}}` | 读取 `result` 内字段 | 兼容任务式返回包装 |
+| `{"md_content": "...", "layout": {...}}` | `markdown=body["md_content"]` | 兼容 Markdown 字段别名 |
+| `{"data": {"md_content": "...", "layout": {...}}}` | 读取 `data.md_content` | 兼容包装后的字段别名 |
+
+字段规则：
+
+- `markdown` 优先于 `md_content`。
+- `layout` 必须是 object；缺失时使用 `{}`；若不是 object，则视为无效响应。
+- `markdown` 必须是非空字符串；空字符串、空白字符串或非字符串都视为无效响应。
+- 最终只向上层返回 `ParseResult(markdown: str, layout: dict, source: "http")`。
+
+失败契约：
+
+| 失败类型 | 异常 | 信息边界 |
+|---|---|---|
+| HTTP 连接、超时、非 2xx 状态 | `MinerUParseError`，保留原异常为 `__cause__` | 包含模式、URL、状态码或异常类型；不包含文件内容 |
+| JSON 解析失败 | `MinerUParseError` | 包含 `invalid json response`，不输出完整 body |
+| 响应缺少可用 Markdown | `MinerUParseError` | 包含 `missing markdown` |
+| `layout` 类型非法 | `MinerUParseError` | 包含 `invalid layout` |
+| `MINERU_MODE` 不支持 | `NotImplementedError` | 保持现有行为 |
+
+API 映射：
+
+- `MinerUClient` 只负责抛出 `MinerUParseError`，不依赖 FastAPI。
+- `run_parse_and_score` 不吞掉该异常，保持业务流程单一。
+- `upload_resume` 作为 HTTP 边界捕获 `MinerUParseError`，返回 `502 Bad Gateway`，`detail` 使用固定文本 `Resume parser failed`，避免把内部 URL、文件名或外部响应暴露给调用方。
+- 单元测试覆盖 `MinerUClient`；API 映射由 candidates API 测试覆盖。
 
 暂不做：
 
