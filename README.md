@@ -45,6 +45,29 @@ uv run pytest -m "not integration"  # 仅单元
 
 注：本机若 `localhost` 被劫持到其他服务，所有 curl 用 `127.0.0.1`。
 
+## 开发验证
+
+```bash
+# 不依赖外部容器的测试
+uv run pytest -m "not integration"
+
+# 启动 PostgreSQL / Redis / MinIO
+docker compose up -d
+docker compose ps
+
+# 集成测试与全量测试
+uv run pytest -m integration
+uv run pytest
+
+# 质量门禁
+uv run ruff check backend
+uv run mypy --explicit-package-bases backend/app --ignore-missing-imports
+```
+
+`MINERU_MODE=stub` 用于本地离线开发；`MINERU_MODE=http` 用于对接独立 `mineru-api` 服务。`library` 模式仍未实现。
+
+P2 的候选人上传和评分 API 尚未强制 JWT/RBAC，不能直接公网部署。
+
 ## 设计文档
 
 - 设计稿：`docs/specs/2026-05-12-resume-screening-agent-design.md`
