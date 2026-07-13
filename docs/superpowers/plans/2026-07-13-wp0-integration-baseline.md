@@ -432,15 +432,17 @@ git commit -m "test: fail strict integration runs on missing services"
 Create `docker-compose.test.yml`:
 
 ```yaml
+name: smartscreenagent-wp0-test
+
 services:
   postgres:
-    image: pgvector/pgvector@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
+    image: pgvector/pgvector:pg16@sha256:131dcf7ff6a900545df8e7e092c270aa8c6db2f2c818e408cb45ec21316b74e6
     environment:
       POSTGRES_USER: smartscreen
       POSTGRES_PASSWORD: smartscreen
       POSTGRES_DB: smartscreen_test
     ports:
-      - "55433:5432"
+      - "127.0.0.1:55433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U smartscreen -d smartscreen_test"]
       interval: 2s
@@ -450,24 +452,27 @@ services:
       - /var/lib/postgresql/data
 
   redis:
-    image: redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
-      - "56379:6379"
+      - "127.0.0.1:56379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 3s
       retries: 20
+    tmpfs:
+      - /data
 
   minio:
-    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: smartscreen-test
       MINIO_ROOT_PASSWORD: smartscreen-test-secret
     ports:
-      - "59000:9000"
-      - "59001:9001"
+      - "127.0.0.1:59000:9000"
+      - "127.0.0.1:59001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 2s
@@ -477,7 +482,7 @@ services:
       - /data
 ```
 
-The test stack intentionally does not mount `infra/postgres/init.sql`: the migration creates the `vector` extension and the current application does not require `pg_trgm`.
+The explicit `smartscreenagent-wp0-test` project name keeps test resources distinct from the development Compose project. Fixed host ports make concurrent WP0 stack runs intentionally unsupported. The test stack intentionally does not mount `infra/postgres/init.sql`: the migration creates the `vector` extension and the current application does not require `pg_trgm`.
 
 - [ ] **Step 2: Validate Compose syntax**
 
@@ -485,9 +490,10 @@ Run:
 
 ```bash
 docker compose -f docker-compose.test.yml config --quiet
+docker compose -f docker-compose.test.yml config --format json
 ```
 
-Expected: exit code 0 with no output.
+Expected: the quiet validation exits 0 with no output. The normalized config reports project name `smartscreenagent-wp0-test`, loopback-only bindings for all four published ports, tmpfs storage for PostgreSQL, Redis, and MinIO, and Redis persistence disabled by its command.
 
 - [ ] **Step 3: Start services and verify health**
 
@@ -498,7 +504,7 @@ docker compose -f docker-compose.test.yml up -d --wait
 docker compose -f docker-compose.test.yml ps
 ```
 
-Expected: PostgreSQL, Redis, and MinIO report healthy; host ports are 55433, 56379, and 59000/59001.
+Expected: PostgreSQL, Redis, and MinIO report healthy under project `smartscreenagent-wp0-test`; loopback host ports are 55433, 56379, and 59000/59001.
 
 - [ ] **Step 4: Stop and remove the disposable stack**
 
@@ -508,7 +514,7 @@ Run:
 docker compose -f docker-compose.test.yml down -v --remove-orphans
 ```
 
-Expected: all WP0 test containers and anonymous volumes are removed; development services in `docker-compose.yml` are untouched.
+Expected: all `smartscreenagent-wp0-test` containers, tmpfs mounts, and project-specific resources are removed; development services in `docker-compose.yml` are untouched.
 
 - [ ] **Step 5: Commit the test stack**
 
