@@ -9,6 +9,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
+from backend.tests.integration.runtime import require_service, strict_exit_status
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -48,11 +50,7 @@ def _db_reachable() -> bool:
 @pytest.fixture(scope="session", autouse=True)
 def _apply_migrations():
     """Run `alembic upgrade head` once per session; skip session if DB unreachable."""
-    if not _db_reachable():
-        pytest.skip(
-            "PostgreSQL not reachable; skipping integration tests",
-            allow_module_level=False,
-        )
+    require_service("PostgreSQL", reachable=_db_reachable())
     result = subprocess.run(
         ["uv", "run", "alembic", "upgrade", "head"],
         cwd=str(REPO_ROOT),
@@ -63,6 +61,15 @@ def _apply_migrations():
     if result.returncode != 0:
         pytest.fail(f"alembic upgrade head failed:\n{result.stderr}\n{result.stdout}")
     yield
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    skipped_count = len(reporter.stats.get("skipped", [])) if reporter else 0
+    session.exitstatus = strict_exit_status(
+        current_status=exitstatus,
+        skipped_count=skipped_count,
+    )
 
 
 # Children before parents — FK-safe TRUNCATE order.
