@@ -1045,9 +1045,7 @@ jobs:
 
 GitHub Actions is the initial hosted runner because the repository has no existing CI provider. The authoritative entry point remains `scripts/verify.py`, so another provider can invoke the same command without changing test semantics. The integration job intentionally runs the complete verifier for local/CI parity; an integration-only runner is not introduced at this stage.
 
-- [ ] **Step 2: Validate workflow syntax and local parity**
-
-> **Blocked:** no GitHub remote/run URL. Local syntax and parity checks passed, but hosted workflow success remains required.
+- [x] **Step 2: Validate workflow syntax and local parity**
 
 Run:
 
@@ -1063,7 +1061,13 @@ git diff --check
 
 Expected: uv reports 0.9.6, dependency sync is locked, non-integration tests and static checks pass, and Git reports no whitespace errors. Workflow structure validation confirms the concurrency policy, job timeouts, disabled credential persistence, and pinned uv version. Hosted workflow success remains required once a GitHub remote exists.
 
-- [x] **Step 3: Commit the workflow**
+- [ ] **Step 3: Run hosted workflow and record evidence**
+
+> **Blocked:** No GitHub remote is configured.
+
+Next action: obtain and configure the approved GitHub origin, push `codex/wp0-integration-baseline`, open a pull request, wait for the `verify` workflow, record the successful run URL, complete Task 8 Step 3, and only then mark WP0 `Complete` and WP1 `Ready` if the hosted workflow is green.
+
+- [x] **Step 4: Commit the workflow**
 
 ```bash
 git add pyproject.toml .github/workflows/verify.yml docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md

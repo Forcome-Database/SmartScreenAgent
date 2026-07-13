@@ -4,7 +4,7 @@ AI-driven resume screening agent for HR.
 
 ## 状态
 
-当前处于“后端评分原型已完成、生产化加固待开始”阶段。
+当前处于“后端评分原型已完成、生产化加固进行中”阶段。
 
 当前正在执行 **WP0 可重复集成基线**；本地验证已通过，仍等待托管 GitHub Actions 成功。WP0 完成后再依次处理鉴权与原文件持久化、真实 MinerU 契约和异步任务。
 
@@ -99,8 +99,8 @@ backend/
 │   ├── security/            # JWT + PII (Fernet) crypto
 │   └── tasks/               # Celery app
 └── tests/
-    ├── unit/                # ~24 tests
-    └── integration/         # ~2 tests (alembic, smoke)
+    ├── unit/                # deterministic unit tests
+    └── integration/         # real-service integration tests
 ```
 
 ## P1 已就绪能力

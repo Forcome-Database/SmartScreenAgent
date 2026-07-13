@@ -48,14 +48,10 @@ These results establish a healthy unit-level baseline. They do not prove that da
 
 On branch `codex/wp0-integration-baseline` at pre-documentation commit `3710446`, the locked local verification path produced:
 
-- `uv sync --extra dev --locked`: passed with uv 0.9.6 (92 packages resolved, 85 audited).
-- `uv run python scripts/verify.py`: 99 non-integration tests passed with 16 deselected; 16 integration tests passed with 99 deselected and zero skips.
-- Alembic upgraded the disposable PostgreSQL database to revision `3884ec28fea9`; the migration round trip, real MinIO read/write/presign checks, Redis-backed Celery ping, and FastAPI integration checks passed.
-- `uv run ruff check backend`: passed.
-- `uv run mypy --explicit-package-bases backend/app --ignore-missing-imports`: passed for 54 source files.
-- Post-run clean-state checks passed for Alembic, temporary PostgreSQL databases, WP0 Redis keys, and MinIO objects. The isolated Compose project was absent afterward, and the seven unrelated containers observed before the run were unchanged.
+- `uv sync --extra dev --locked` and `uv run python scripts/verify.py` passed: 99 non-integration tests and 16 integration tests completed with zero skips.
+- Ruff, mypy, the real migration round trip, MinIO, Redis/Celery, and post-run clean-state checks passed.
 
-This is local evidence only. The repository has no configured Git remote, so no hosted GitHub Actions run or run URL exists. WP0 therefore remains in progress, and WP1 remains blocked on WP0.
+Exact local environment, timing, cleanup, and commit-range evidence is recorded in the [active WP0 plan](../plans/2026-07-13-wp0-integration-baseline.md#local-execution-evidence). This is local evidence only: the repository has no configured Git remote, so no hosted GitHub Actions run or run URL exists. WP0 therefore remains in progress, and WP1 remains blocked on WP0.
 
 ## 4. Implemented System
 
@@ -124,9 +120,9 @@ Status values:
 | Capability | Historical intent | Code | Test evidence | Status |
 |---|---|---|---|---|
 | FastAPI service and health | P1 foundation | Implemented | Unit/integration tests exist | Implemented |
-| PostgreSQL schema and migrations | P1 foundation | Nine business tables and baseline migration | Integration tests skip without DB | Partial |
+| PostgreSQL schema and migrations | P1 foundation | Nine business tables and baseline migration | Direct non-strict selection may skip without a database; the strict WP0 verifier passed a real migration round trip | Partial |
 | PII field encryption and dedupe | Product design section 11 | Fernet fields and SHA-256 dedupe | Unit tests pass | Implemented |
-| MinIO private resume storage | Product design section 11.1 | Client exists; upload flow does not use it | Client integration tests only | Defective |
+| MinIO private resume storage | Product design section 11.1 | Client exists; upload flow does not use it | Strict real-client integration passed; the upload flow still does not persist original files | Defective |
 | DingTalk login | P1 foundation | OAuth exchange, user upsert, JWT issue | OAuth/JWT unit tests | Partial |
 | JWT/RBAC on write APIs | Product design section 11.3 and 2026-07-08 JWT/RBAC design | Dependencies exist but candidate routes do not use them | No dependency coverage | Designed |
 | Excel rule import | P2 scoring plan | Six sheets, two layouts, CLI persistence | Unit and integration tests | Implemented |
@@ -134,7 +130,7 @@ Status values:
 | Resume extraction | P2 scoring plan | LLM JSON extraction with one retry | Unit tests with mock gateway | Partial |
 | Three-stage scoring | P2 scoring plan | Hard filter, deterministic rules, LLM judge | Unit and DB integration tests | Implemented |
 | Evidence-backed scoring | Product design core value | Evidence fields are requested but not validated against source text | Mocked judge tests | Partial |
-| Candidate upload API | P2 scoring plan | Synchronous endpoint | Integration tests skip without DB | Partial |
+| Candidate upload API | P2 scoring plan | Synchronous endpoint | Strict DB-backed integration passed with controlled MinerU/LLM fakes; production auth, storage, and external contracts remain incomplete | Partial |
 | Candidate query API | P2 Task 14 title promised upload, score, and query | No query route | None | Absent |
 | Batch upload and async status | Original W5 | Celery entry point only | Task orchestration test exists | Partial |
 | Candidate list and scorecard | Original W3-W5 | No API or UI | None | Absent |
@@ -449,16 +445,11 @@ The following remain later extensions:
 ## 11. Dependency Graph
 
 ```text
-WP0
- -> WP1
-     -> WP2
-         -> WP3
-             -> WP4
-                 -> WP5
-                 -> WP6
-                     -> WP7
-             -> WP8
-                     -> WP9 (also requires WP6 + WP7 data)
+WP0 -> WP1 -> WP2 -> WP3 -> WP4 -> WP5 -> WP6 -> WP7
+WP3 -> WP8
+WP4 -> WP8
+WP6 -> WP9
+WP7 -> WP9
 ```
 
 WP4 design may begin while WP3 is being implemented, but its final schemas must use the job states finalized by WP3. WP5 visual design may begin before WP4 is complete, but implementation must not invent backend contracts.
