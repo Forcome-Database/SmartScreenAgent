@@ -1,35 +1,28 @@
 from pathlib import Path
 
-import pytest
-
 from backend.app.rules.excel_importer import (
     JD_CODE_BY_SHEET,
     import_workbook,
 )
 from backend.app.rules.schema import RuleSchema
 
-XLSX = Path(__file__).parents[3] / "招聘JD整理-智能筛简历.xlsx"
 
-
-@pytest.mark.skipif(not XLSX.exists(), reason="HR rule workbook not present")
-def test_imports_all_six_position_sheets():
-    rules = import_workbook(XLSX)
+def test_imports_all_six_position_sheets(rules_workbook: Path) -> None:
+    rules = import_workbook(rules_workbook)
     sheet_jd_codes = {r.jd_code for r in rules}
     assert sheet_jd_codes == set(JD_CODE_BY_SHEET.values())
 
 
-@pytest.mark.skipif(not XLSX.exists(), reason="HR rule workbook not present")
-def test_foreign_trade_rule_has_age_hard_filter():
-    rules = {r.jd_code: r for r in import_workbook(XLSX)}
+def test_foreign_trade_rule_has_age_hard_filter(rules_workbook: Path) -> None:
+    rules = {r.jd_code: r for r in import_workbook(rules_workbook)}
     ft = rules["FOREIGN_TRADE"]
     age_filters = [h for h in ft.hard_filters if h.audit_tag == "AGE"]
     assert len(age_filters) == 1
     assert "45" in age_filters[0].rule
 
 
-@pytest.mark.skipif(not XLSX.exists(), reason="HR rule workbook not present")
-def test_each_rule_validates_against_schema():
-    for rule in import_workbook(XLSX):
+def test_each_rule_validates_against_schema(rules_workbook: Path) -> None:
+    for rule in import_workbook(rules_workbook):
         RuleSchema.model_validate(rule.model_dump())
 
 

@@ -4,13 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-XLSX = Path(__file__).parents[3] / "招聘JD整理-智能筛简历.xlsx"
-
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.skipif(not XLSX.exists(), reason="xlsx missing")
-async def test_full_p2_flow(client, db_session, monkeypatch):
+async def test_full_p2_flow(client, db_session, monkeypatch, rules_workbook: Path):
     """E2E happy path: import rules → upload resume → score → expect positive total + grade."""
     from datetime import datetime, timezone
 
@@ -56,7 +53,7 @@ async def test_full_p2_flow(client, db_session, monkeypatch):
     )
 
     # 1. Import Excel → direct DB insert (bypass CLI)
-    rules = import_workbook(XLSX)
+    rules = import_workbook(rules_workbook)
     ft = next(r for r in rules if r.jd_code == "FOREIGN_TRADE")
     jd = JD(code="FOREIGN_TRADE", name="外贸业务", description="", status="active")
     db_session.add(jd)
@@ -92,8 +89,9 @@ async def test_full_p2_flow(client, db_session, monkeypatch):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.skipif(not XLSX.exists(), reason="xlsx missing")
-async def test_p2_hard_filter_rejection(client, db_session, monkeypatch):
+async def test_p2_hard_filter_rejection(
+    client, db_session, monkeypatch, rules_workbook: Path
+):
     """Same happy path but candidate age=60, should trigger AGE hard filter rejection."""
     from datetime import datetime, timezone
 
@@ -129,7 +127,7 @@ async def test_p2_hard_filter_rejection(client, db_session, monkeypatch):
         ),
     )
 
-    rules = import_workbook(XLSX)
+    rules = import_workbook(rules_workbook)
     ft = next(r for r in rules if r.jd_code == "FOREIGN_TRADE")
     jd = JD(code="FOREIGN_TRADE", name="外贸业务", description="", status="active")
     db_session.add(jd)

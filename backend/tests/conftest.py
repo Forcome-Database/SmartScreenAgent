@@ -4,7 +4,16 @@ from backend.tests.test_bootstrap import apply_test_environment
 
 apply_test_environment(os.environ)
 
+from pathlib import Path
+
 import pytest
+
+from backend.tests.fixtures.rule_workbook import build_rule_workbook
+
+
+@pytest.fixture
+def rules_workbook(tmp_path: Path) -> Path:
+    return build_rule_workbook(tmp_path / "rules.xlsx")
 
 
 @pytest.fixture(autouse=True)
