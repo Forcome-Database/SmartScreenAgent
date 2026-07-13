@@ -141,12 +141,14 @@ def main(
     state_checker = clean_state_checker or assert_clean_state
     env = os.environ.copy()
     env.update(TEST_ENV)
+    cleanup_required = False
     verification_succeeded = False
     exit_code = 0
 
     try:
         command_runner([*COMPOSE, "config", "--quiet"], env=env)
         command_runner([*COMPOSE, "down", "-v", "--remove-orphans"], env=env)
+        cleanup_required = True
         command_runner([*COMPOSE, "up", "-d", "--wait"], env=env)
         command_runner([sys.executable, "-m", "alembic", "upgrade", "head"], env=env)
         command_runner(
@@ -180,7 +182,7 @@ def main(
         print(f"verification failed: {exc}", file=sys.stderr)
         exit_code = 1
     finally:
-        if not (verification_succeeded and args.keep_services):
+        if cleanup_required and (not verification_succeeded or not args.keep_services):
             try:
                 command_runner(
                     [*COMPOSE, "down", "-v", "--remove-orphans"],

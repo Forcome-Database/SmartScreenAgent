@@ -42,13 +42,37 @@ def _commands(runner: RecordingRunner) -> list[list[str]]:
     return [command for command, _env, _capture_output in runner.calls]
 
 
+def test_config_failure_does_not_attempt_cleanup() -> None:
+    runner = RecordingRunner(lambda command: command[-2:] == ["config", "--quiet"])
+
+    result = verify.main([], runner=runner, clean_state_checker=lambda _output, _env: None)
+
+    assert result == 1
+    assert _commands(runner) == [[*verify.COMPOSE, "config", "--quiet"]]
+
+
+def test_proactive_down_failure_does_not_attempt_second_cleanup() -> None:
+    down = [*verify.COMPOSE, "down", "-v", "--remove-orphans"]
+    runner = RecordingRunner(lambda command: command == down)
+
+    result = verify.main([], runner=runner, clean_state_checker=lambda _output, _env: None)
+
+    assert result == 1
+    assert _commands(runner) == [[*verify.COMPOSE, "config", "--quiet"], down]
+
+
 def test_partial_up_failure_triggers_down_and_returns_one() -> None:
     runner = RecordingRunner(lambda command: command[-3:] == ["up", "-d", "--wait"])
 
     result = verify.main([], runner=runner, clean_state_checker=lambda _output, _env: None)
 
     assert result == 1
-    assert _commands(runner)[-1] == [*verify.COMPOSE, "down", "-v", "--remove-orphans"]
+    assert _commands(runner) == [
+        [*verify.COMPOSE, "config", "--quiet"],
+        [*verify.COMPOSE, "down", "-v", "--remove-orphans"],
+        [*verify.COMPOSE, "up", "-d", "--wait"],
+        [*verify.COMPOSE, "down", "-v", "--remove-orphans"],
+    ]
 
 
 def test_direct_script_help_succeeds_without_running_docker() -> None:
@@ -196,12 +220,14 @@ def test_head_revision_assertion_remains_active_in_optimized_python() -> None:
 
 
 @pytest.mark.asyncio
-async def test_postgres_assertion_closes_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_postgres_assertion_failure_closes_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class Connection:
         closed = False
 
         async def fetch(self, _query: str, _pattern: str) -> list[Any]:
-            return []
+            return [{"datname": "smartscreen_migration_leftover"}]
 
         async def close(self) -> None:
             self.closed = True
@@ -213,7 +239,8 @@ async def test_postgres_assertion_closes_connection(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(verify.asyncpg, "connect", connect)
 
-    await verify.assert_no_migration_databases(verify.TEST_ENV)
+    with pytest.raises(AssertionError, match="smartscreen_migration_leftover"):
+        await verify.assert_no_migration_databases(verify.TEST_ENV)
 
     assert connection.closed
 

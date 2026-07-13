@@ -851,6 +851,8 @@ git commit -m "test: isolate migration and celery integration state"
 Create `backend/tests/unit/test_verify_script.py` with a recording command runner and no
 real Docker or network calls. Cover at least:
 
+- Compose config failure returns 1 without attempting teardown;
+- proactive Compose teardown failure returns 1 without a second teardown attempt;
 - partial `docker compose up -d --wait` failure still runs teardown and returns 1;
 - successful verification runs teardown and returns 0;
 - `--keep-services` suppresses only the final teardown after full success;
@@ -899,8 +901,11 @@ nor any WP0 result-prefix key, and the MinIO test bucket has no objects. Use
 `TEST_ENV_DEFAULTS` and the existing integration isolation constants/helpers. Close every client.
 
 Catch `OSError`, `subprocess.CalledProcessError`, and clean-state assertion failures, print a
-concise error, and return 1. Unless verification fully succeeds with `--keep-services`, execute
-checked Compose teardown. A failed run always tears down; a teardown failure always returns 1.
+concise error, and return 1. Keep cleanup disabled through Compose validation and proactive
+teardown, then set `cleanup_required = True` immediately before invoking Compose `up`. Once that
+marker is set, execute checked teardown after every failure and after normal success unless
+`--keep-services` was requested. Config/proactive-teardown failures do not run a redundant final
+teardown; partial startup failures do. A teardown failure always returns 1.
 
 Run:
 
