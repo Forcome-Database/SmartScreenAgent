@@ -16,12 +16,38 @@ TEST_ENV_DEFAULTS = {
     "LLM_MODEL_JUDGE": "test-judge",
     "LLM_MODEL_JUDGE_FALLBACK": "test-judge-fallback",
     "LLM_MODEL_LIGHT": "test-light",
+    "DINGTALK_APP_KEY": "",
+    "DINGTALK_APP_SECRET": "",
+    "DINGTALK_CORP_ID": "",
     "JWT_SECRET_KEY": "test-secret-do-not-use-in-production",
+    "JWT_ALGORITHM": "HS256",
+    "JWT_EXPIRE_HOURS": "8",
     "PII_ENCRYPTION_KEY": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    "DAILY_LLM_BUDGET_CNY": "100",
+    "MONTHLY_LLM_BUDGET_CNY": "1500",
     "MINERU_MODE": "stub",
+    "MINERU_BASE_URL": "",
+    "MINERU_API_KEY": "",
+    "CORS_ORIGINS": "http://localhost:3000",
 }
+
+TEST_INFRA_OVERRIDE_KEYS = frozenset(
+    {
+        "DATABASE_URL",
+        "DATABASE_URL_SYNC",
+        "REDIS_URL",
+        "MINIO_ENDPOINT",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+        "MINIO_BUCKET",
+        "MINIO_SECURE",
+    }
+)
 
 
 def apply_test_environment(environ: MutableMapping[str, str]) -> None:
     for key, value in TEST_ENV_DEFAULTS.items():
-        environ.setdefault(key, value)
+        if key in TEST_INFRA_OVERRIDE_KEYS:
+            environ.setdefault(key, value)
+        else:
+            environ[key] = value

@@ -46,9 +46,9 @@ These results establish a healthy unit-level baseline. They do not prove that da
 
 ### 3.1 WP0 local verification evidence (2026-07-13)
 
-On branch `codex/wp0-integration-baseline` at pre-documentation commit `3710446`, the locked local verification path produced:
+On branch `codex/wp0-integration-baseline`, the locked local verification path produced:
 
-- `uv sync --extra dev --locked` and `uv run python scripts/verify.py` passed: 99 non-integration tests and 16 integration tests completed with zero skips.
+- `uv sync --extra dev --locked` and `uv run python scripts/verify.py` passed: 102 non-integration tests and 16 integration tests completed with zero skips.
 - Ruff, mypy, the real migration round trip, MinIO, Redis/Celery, and post-run clean-state checks passed.
 
 Exact local environment, timing, cleanup, and commit-range evidence is recorded in the [active WP0 plan](../plans/2026-07-13-wp0-integration-baseline.md#local-execution-evidence). This is local evidence only: the repository has no configured Git remote, so no hosted GitHub Actions run or run URL exists. WP0 therefore remains in progress, and WP1 remains blocked on WP0.

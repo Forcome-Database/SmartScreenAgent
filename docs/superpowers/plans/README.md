@@ -28,7 +28,7 @@ Historical plans may contain unchecked boxes even when their work was committed.
 
 ## Current Evidence and Blocker
 
-On 2026-07-13, the strict local WP0 gate passed 99 non-integration tests and 16 integration tests with zero skips, plus static, migration, and clean-state checks. Exact results are recorded in the [active WP0 plan](2026-07-13-wp0-integration-baseline.md#local-execution-evidence). The repository has no configured Git remote or hosted run URL, so WP0 remains in progress and WP1 remains blocked until the hosted workflow succeeds.
+On 2026-07-13, the strict local WP0 gate passed 102 non-integration tests and 16 integration tests with zero skips, plus static, migration, and clean-state checks. Exact results are recorded in the [active WP0 plan](2026-07-13-wp0-integration-baseline.md#local-execution-evidence). The repository has no configured Git remote or hosted run URL, so WP0 remains in progress and WP1 remains blocked until the hosted workflow succeeds.
 
 ## Planning Rules
 

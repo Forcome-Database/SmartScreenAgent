@@ -196,6 +196,21 @@ def test_developer_environment_is_overwritten(monkeypatch: pytest.MonkeyPatch) -
     assert child_env["SMARTSCREEN_REQUIRE_INTEGRATION"] == "1"
 
 
+def test_hostile_behavior_settings_are_overwritten(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = RecordingRunner()
+    monkeypatch.setenv("JWT_ALGORITHM", "RS256")
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("CORS_ORIGINS", "https://hostile.example")
+
+    result = verify.main([], runner=runner, clean_state_checker=lambda _output, _env: None)
+
+    assert result == 0
+    child_env = runner.calls[0][1]
+    assert child_env["JWT_ALGORITHM"] == "HS256"
+    assert child_env["MINERU_MODE"] == "stub"
+    assert child_env["CORS_ORIGINS"] == "http://localhost:3000"
+
+
 def test_hostile_compose_project_name_is_overwritten_and_pinned_on_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

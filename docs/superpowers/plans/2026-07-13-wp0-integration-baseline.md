@@ -60,19 +60,22 @@
 - Create: `backend/tests/unit/test_test_bootstrap.py`
 - Modify: `backend/tests/conftest.py`
 
-- [x] **Step 1: Write tests for defaults and explicit overrides**
+- [x] **Step 1: Write tests for complete defaults, explicit infrastructure overrides, and behavior isolation**
 
 Create `backend/tests/unit/test_test_bootstrap.py`:
 
 ```python
+from backend.app.config import Settings
 from backend.tests.test_bootstrap import TEST_ENV_DEFAULTS, apply_test_environment
+
+
+def test_defaults_cover_every_settings_field() -> None:
+    assert set(TEST_ENV_DEFAULTS) == set(Settings.model_fields)
 
 
 def test_apply_test_environment_populates_missing_values() -> None:
     environ: dict[str, str] = {}
-
     apply_test_environment(environ)
-
     assert environ == TEST_ENV_DEFAULTS
 
 
@@ -81,12 +84,24 @@ def test_apply_test_environment_preserves_explicit_ci_values() -> None:
         "DATABASE_URL": "postgresql+asyncpg://ci:ci@postgres:5432/ci",
         "REDIS_URL": "redis://redis:6379/1",
     }
-
     apply_test_environment(environ)
-
     assert environ["DATABASE_URL"] == "postgresql+asyncpg://ci:ci@postgres:5432/ci"
     assert environ["REDIS_URL"] == "redis://redis:6379/1"
     assert environ["MINIO_ENDPOINT"] == TEST_ENV_DEFAULTS["MINIO_ENDPOINT"]
+
+
+def test_apply_test_environment_overwrites_behavior_settings() -> None:
+    environ = {
+        "JWT_ALGORITHM": "RS256",
+        "MINERU_MODE": "http",
+        "CORS_ORIGINS": "https://hostile.example",
+    }
+
+    apply_test_environment(environ)
+
+    assert environ["JWT_ALGORITHM"] == "HS256"
+    assert environ["MINERU_MODE"] == "stub"
+    assert environ["CORS_ORIGINS"] == "http://localhost:3000"
 ```
 
 - [x] **Step 2: Run the new test and verify it fails**
@@ -97,7 +112,10 @@ Run:
 uv run pytest backend/tests/unit/test_test_bootstrap.py -v
 ```
 
-Expected: collection fails with `ModuleNotFoundError: No module named 'backend.tests.test_bootstrap'`.
+Expected: initial collection fails with `ModuleNotFoundError: No module named
+'backend.tests.test_bootstrap'`. During deterministic-settings review, the added completeness and
+hostile-environment tests fail because ten `Settings` fields are absent and inherited behavior
+settings survive unchanged.
 
 - [x] **Step 3: Implement the test environment bootstrap**
 
@@ -122,16 +140,46 @@ TEST_ENV_DEFAULTS = {
     "LLM_MODEL_JUDGE": "test-judge",
     "LLM_MODEL_JUDGE_FALLBACK": "test-judge-fallback",
     "LLM_MODEL_LIGHT": "test-light",
+    "DINGTALK_APP_KEY": "",
+    "DINGTALK_APP_SECRET": "",
+    "DINGTALK_CORP_ID": "",
     "JWT_SECRET_KEY": "test-secret-do-not-use-in-production",
+    "JWT_ALGORITHM": "HS256",
+    "JWT_EXPIRE_HOURS": "8",
     "PII_ENCRYPTION_KEY": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    "DAILY_LLM_BUDGET_CNY": "100",
+    "MONTHLY_LLM_BUDGET_CNY": "1500",
     "MINERU_MODE": "stub",
+    "MINERU_BASE_URL": "",
+    "MINERU_API_KEY": "",
+    "CORS_ORIGINS": "http://localhost:3000",
 }
+
+TEST_INFRA_OVERRIDE_KEYS = frozenset(
+    {
+        "DATABASE_URL",
+        "DATABASE_URL_SYNC",
+        "REDIS_URL",
+        "MINIO_ENDPOINT",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+        "MINIO_BUCKET",
+        "MINIO_SECURE",
+    }
+)
 
 
 def apply_test_environment(environ: MutableMapping[str, str]) -> None:
     for key, value in TEST_ENV_DEFAULTS.items():
-        environ.setdefault(key, value)
+        if key in TEST_INFRA_OVERRIDE_KEYS:
+            environ.setdefault(key, value)
+        else:
+            environ[key] = value
 ```
+
+`TEST_ENV_DEFAULTS` must match `Settings.model_fields` exactly. Explicit CI values may override only
+the eight infrastructure endpoint/credential keys; all application behavior settings are forced to
+deterministic test values so inherited shell or developer `.env` values cannot affect collection.
 
 Replace the environment-loading block at the top of `backend/tests/conftest.py` with:
 
@@ -154,7 +202,7 @@ uv run pytest backend/tests/unit/test_test_bootstrap.py -v
 uv run pytest -m "not integration" -q
 ```
 
-Expected: 2 bootstrap tests pass and all existing non-integration tests pass without reading repository `.env` values.
+Expected: 4 bootstrap tests pass and all existing non-integration tests pass without reading repository `.env` values or inheriting application behavior settings.
 
 - [x] **Step 5: Commit the deterministic bootstrap**
 
@@ -859,7 +907,10 @@ real Docker or network calls. Cover at least:
 - successful verification runs teardown and returns 0;
 - `--keep-services` suppresses only the final teardown after full success;
 - teardown failure forces exit 1;
-- developer environment values are overwritten by the deterministic test environment;
+- developer behavior settings are overwritten by the complete deterministic test environment;
+- explicit CI infrastructure endpoints and credentials remain supported by the root test bootstrap;
+- hostile inherited `JWT_ALGORITHM`, `MINERU_MODE`, and `CORS_ORIGINS` values are overwritten in
+  every verification-runner child process;
 - hostile inherited Compose project names are overwritten in the child environment and cannot
   override the explicit safe project name on any Compose command;
 - the exact gate order uses `sys.executable -m`, with post-gate clean-state assertions;
@@ -898,8 +949,9 @@ TEST_ENV = {
 }
 ```
 
-Copy the parent environment and overwrite it with `TEST_ENV`; never allow developer values to
-redirect this disposable gate. Pin the Compose identity at command-line precedence and use the
+Copy the parent environment and overwrite it with `TEST_ENV`, whose defaults cover every
+`Settings.model_fields` entry; never allow developer behavior values to redirect this disposable
+gate. Pin the Compose identity at command-line precedence and use the
 absolute Compose file/project directory so the caller's working directory and Compose environment
 cannot change the target project. Accept an injectable command runner and clean-state checker for
 unit tests. Parse arguments before any Docker command so `--help` is mutation-free.
@@ -1115,7 +1167,7 @@ git status --short --branch
 
 Expected:
 
-- 99 non-integration tests pass.
+- 102 non-integration tests pass.
 - All 16 integration tests execute and pass with zero skips.
 - PostgreSQL migration downgrade/upgrade succeeds.
 - MinIO read/write/presign and Celery ping succeed.
@@ -1150,10 +1202,11 @@ git commit -m "docs: record WP0 local verification status"
 ## Local Execution Evidence
 
 - Branch: `codex/wp0-integration-baseline`.
-- Implementation range: `cc73f19..3710446`; `3710446` is the pre-documentation head.
+- Prior implementation range: `cc73f19..3710446`; the deterministic-settings hardening and this
+  refreshed local evidence are recorded together in the current focused change.
 - Local environment: Windows (`win32`), Python 3.11.7, uv 0.9.6, Docker Compose v2.40.2-desktop.1.
 - `uv sync --extra dev --locked`: passed; 92 packages resolved and 85 audited.
-- `uv run python scripts/verify.py`: 99 non-integration tests passed with 16 deselected in 13.42s; 16 integration tests passed with 99 deselected and zero skips in 12.24s.
+- `uv run python scripts/verify.py` under hostile inherited `JWT_ALGORITHM=RS256`, `MINERU_MODE=http`, and `CORS_ORIGINS=https://hostile.example`: 102 non-integration tests passed with 16 deselected in 14.47s; 16 integration tests passed with 102 deselected and zero skips in 12.69s.
 - Alembic revision verification, PostgreSQL temporary-database cleanup, Redis WP0-key cleanup, MinIO bucket cleanup, real MinIO checks, Redis-backed Celery ping, Ruff, and mypy all passed. Mypy checked 54 source files.
 - The isolated `smartscreenagent-wp0-test` Compose project was absent after the run; all seven unrelated containers retained the same IDs, names, images, and statuses.
 - Hosted blocker: `git remote -v` is empty, so no GitHub Actions run or run URL exists. WP0 remains in progress and WP1 remains blocked.
