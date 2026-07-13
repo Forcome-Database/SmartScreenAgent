@@ -14,6 +14,17 @@ from backend.tests.integration.runtime import strict_exit_status
 _strict_skipped_count = 0
 
 
+def pytest_sessionstart(session: pytest.Session) -> None:
+    global _strict_skipped_count
+    _strict_skipped_count = 0
+
+
+def pytest_collectreport(report: pytest.CollectReport) -> None:
+    global _strict_skipped_count
+    if report.skipped:
+        _strict_skipped_count += 1
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     global _strict_skipped_count
     if report.skipped:
