@@ -12,43 +12,43 @@
 
 ## File Structure
 
-- Create: `backend/tests/test_bootstrap.py`  
+- Create: `backend/tests/test_bootstrap.py`
   Defines deterministic test environment defaults and preserves explicit CI overrides.
-- Create: `backend/tests/unit/test_test_bootstrap.py`  
+- Create: `backend/tests/unit/test_test_bootstrap.py`
   Verifies default injection and override preservation without importing application settings.
-- Modify: `backend/tests/conftest.py`  
+- Modify: `backend/tests/conftest.py`
   Applies the test environment before any application imports and retains async engine cleanup.
-- Create: `backend/tests/fixtures/rule_workbook.py`  
+- Create: `backend/tests/fixtures/rule_workbook.py`
   Generates a sanitized six-position workbook so tests do not depend on ignored HR business data.
-- Modify: `backend/tests/unit/test_excel_importer.py`  
+- Modify: `backend/tests/unit/test_excel_importer.py`
   Uses the generated workbook without conditional skips.
-- Modify: `backend/tests/integration/test_cli_import_rules.py`  
+- Modify: `backend/tests/integration/test_cli_import_rules.py`
   Uses the generated workbook without conditional skips.
-- Modify: `backend/tests/integration/test_p2_e2e.py`  
+- Modify: `backend/tests/integration/test_p2_e2e.py`
   Uses the generated workbook without conditional skips.
-- Create: `backend/tests/integration/runtime.py`  
+- Create: `backend/tests/integration/runtime.py`
   Implements strict-or-skip dependency behavior shared by integration fixtures.
-- Create: `backend/tests/unit/test_integration_runtime.py`  
+- Create: `backend/tests/unit/test_integration_runtime.py`
   Verifies local skip and strict CI failure behavior.
-- Modify: `backend/tests/integration/conftest.py`  
+- Modify: `backend/tests/integration/conftest.py`
   Uses strict dependency checks and starts an embedded Celery worker against Redis.
-- Move: `backend/tests/unit/test_minio_client.py` -> `backend/tests/integration/test_minio_client.py`  
+- Move: `backend/tests/unit/test_minio_client.py` -> `backend/tests/integration/test_minio_client.py`
   Places the real MinIO test in the integration suite and removes its private skip policy.
-- Modify: `backend/tests/integration/test_smoke.py`  
+- Modify: `backend/tests/integration/test_smoke.py`
   Runs the Celery broker/worker smoke instead of permanently skipping it.
-- Modify: `backend/tests/integration/test_db_migrations.py`  
+- Modify: `backend/tests/integration/test_db_migrations.py`
   Replaces the history-only check with a real downgrade/upgrade/current cycle.
-- Create: `docker-compose.test.yml`  
+- Create: `docker-compose.test.yml`
   Provides isolated disposable PostgreSQL, Redis, and MinIO services.
-- Create: `scripts/verify.py`  
+- Create: `scripts/verify.py`
   Runs the full verification sequence and always cleans up test services unless requested otherwise.
-- Create: `.github/workflows/verify.yml`  
+- Create: `.github/workflows/verify.yml`
   Runs unit/static checks on supported Python versions and the full integration runner on Python 3.14.
-- Modify: `README.md`  
+- Modify: `README.md`
   Documents one-command verification and the difference between local skip mode and strict release mode.
-- Modify: `docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`  
+- Modify: `docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`
   Updates WP0 status and evidence only after all exit gates pass.
-- Modify: `docs/superpowers/plans/README.md`  
+- Modify: `docs/superpowers/plans/README.md`
   Marks WP0 complete and WP1 ready only after all exit gates pass.
 
 ## Task 1: Deterministic Test Environment Bootstrap
