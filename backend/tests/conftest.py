@@ -9,6 +9,22 @@ from pathlib import Path
 import pytest
 
 from backend.tests.fixtures.rule_workbook import build_rule_workbook
+from backend.tests.integration.runtime import strict_exit_status
+
+_strict_skipped_count = 0
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    global _strict_skipped_count
+    if report.skipped:
+        _strict_skipped_count += 1
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    session.exitstatus = strict_exit_status(
+        current_status=exitstatus,
+        skipped_count=_strict_skipped_count,
+    )
 
 
 @pytest.fixture

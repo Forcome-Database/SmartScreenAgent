@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from backend.tests.integration.runtime import require_service, strict_exit_status
+from backend.tests.integration.runtime import require_service
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -61,15 +61,6 @@ def _apply_migrations():
     if result.returncode != 0:
         pytest.fail(f"alembic upgrade head failed:\n{result.stderr}\n{result.stdout}")
     yield
-
-
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
-    skipped_count = len(reporter.stats.get("skipped", [])) if reporter else 0
-    session.exitstatus = strict_exit_status(
-        current_status=exitstatus,
-        skipped_count=skipped_count,
-    )
 
 
 # Children before parents — FK-safe TRUNCATE order.

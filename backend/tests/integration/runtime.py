@@ -15,6 +15,10 @@ def require_service(name: str, *, reachable: bool) -> None:
 
 
 def strict_exit_status(*, current_status: int, skipped_count: int) -> int:
-    if os.getenv(STRICT_INTEGRATION_ENV) == "1" and skipped_count:
+    if (
+        os.getenv(STRICT_INTEGRATION_ENV) == "1"
+        and current_status == int(pytest.ExitCode.OK)
+        and skipped_count
+    ):
         return int(pytest.ExitCode.TESTS_FAILED)
     return current_status
