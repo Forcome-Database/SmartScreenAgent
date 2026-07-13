@@ -1,5 +1,7 @@
 # P2 API JWT/RBAC 设计
 
+> **状态：已批准、尚未实现。** 本设计归入当前路线图 WP1；实施前置条件是 WP0 集成基线完成。权威依赖顺序见 [`2026-07-13-current-state-and-roadmap-design.md`](2026-07-13-current-state-and-roadmap-design.md)。
+
 ## 背景
 
 P2 后端已经完成简历上传、解析、抽取、评分和质量门禁加固，但候选人上传与重新评分接口仍是公开接口。README 已明确标注该状态不能直接公网部署。

@@ -1,5 +1,7 @@
 # P2 加固 Implementation Plan
 
+> **历史状态：已执行计划。** 复选框未在执行期间维护；完成证据为提交 `077901e`、`a8746f5`、`cb18418`、`c911e32` 及当前测试/静态检查。后续计划索引见 [`README.md`](README.md)。
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将现有 P2 评分闭环加固到测试、lint、类型检查和 MinerU 契约都稳定可验证的状态。

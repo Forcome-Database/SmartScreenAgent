@@ -1,5 +1,7 @@
 # SmartScreenAgent 智能简历筛选 Agent — 设计说明书
 
+> **历史状态：产品愿景基线。** 本文保留 2026-05-12 的原始目标和决策背景，不再代表当前实现状态或交付顺序。当前事实、漂移结论和 WP0-WP9 路线图以 [`../superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](../superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+
 - **作者**：人事筛选 Agent 项目组
 - **日期**：2026-05-12
 - **状态**：设计稿（待 HR 业务方与技术 Lead 评审）

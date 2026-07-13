@@ -4,9 +4,11 @@ AI-driven resume screening agent for HR.
 
 ## 状态
 
-P1 后端地基（W1-W2）— 完成
+当前处于“后端评分原型已完成、生产化加固待开始”阶段。
 
-下一步：P2 评分引擎（MinerU 简历解析 + 三段式打分）。
+下一步按权威路线图进入 **WP0 可重复集成基线**，随后依次处理鉴权与原文件持久化、真实 MinerU 契约和异步任务。
+
+当前候选人写接口尚未强制 JWT/RBAC，上传原文件也未接入 MinIO 持久化，不能直接公网部署。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 
@@ -70,8 +72,11 @@ P2 的候选人上传和评分 API 尚未强制 JWT/RBAC，不能直接公网部
 
 ## 设计文档
 
-- 设计稿：`docs/specs/2026-05-12-resume-screening-agent-design.md`
-- P1 计划：`docs/specs/plans/2026-05-12-p1-backend-foundation.md`
+- 当前状态与交付路线图（权威）：`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`
+- 后续工作包计划索引：`docs/superpowers/plans/README.md`
+- 原始产品设计（历史愿景）：`docs/specs/2026-05-12-resume-screening-agent-design.md`
+- P1/P2 历史实施计划：`docs/specs/plans/`
+- 已批准、尚未实现的 JWT/RBAC 设计：`docs/superpowers/specs/2026-07-08-jwt-rbac-p2-api-design.md`
 - 调研笔记：`docs/specs/research/`
   - `newapi.md` — LLM 网关接入
   - `dingtalk-oauth.md` — 钉钉 OAuth 流程（基于 OAS 实读）

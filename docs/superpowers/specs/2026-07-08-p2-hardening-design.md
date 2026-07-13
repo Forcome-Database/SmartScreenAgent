@@ -1,5 +1,7 @@
 # P2 加固设计
 
+> **历史状态：已完成并由后续路线图接管。** 本文定义的 MinerU 错误映射、测试跳过边界和质量门禁已经落地；当前状态与后续工作见 [`2026-07-13-current-state-and-roadmap-design.md`](2026-07-13-current-state-and-roadmap-design.md)。
+
 ## 背景
 
 SmartScreenAgent 当前已经完成 P1 后端地基与 P2 评分闭环：

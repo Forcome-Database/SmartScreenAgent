@@ -1,5 +1,7 @@
 # P1 — 后端地基 (Backend Foundation) 实施计划
 
+> **历史状态：已执行计划。** 本计划的复选框未在执行期间维护，不能用来判断当前完成度；实现事实以 Git 历史和测试为准。当前权威状态与后续顺序见 [`../../superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](../../superpowers/specs/2026-07-13-current-state-and-roadmap-design.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为 SmartScreenAgent 搭建可运行的后端地基——FastAPI 服务 + PostgreSQL/pgvector + MinIO + Celery/Redis + LLM 网关 + 钉钉 OAuth 骨架，使后续 P2 评分引擎可以直接接入。

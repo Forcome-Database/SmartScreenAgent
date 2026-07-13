@@ -1,5 +1,7 @@
 # P2 评分引擎实现计划
 
+> **历史状态：主体已执行、部分契约发生漂移。** 本计划的复选框未在执行期间维护；其中 MinIO 落盘、Celery 异步入口和查询 API 等描述并未完整实现。当前权威状态与修正后的依赖顺序见 [`../../superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](../../superpowers/specs/2026-07-13-current-state-and-roadmap-design.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 P1 后端地基上构建简历评分核心闭环：Excel 规则导入 → 简历解析 → LLM 结构化抽取 → 三段式评分（硬筛 / 规则引擎 / LLM judge）→ 评分 API + Celery 异步管道，覆盖 1 份简历端到端跑通。
