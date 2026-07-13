@@ -1000,8 +1000,8 @@ jobs:
         python-version: ["3.10", "3.14"]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -1013,8 +1013,8 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           python-version: "3.14"
           enable-cache: true
@@ -1033,7 +1033,7 @@ uv run python scripts/verify.py
 git diff --check
 ```
 
-Expected: full verification passes and Git reports no whitespace errors. Hosted workflow success is required once the repository is connected to GitHub.
+Expected: full verification passes and Git reports no whitespace errors. Hosted workflow success remains required once a GitHub remote exists.
 
 - [ ] **Step 3: Commit the workflow**
 
