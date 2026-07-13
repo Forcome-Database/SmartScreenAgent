@@ -15,7 +15,7 @@ Historical plans may contain unchecked boxes even when their work was committed.
 
 | Order | Package | Status | Depends on | Plan |
 |---:|---|---|---|---|
-| 0 | WP0 Reproducible integration baseline | Ready | Current repository | [`2026-07-13-wp0-integration-baseline.md`](2026-07-13-wp0-integration-baseline.md) |
+| 0 | WP0 Reproducible integration baseline | In progress | Current repository | [`2026-07-13-wp0-integration-baseline.md`](2026-07-13-wp0-integration-baseline.md) |
 | 1 | WP1 Security and raw-file integrity | Blocked | WP0 | Written after WP0 exit review |
 | 2 | WP2 Production parser contract and validated AI output | Blocked | WP1 | Written after WP1 exit review |
 | 3 | WP3 Durable asynchronous ingestion and batch processing | Blocked | WP2 | Written after WP2 exit review |
@@ -25,6 +25,10 @@ Historical plans may contain unchecked boxes even when their work was committed.
 | 7 | WP7 Cost, calibration, and operational reporting | Blocked | WP3 and WP6 | Written after labeled feedback exists |
 | 8 | WP8 DingTalk recruitment sync and MCP/Hermes | Blocked | WP3 and WP4 | Written after stable application services exist |
 | 9 | WP9 JD intelligence and cross-position recommendation | Blocked | WP6 and WP7 | Written after offline evaluation data exists |
+
+## Current Evidence and Blocker
+
+On 2026-07-13, `uv sync --extra dev --locked` and `uv run python scripts/verify.py` passed locally on `codex/wp0-integration-baseline`: 99 non-integration tests and 16 integration tests passed with zero skips, followed by successful Ruff, mypy, migration, and clean-state checks. The repository has no configured Git remote, so there is no hosted GitHub Actions run URL. WP0 remains in progress and WP1 remains blocked until the hosted workflow succeeds.
 
 ## Planning Rules
 

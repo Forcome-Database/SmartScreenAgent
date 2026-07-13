@@ -44,6 +44,19 @@ Verification results:
 
 These results establish a healthy unit-level baseline. They do not prove that database migrations, real object storage, the real MinerU service, the real LLM gateway, or the full HTTP workflow operate correctly in a deployed environment.
 
+### 3.1 WP0 local verification evidence (2026-07-13)
+
+On branch `codex/wp0-integration-baseline` at pre-documentation commit `3710446`, the locked local verification path produced:
+
+- `uv sync --extra dev --locked`: passed with uv 0.9.6 (92 packages resolved, 85 audited).
+- `uv run python scripts/verify.py`: 99 non-integration tests passed with 16 deselected; 16 integration tests passed with 99 deselected and zero skips.
+- Alembic upgraded the disposable PostgreSQL database to revision `3884ec28fea9`; the migration round trip, real MinIO read/write/presign checks, Redis-backed Celery ping, and FastAPI integration checks passed.
+- `uv run ruff check backend`: passed.
+- `uv run mypy --explicit-package-bases backend/app --ignore-missing-imports`: passed for 54 source files.
+- Post-run clean-state checks passed for Alembic, temporary PostgreSQL databases, WP0 Redis keys, and MinIO objects. The isolated Compose project was absent afterward, and the seven unrelated containers observed before the run were unchanged.
+
+This is local evidence only. The repository has no configured Git remote, so no hosted GitHub Actions run or run URL exists. WP0 therefore remains in progress, and WP1 remains blocked on WP0.
+
 ## 4. Implemented System
 
 ### 4.1 Runtime components
@@ -332,6 +345,8 @@ The following remain later extensions:
 ## 10. Ordered Work Packages
 
 ### WP0: Reproducible integration baseline
+
+**Status:** In progress - local exit gate passed; hosted GitHub Actions run pending because no remote is configured.
 
 **Goal:** make the existing backend verifiable with disposable dependencies.
 

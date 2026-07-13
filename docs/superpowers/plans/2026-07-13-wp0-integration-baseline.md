@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.10/3.14, uv, pytest, pytest-asyncio, FastAPI, SQLAlchemy, Alembic, PostgreSQL/pgvector, Redis, Celery, MinIO, Docker Compose, Ruff, mypy, GitHub Actions.
 
+**Execution Status:** In progress - all local gates passed; hosted GitHub Actions validation is pending because no Git remote is configured.
+
 ---
 
 ## File Structure
@@ -47,7 +49,7 @@
 - Modify: `README.md`
   Documents one-command verification and the difference between local skip mode and strict release mode.
 - Modify: `docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`
-  Updates WP0 status and evidence only after all exit gates pass.
+  Records WP0 local status and evidence without claiming completion until all exit gates pass.
 - Modify: `docs/superpowers/plans/README.md`
   Marks WP0 complete and WP1 ready only after all exit gates pass.
 
@@ -58,7 +60,7 @@
 - Create: `backend/tests/unit/test_test_bootstrap.py`
 - Modify: `backend/tests/conftest.py`
 
-- [ ] **Step 1: Write tests for defaults and explicit overrides**
+- [x] **Step 1: Write tests for defaults and explicit overrides**
 
 Create `backend/tests/unit/test_test_bootstrap.py`:
 
@@ -87,7 +89,7 @@ def test_apply_test_environment_preserves_explicit_ci_values() -> None:
     assert environ["MINIO_ENDPOINT"] == TEST_ENV_DEFAULTS["MINIO_ENDPOINT"]
 ```
 
-- [ ] **Step 2: Run the new test and verify it fails**
+- [x] **Step 2: Run the new test and verify it fails**
 
 Run:
 
@@ -97,7 +99,7 @@ uv run pytest backend/tests/unit/test_test_bootstrap.py -v
 
 Expected: collection fails with `ModuleNotFoundError: No module named 'backend.tests.test_bootstrap'`.
 
-- [ ] **Step 3: Implement the test environment bootstrap**
+- [x] **Step 3: Implement the test environment bootstrap**
 
 Create `backend/tests/test_bootstrap.py`:
 
@@ -143,7 +145,7 @@ apply_test_environment(os.environ)
 
 Keep the existing `_dispose_db_engine_between_async_tests` fixture unchanged. Remove `dotenv.load_dotenv`, `Path`, the real `.env` lookup, and runtime Fernet key generation from this test conftest.
 
-- [ ] **Step 4: Run bootstrap and existing non-integration tests**
+- [x] **Step 4: Run bootstrap and existing non-integration tests**
 
 Run:
 
@@ -154,7 +156,7 @@ uv run pytest -m "not integration" -q
 
 Expected: 2 bootstrap tests pass and all existing non-integration tests pass without reading repository `.env` values.
 
-- [ ] **Step 5: Commit the deterministic bootstrap**
+- [x] **Step 5: Commit the deterministic bootstrap**
 
 ```bash
 git add backend/tests/test_bootstrap.py backend/tests/unit/test_test_bootstrap.py backend/tests/conftest.py
@@ -170,7 +172,7 @@ git commit -m "test: isolate test configuration from developer environment"
 - Modify: `backend/tests/integration/test_cli_import_rules.py`
 - Modify: `backend/tests/integration/test_p2_e2e.py`
 
-- [ ] **Step 1: Replace business-workbook constants with a fixture dependency**
+- [x] **Step 1: Replace business-workbook constants with a fixture dependency**
 
 In `backend/tests/unit/test_excel_importer.py`, remove `XLSX` and all three `skipif` decorators. Accept `rules_workbook: Path` in the first three tests and pass that path to `import_workbook`:
 
@@ -204,7 +206,7 @@ async def test_cli_import_rules_creates_rule_versions(db_session, rules_workbook
 
 In both tests in `backend/tests/integration/test_p2_e2e.py`, remove `XLSX` and the `skipif` decorators, accept `rules_workbook: Path`, and replace `import_workbook(XLSX)` with `import_workbook(rules_workbook)`.
 
-- [ ] **Step 2: Run importer tests and verify the fixture is missing**
+- [x] **Step 2: Run importer tests and verify the fixture is missing**
 
 Run:
 
@@ -214,7 +216,7 @@ uv run pytest backend/tests/unit/test_excel_importer.py -v
 
 Expected: the first three tests fail at setup with `fixture 'rules_workbook' not found`.
 
-- [ ] **Step 3: Implement the sanitized workbook builder**
+- [x] **Step 3: Implement the sanitized workbook builder**
 
 Create `backend/tests/fixtures/rule_workbook.py`:
 
@@ -271,7 +273,7 @@ def rules_workbook(tmp_path: Path) -> Path:
 
 Keep the existing async engine disposal fixture below it.
 
-- [ ] **Step 4: Run all importer tests through the generated fixture**
+- [x] **Step 4: Run all importer tests through the generated fixture**
 
 Run:
 
@@ -281,7 +283,7 @@ uv run pytest backend/tests/unit/test_excel_importer.py -v -rs
 
 Expected: all five importer tests pass with no skips. The test module no longer resolves or reads the ignored root HR workbook.
 
-- [ ] **Step 5: Commit the sanitized fixture conversion**
+- [x] **Step 5: Commit the sanitized fixture conversion**
 
 ```bash
 git add backend/tests/fixtures/rule_workbook.py backend/tests/conftest.py backend/tests/unit/test_excel_importer.py backend/tests/integration/test_cli_import_rules.py backend/tests/integration/test_p2_e2e.py
@@ -295,7 +297,7 @@ git commit -m "test: replace private rule workbook with sanitized fixture"
 - Create: `backend/tests/unit/test_integration_runtime.py`
 - Modify: `backend/tests/integration/conftest.py`
 
-- [ ] **Step 1: Write strict-mode policy tests**
+- [x] **Step 1: Write strict-mode policy tests**
 
 Create `backend/tests/unit/test_integration_runtime.py`:
 
@@ -333,7 +335,7 @@ def test_strict_mode_fails_a_run_with_skips(monkeypatch: pytest.MonkeyPatch) -> 
     assert strict_exit_status(current_status=0, skipped_count=1) == 1
 ```
 
-- [ ] **Step 2: Run the policy tests and verify they fail**
+- [x] **Step 2: Run the policy tests and verify they fail**
 
 Run:
 
@@ -343,7 +345,7 @@ uv run pytest backend/tests/unit/test_integration_runtime.py -v
 
 Expected: collection fails because `backend.tests.integration.runtime` does not exist.
 
-- [ ] **Step 3: Implement strict-or-skip behavior**
+- [x] **Step 3: Implement strict-or-skip behavior**
 
 Create `backend/tests/integration/runtime.py`:
 
@@ -392,7 +394,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 Import `strict_exit_status` beside `require_service`.
 
-- [ ] **Step 4: Run policy tests and local integration selection**
+- [x] **Step 4: Run policy tests and local integration selection**
 
 Run:
 
@@ -403,7 +405,7 @@ uv run pytest -m integration -q -rs
 
 Expected: policy tests pass. With test services stopped, integration tests skip with `PostgreSQL not reachable` rather than erroring.
 
-- [ ] **Step 5: Verify strict mode rejects a missing database**
+- [x] **Step 5: Verify strict mode rejects a missing database**
 
 PowerShell:
 
@@ -415,7 +417,7 @@ Remove-Item Env:SMARTSCREEN_REQUIRE_INTEGRATION
 
 Expected: test setup fails with `PostgreSQL not reachable`. This step must be run while the WP0 test PostgreSQL service is stopped.
 
-- [ ] **Step 6: Commit strict integration behavior**
+- [x] **Step 6: Commit strict integration behavior**
 
 ```bash
 git add backend/tests/integration/runtime.py backend/tests/unit/test_integration_runtime.py backend/tests/integration/conftest.py
@@ -427,7 +429,7 @@ git commit -m "test: fail strict integration runs on missing services"
 **Files:**
 - Create: `docker-compose.test.yml`
 
-- [ ] **Step 1: Create the isolated Compose stack**
+- [x] **Step 1: Create the isolated Compose stack**
 
 Create `docker-compose.test.yml`:
 
@@ -484,7 +486,7 @@ services:
 
 The explicit `smartscreenagent-wp0-test` project name keeps test resources distinct from the development Compose project. Fixed host ports make concurrent WP0 stack runs intentionally unsupported. The test stack intentionally does not mount `infra/postgres/init.sql`: the migration creates the `vector` extension and the current application does not require `pg_trgm`.
 
-- [ ] **Step 2: Validate Compose syntax**
+- [x] **Step 2: Validate Compose syntax**
 
 Run:
 
@@ -495,7 +497,7 @@ docker compose -f docker-compose.test.yml config --format json
 
 Expected: the quiet validation exits 0 with no output. The normalized config reports project name `smartscreenagent-wp0-test`, loopback-only bindings for all four published ports, tmpfs storage for PostgreSQL, Redis, and MinIO, and Redis persistence disabled by its command.
 
-- [ ] **Step 3: Start services and verify health**
+- [x] **Step 3: Start services and verify health**
 
 Run:
 
@@ -506,7 +508,7 @@ docker compose -f docker-compose.test.yml ps
 
 Expected: PostgreSQL, Redis, and MinIO report healthy under project `smartscreenagent-wp0-test`; loopback host ports are 55433, 56379, and 59000/59001.
 
-- [ ] **Step 4: Stop and remove the disposable stack**
+- [x] **Step 4: Stop and remove the disposable stack**
 
 Run:
 
@@ -516,7 +518,7 @@ docker compose -f docker-compose.test.yml down -v --remove-orphans
 
 Expected: all `smartscreenagent-wp0-test` containers, tmpfs mounts, and project-specific resources are removed; development services in `docker-compose.yml` are untouched.
 
-- [ ] **Step 5: Commit the test stack**
+- [x] **Step 5: Commit the test stack**
 
 ```bash
 git add docker-compose.test.yml
@@ -534,7 +536,7 @@ git commit -m "test: add isolated integration dependency stack"
 - Create: `backend/tests/integration/isolation.py`
 - Create: `backend/tests/unit/test_integration_isolation.py`
 
-- [ ] **Step 1: Write strict MinIO reachability behavior**
+- [x] **Step 1: Write strict MinIO reachability behavior**
 
 Move the file:
 
@@ -594,7 +596,7 @@ def test_presigned_url(storage: MinIOStorage) -> None:
         storage.delete_object(key)
 ```
 
-- [ ] **Step 2: Add shared isolation helpers and an embedded Celery worker fixture**
+- [x] **Step 2: Add shared isolation helpers and an embedded Celery worker fixture**
 
 Create `backend/tests/integration/isolation.py` with the WP0 Redis namespace, selective cleanup, safe PostgreSQL identifier quoting, and URL derivation used by the worker and migration test:
 
@@ -721,7 +723,7 @@ def test_celery_ping_when_worker_up(celery_worker) -> None:
         result.forget()
 ```
 
-- [ ] **Step 3: Replace the migration history smoke with a round trip**
+- [x] **Step 3: Replace the migration history smoke with a round trip**
 
 Replace `backend/tests/integration/test_db_migrations.py` with:
 
@@ -807,7 +809,7 @@ async def test_alembic_round_trip_from_base() -> None:
 
 The migration cycle must never target the configured application database. It creates a UUID-named database on the same PostgreSQL server and drops it in `finally`, terminating only sessions attached to that exact temporary database.
 
-- [ ] **Step 4: Start the test stack and run the focused gates**
+- [x] **Step 4: Start the test stack and run the focused gates**
 
 PowerShell:
 
@@ -833,7 +835,7 @@ Expected: MinIO read/write/presign, health, Celery ping, and Alembic round-trip 
 
 After the run, verify the configured application database is still at head, no `smartscreen_migration_%` database remains, no WP0 queue/binding/result key remains, a seeded unrelated Redis key survives until explicitly removed, and the MinIO test bucket is empty. Always put Compose teardown in `finally` while performing these checks.
 
-- [ ] **Step 5: Commit the real integration gates**
+- [x] **Step 5: Commit the real integration gates**
 
 ```bash
 git add -A -- backend/tests/integration backend/tests/unit/test_integration_isolation.py docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
@@ -846,7 +848,7 @@ git commit -m "test: isolate migration and celery integration state"
 - Create: `scripts/verify.py`
 - Create: `backend/tests/unit/test_verify_script.py`
 
-- [ ] **Step 1: Write orchestration and cleanup tests**
+- [x] **Step 1: Write orchestration and cleanup tests**
 
 Create `backend/tests/unit/test_verify_script.py` with a recording command runner and no
 real Docker or network calls. Cover at least:
@@ -872,7 +874,7 @@ uv run pytest backend/tests/unit/test_verify_script.py -q
 
 Expected before implementation: collection fails because `scripts.verify` does not exist.
 
-- [ ] **Step 2: Implement the safe verification runner**
+- [x] **Step 2: Implement the safe verification runner**
 
 Create `scripts/verify.py` with these implementation constraints:
 
@@ -936,7 +938,7 @@ uv run ruff check scripts/verify.py backend/tests/unit/test_verify_script.py
 
 Expected: all focused tests and Ruff pass without starting Docker.
 
-- [ ] **Step 3: Verify runner help without Docker mutation**
+- [x] **Step 3: Verify runner help without Docker mutation**
 
 Run:
 
@@ -946,7 +948,7 @@ uv run python scripts/verify.py --help
 
 Expected: usage text lists `--keep-services` and exits 0.
 
-- [ ] **Step 4: Run the complete local verification path**
+- [x] **Step 4: Run the complete local verification path**
 
 Run:
 
@@ -965,7 +967,7 @@ Integration output contains no skipped tests. The test Compose project is absent
 unrelated containers are unchanged. No `developer-project` Compose command or resource is created,
 changed, or removed.
 
-- [ ] **Step 5: Commit the verification runner and tests**
+- [x] **Step 5: Commit the verification runner and tests**
 
 ```bash
 git add scripts/verify.py backend/tests/unit/test_verify_script.py docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
@@ -978,7 +980,7 @@ git commit -m "test: add one-command full verification runner"
 - Modify: `pyproject.toml`
 - Create: `.github/workflows/verify.yml`
 
-- [ ] **Step 1: Pin uv and create the workflow**
+- [x] **Step 1: Pin uv and create the workflow**
 
 In the existing `[tool.uv]` table in `pyproject.toml`, add:
 
@@ -1045,6 +1047,8 @@ GitHub Actions is the initial hosted runner because the repository has no existi
 
 - [ ] **Step 2: Validate workflow syntax and local parity**
 
+> **Blocked:** no GitHub remote/run URL. Local syntax and parity checks passed, but hosted workflow success remains required.
+
 Run:
 
 ```bash
@@ -1059,7 +1063,7 @@ git diff --check
 
 Expected: uv reports 0.9.6, dependency sync is locked, non-integration tests and static checks pass, and Git reports no whitespace errors. Workflow structure validation confirms the concurrency policy, job timeouts, disabled credential persistence, and pinned uv version. Hosted workflow success remains required once a GitHub remote exists.
 
-- [ ] **Step 3: Commit the workflow**
+- [x] **Step 3: Commit the workflow**
 
 ```bash
 git add pyproject.toml .github/workflows/verify.yml docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
@@ -1074,7 +1078,7 @@ git commit -m "ci: pin uv and bound verification jobs"
 - Modify: `docs/superpowers/plans/README.md`
 - Modify: `docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md`
 
-- [ ] **Step 1: Add verification commands to README**
+- [x] **Step 1: Add verification commands to README**
 
 Replace the existing development-verification block with:
 
@@ -1094,7 +1098,7 @@ uv run python scripts/verify.py
 直接运行 `pytest -m integration` 时，缺少外部服务会跳过相关用例，适合本地快速选择；`scripts/verify.py` 设置严格模式，任何依赖缺失或测试跳过都视为发布门禁失败。
 ````
 
-- [ ] **Step 2: Run the final exit gates**
+- [x] **Step 2: Run the final exit gates**
 
 Run:
 
@@ -1107,7 +1111,7 @@ git status --short --branch
 
 Expected:
 
-- 72 non-integration tests pass: the original 66 plus six WP0 policy/bootstrap tests.
+- 99 non-integration tests pass.
 - All 16 integration tests execute and pass with zero skips.
 - PostgreSQL migration downgrade/upgrade succeeds.
 - MinIO read/write/presign and Celery ping succeed.
@@ -1115,6 +1119,8 @@ Expected:
 - Only WP0 files are modified before the final commit.
 
 - [ ] **Step 3: Record completion evidence**
+
+> **Blocked:** no GitHub remote/run URL. Local evidence is recorded below, but WP0 cannot be marked complete and WP1 cannot be made ready without hosted success.
 
 In `docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`:
 
@@ -1130,12 +1136,23 @@ In `docs/superpowers/plans/README.md`:
 
 In this plan, check every executed step and append a short `## Completion Evidence` section containing the commit range and exact verification command output summary.
 
-- [ ] **Step 4: Commit WP0 documentation and completion status**
+- [x] **Step 4: Commit WP0 documentation and local status**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md docs/superpowers/plans/README.md docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
-git commit -m "docs: record reproducible integration baseline"
+git commit -m "docs: record WP0 local verification status"
 ```
+
+## Local Execution Evidence
+
+- Branch: `codex/wp0-integration-baseline`.
+- Implementation range: `cc73f19..3710446`; `3710446` is the pre-documentation head.
+- Local environment: Windows (`win32`), Python 3.11.7, uv 0.9.6, Docker Compose v2.40.2-desktop.1.
+- `uv sync --extra dev --locked`: passed; 92 packages resolved and 85 audited.
+- `uv run python scripts/verify.py`: 99 non-integration tests passed with 16 deselected in 13.42s; 16 integration tests passed with 99 deselected and zero skips in 12.24s.
+- Alembic revision verification, PostgreSQL temporary-database cleanup, Redis WP0-key cleanup, MinIO bucket cleanup, real MinIO checks, Redis-backed Celery ping, Ruff, and mypy all passed. Mypy checked 54 source files.
+- The isolated `smartscreenagent-wp0-test` Compose project was absent after the run; all seven unrelated containers retained the same IDs, names, images, and statuses.
+- Hosted blocker: `git remote -v` is empty, so no GitHub Actions run or run URL exists. WP0 remains in progress and WP1 remains blocked.
 
 ## Plan Self-Review Checklist
 
