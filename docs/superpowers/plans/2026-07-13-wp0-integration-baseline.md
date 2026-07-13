@@ -844,93 +844,74 @@ git commit -m "test: isolate migration and celery integration state"
 
 **Files:**
 - Create: `scripts/verify.py`
+- Create: `backend/tests/unit/test_verify_script.py`
 
-- [ ] **Step 1: Create the verification runner**
+- [ ] **Step 1: Write orchestration and cleanup tests**
 
-Create `scripts/verify.py`:
+Create `backend/tests/unit/test_verify_script.py` with a recording command runner and no
+real Docker or network calls. Cover at least:
 
-```python
-from __future__ import annotations
+- partial `docker compose up -d --wait` failure still runs teardown and returns 1;
+- successful verification runs teardown and returns 0;
+- `--keep-services` suppresses only the final teardown after full success;
+- teardown failure forces exit 1;
+- developer environment values are overwritten by the deterministic test environment;
+- the exact gate order uses `sys.executable -m`, with post-gate clean-state assertions;
+- clean-state failures remain active when Python optimization is enabled;
+- PostgreSQL, Redis, and MinIO assertion clients are closed even when an assertion fails.
 
-import argparse
-import os
-import subprocess
-import sys
-from pathlib import Path
+Run:
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-COMPOSE = ["docker", "compose", "-f", "docker-compose.test.yml"]
-TEST_ENV = {
-    "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
-    "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
-    "REDIS_URL": "redis://127.0.0.1:56379/15",
-    "MINIO_ENDPOINT": "127.0.0.1:59000",
-    "MINIO_ACCESS_KEY": "smartscreen-test",
-    "MINIO_SECRET_KEY": "smartscreen-test-secret",
-    "MINIO_BUCKET": "resumes-test",
-    "MINIO_SECURE": "false",
-    "SMARTSCREEN_REQUIRE_INTEGRATION": "1",
-}
-
-
-def run(command: list[str], *, env: dict[str, str]) -> None:
-    print(f"+ {' '.join(command)}", flush=True)
-    subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run SmartScreenAgent verification gates")
-    parser.add_argument(
-        "--keep-services",
-        action="store_true",
-        help="leave the disposable test services running after verification",
-    )
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    env = os.environ.copy()
-    env.update(TEST_ENV)
-    started = False
-    try:
-        run([*COMPOSE, "config", "--quiet"], env=env)
-        run([*COMPOSE, "up", "-d", "--wait"], env=env)
-        started = True
-        run(["uv", "run", "alembic", "upgrade", "head"], env=env)
-        run(["uv", "run", "pytest", "-m", "not integration", "-q"], env=env)
-        run(["uv", "run", "pytest", "-m", "integration", "-q", "-rs"], env=env)
-        run(["uv", "run", "ruff", "check", "backend"], env=env)
-        run(
-            [
-                "uv",
-                "run",
-                "mypy",
-                "--explicit-package-bases",
-                "backend/app",
-                "--ignore-missing-imports",
-            ],
-            env=env,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"verification failed: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        if started and not args.keep_services:
-            subprocess.run(
-                [*COMPOSE, "down", "-v", "--remove-orphans"],
-                cwd=REPO_ROOT,
-                env=env,
-                check=False,
-            )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+```bash
+uv run pytest backend/tests/unit/test_verify_script.py -q
 ```
 
-- [ ] **Step 2: Verify runner help without Docker mutation**
+Expected before implementation: collection fails because `scripts.verify` does not exist.
+
+- [ ] **Step 2: Implement the safe verification runner**
+
+Create `scripts/verify.py` with these implementation constraints:
+
+```python
+COMPOSE = ["docker", "compose", "-f", "docker-compose.test.yml"]
+TEST_ENV = {**TEST_ENV_DEFAULTS, "SMARTSCREEN_REQUIRE_INTEGRATION": "1"}
+```
+
+Copy the parent environment and overwrite it with `TEST_ENV`; never allow developer values to
+redirect this disposable gate. Accept an injectable command runner and clean-state checker for
+unit tests. Parse arguments before any Docker command so `--help` is mutation-free.
+
+Run these commands in order:
+
+1. `docker compose -f docker-compose.test.yml config --quiet`
+2. `docker compose -f docker-compose.test.yml down -v --remove-orphans`
+3. `docker compose -f docker-compose.test.yml up -d --wait`
+4. `sys.executable -m alembic upgrade head`
+5. `sys.executable -m pytest -m "not integration" -q`
+6. `sys.executable -m pytest -m integration -q -rs`
+7. `sys.executable -m alembic current` with captured output
+8. `sys.executable -m ruff check backend`
+9. `sys.executable -m mypy --explicit-package-bases backend/app --ignore-missing-imports`
+
+After all gates, assert before teardown that Alembic output contains `3884ec28fea9`, PostgreSQL
+has no database matching `smartscreen_migration_%`, Redis has neither the WP0 queue/binding keys
+nor any WP0 result-prefix key, and the MinIO test bucket has no objects. Use
+`TEST_ENV_DEFAULTS` and the existing integration isolation constants/helpers. Close every client.
+
+Catch `OSError`, `subprocess.CalledProcessError`, and clean-state assertion failures, print a
+concise error, and return 1. Unless verification fully succeeds with `--keep-services`, execute
+checked Compose teardown. A failed run always tears down; a teardown failure always returns 1.
+
+Run:
+
+```bash
+uv run pytest backend/tests/unit/test_verify_script.py -q
+uv run ruff check scripts/verify.py backend/tests/unit/test_verify_script.py
+```
+
+Expected: all focused tests and Ruff pass without starting Docker.
+
+- [ ] **Step 3: Verify runner help without Docker mutation**
 
 Run:
 
@@ -940,7 +921,7 @@ uv run python scripts/verify.py --help
 
 Expected: usage text lists `--keep-services` and exits 0.
 
-- [ ] **Step 3: Run the complete local verification path**
+- [ ] **Step 4: Run the complete local verification path**
 
 Run:
 
@@ -948,12 +929,15 @@ Run:
 uv run python scripts/verify.py
 ```
 
-Expected: Compose validation, dependency startup, migration, non-integration tests, integration tests, Ruff, and mypy all pass. Integration output contains no skipped tests. Test containers are removed afterward.
+Expected: Compose validation, dependency startup, migration, non-integration tests, integration
+tests, post-integration revision check, Ruff, mypy, and all four clean-state assertions pass.
+Integration output contains no skipped tests. The test Compose project is absent afterward and
+unrelated containers are unchanged.
 
-- [ ] **Step 4: Commit the verification runner**
+- [ ] **Step 5: Commit the verification runner and tests**
 
 ```bash
-git add scripts/verify.py
+git add scripts/verify.py backend/tests/unit/test_verify_script.py docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
 git commit -m "test: add one-command full verification runner"
 ```
 
