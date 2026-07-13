@@ -196,6 +196,28 @@ def test_developer_environment_is_overwritten(monkeypatch: pytest.MonkeyPatch) -
     assert child_env["SMARTSCREEN_REQUIRE_INTEGRATION"] == "1"
 
 
+def test_hostile_compose_project_name_is_overwritten_and_pinned_on_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    safe_project = "smartscreenagent-wp0-test"
+    hostile_project = "developer-project"
+    compose_file = str(REPO_ROOT / "docker-compose.test.yml")
+    runner = RecordingRunner()
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", hostile_project)
+
+    result = verify.main([], runner=runner, clean_state_checker=lambda _output, _env: None)
+
+    assert result == 0
+    compose_calls = [call for call in runner.calls if call[0][:2] == ["docker", "compose"]]
+    assert compose_calls
+    for command, env, _capture_output in compose_calls:
+        assert command[command.index("--project-name") + 1] == safe_project
+        assert command[command.index("--project-directory") + 1] == str(REPO_ROOT)
+        assert command[command.index("-f") + 1] == compose_file
+        assert hostile_project not in command
+        assert env["COMPOSE_PROJECT_NAME"] == safe_project
+
+
 def test_head_revision_assertion_rejects_non_head_output() -> None:
     with pytest.raises(AssertionError, match="expected Alembic revision"):
         verify.assert_head_revision("older-revision\n")
@@ -226,7 +248,10 @@ async def test_postgres_assertion_failure_closes_connection(
     class Connection:
         closed = False
 
-        async def fetch(self, _query: str, _pattern: str) -> list[Any]:
+        async def fetch(self, query: str, prefix: str) -> list[Any]:
+            assert "starts_with(datname, $1)" in query
+            assert "LIKE" not in query
+            assert prefix == "smartscreen_migration_"
             return [{"datname": "smartscreen_migration_leftover"}]
 
         async def close(self) -> None:

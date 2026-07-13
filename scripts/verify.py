@@ -25,8 +25,23 @@ from backend.tests.integration.isolation import (  # noqa: E402
 )
 from backend.tests.test_bootstrap import TEST_ENV_DEFAULTS  # noqa: E402
 
-COMPOSE = ["docker", "compose", "-f", "docker-compose.test.yml"]
-TEST_ENV = {**TEST_ENV_DEFAULTS, "SMARTSCREEN_REQUIRE_INTEGRATION": "1"}
+COMPOSE_PROJECT_NAME = "smartscreenagent-wp0-test"
+COMPOSE_FILE = REPO_ROOT / "docker-compose.test.yml"
+COMPOSE = [
+    "docker",
+    "compose",
+    "--project-name",
+    COMPOSE_PROJECT_NAME,
+    "--project-directory",
+    str(REPO_ROOT),
+    "-f",
+    str(COMPOSE_FILE),
+]
+TEST_ENV = {
+    **TEST_ENV_DEFAULTS,
+    "SMARTSCREEN_REQUIRE_INTEGRATION": "1",
+    "COMPOSE_PROJECT_NAME": COMPOSE_PROJECT_NAME,
+}
 HEAD_REVISION = "3884ec28fea9"
 CELERY_KEYS = (CELERY_QUEUE, CELERY_BINDING_KEY)
 
@@ -62,8 +77,8 @@ async def assert_no_migration_databases(env: dict[str, str]) -> None:
     connection = await asyncpg.connect(admin_dsn)
     try:
         rows = await connection.fetch(
-            "SELECT datname FROM pg_database WHERE datname LIKE $1 ORDER BY datname",
-            "smartscreen_migration_%",
+            "SELECT datname FROM pg_database WHERE starts_with(datname, $1) ORDER BY datname",
+            "smartscreen_migration_",
         )
         leftovers = [row["datname"] for row in rows]
         if leftovers:

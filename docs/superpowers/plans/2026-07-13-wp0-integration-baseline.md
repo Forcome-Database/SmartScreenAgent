@@ -858,6 +858,8 @@ real Docker or network calls. Cover at least:
 - `--keep-services` suppresses only the final teardown after full success;
 - teardown failure forces exit 1;
 - developer environment values are overwritten by the deterministic test environment;
+- hostile inherited Compose project names are overwritten in the child environment and cannot
+  override the explicit safe project name on any Compose command;
 - the exact gate order uses `sys.executable -m`, with post-gate clean-state assertions;
 - clean-state failures remain active when Python optimization is enabled;
 - PostgreSQL, Redis, and MinIO assertion clients are closed even when an assertion fails.
@@ -875,19 +877,36 @@ Expected before implementation: collection fails because `scripts.verify` does n
 Create `scripts/verify.py` with these implementation constraints:
 
 ```python
-COMPOSE = ["docker", "compose", "-f", "docker-compose.test.yml"]
-TEST_ENV = {**TEST_ENV_DEFAULTS, "SMARTSCREEN_REQUIRE_INTEGRATION": "1"}
+COMPOSE_PROJECT_NAME = "smartscreenagent-wp0-test"
+COMPOSE_FILE = REPO_ROOT / "docker-compose.test.yml"
+COMPOSE = [
+    "docker",
+    "compose",
+    "--project-name",
+    COMPOSE_PROJECT_NAME,
+    "--project-directory",
+    str(REPO_ROOT),
+    "-f",
+    str(COMPOSE_FILE),
+]
+TEST_ENV = {
+    **TEST_ENV_DEFAULTS,
+    "SMARTSCREEN_REQUIRE_INTEGRATION": "1",
+    "COMPOSE_PROJECT_NAME": COMPOSE_PROJECT_NAME,
+}
 ```
 
 Copy the parent environment and overwrite it with `TEST_ENV`; never allow developer values to
-redirect this disposable gate. Accept an injectable command runner and clean-state checker for
+redirect this disposable gate. Pin the Compose identity at command-line precedence and use the
+absolute Compose file/project directory so the caller's working directory and Compose environment
+cannot change the target project. Accept an injectable command runner and clean-state checker for
 unit tests. Parse arguments before any Docker command so `--help` is mutation-free.
 
 Run these commands in order:
 
-1. `docker compose -f docker-compose.test.yml config --quiet`
-2. `docker compose -f docker-compose.test.yml down -v --remove-orphans`
-3. `docker compose -f docker-compose.test.yml up -d --wait`
+1. `[*COMPOSE, "config", "--quiet"]`
+2. `[*COMPOSE, "down", "-v", "--remove-orphans"]`
+3. `[*COMPOSE, "up", "-d", "--wait"]`
 4. `sys.executable -m alembic upgrade head`
 5. `sys.executable -m pytest -m "not integration" -q`
 6. `sys.executable -m pytest -m integration -q -rs`
@@ -896,8 +915,9 @@ Run these commands in order:
 9. `sys.executable -m mypy --explicit-package-bases backend/app --ignore-missing-imports`
 
 After all gates, assert before teardown that Alembic output contains `3884ec28fea9`, PostgreSQL
-has no database matching `smartscreen_migration_%`, Redis has neither the WP0 queue/binding keys
-nor any WP0 result-prefix key, and the MinIO test bucket has no objects. Use
+has no database for which `starts_with(datname, 'smartscreen_migration_')` is true, Redis has
+neither the WP0 queue/binding keys nor any WP0 result-prefix key, and the MinIO test bucket has no
+objects. Use
 `TEST_ENV_DEFAULTS` and the existing integration isolation constants/helpers. Close every client.
 
 Catch `OSError`, `subprocess.CalledProcessError`, and clean-state assertion failures, print a
@@ -930,14 +950,20 @@ Expected: usage text lists `--keep-services` and exits 0.
 
 Run:
 
-```bash
-uv run python scripts/verify.py
+```powershell
+$env:COMPOSE_PROJECT_NAME = "developer-project"
+try {
+    uv run python scripts/verify.py
+} finally {
+    Remove-Item Env:COMPOSE_PROJECT_NAME -ErrorAction SilentlyContinue
+}
 ```
 
 Expected: Compose validation, dependency startup, migration, non-integration tests, integration
 tests, post-integration revision check, Ruff, mypy, and all four clean-state assertions pass.
 Integration output contains no skipped tests. The test Compose project is absent afterward and
-unrelated containers are unchanged.
+unrelated containers are unchanged. No `developer-project` Compose command or resource is created,
+changed, or removed.
 
 - [ ] **Step 5: Commit the verification runner and tests**
 
