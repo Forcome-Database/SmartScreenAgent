@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -109,3 +110,13 @@ async def client():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
+
+
+@pytest.fixture(scope="session")
+def celery_worker() -> Iterator[None]:
+    from celery.contrib.testing.worker import start_worker
+
+    from backend.app.tasks.celery_app import celery_app
+
+    with start_worker(celery_app, pool="solo", perform_ping_check=False):
+        yield
