@@ -25,7 +25,7 @@ async def test_cli_import_rules_creates_rule_versions(db_session, rules_workbook
     rvs = (await db_session.execute(select(RuleVersion))).scalars().all()
     jd_codes = {j.code for j in jds}
     assert EXPECTED_CODES.issubset(jd_codes)
-    assert len(rvs) >= 6
+    assert len(rvs) == 6
     # Every JD should have an active rule version
     for jd in jds:
         if jd.code in EXPECTED_CODES:

@@ -19,8 +19,12 @@ def build_rule_workbook(path: Path) -> Path:
         worksheet.cell(dimension_row, layout.keyword_col + 1, "本科、专升本、大专")
         total_row = dimension_row + 1
         worksheet.cell(total_row, 2, "合计总分")
-        ranges = ("0-39", "40-69", "70-100", "70-84", "85-100")
-        for column, score_range in zip(layout.tier_cols, ranges, strict=False):
+        ranges_by_tier_count = {
+            5: ("0-39", "40-54", "55-69", "70-84", "85-100"),
+            3: ("0-39", "40-69", "70-100"),
+        }
+        ranges = ranges_by_tier_count[len(layout.tier_cols)]
+        for column, score_range in zip(layout.tier_cols, ranges, strict=True):
             worksheet.cell(total_row, column + 1, score_range)
         if sheet_name == "业务岗全维度评分表格":
             worksheet.cell(total_row + 1, 1, "年龄超过45岁直接淘汰")

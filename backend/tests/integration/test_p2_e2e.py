@@ -84,6 +84,8 @@ async def test_full_p2_flow(client, db_session, monkeypatch, rules_workbook: Pat
     assert resp.status_code == 200, resp.text
     data = resp.json()
     assert "total_score" in data
+    assert data["total_score"] > 0
+    assert data["grade"] == "L1"
     assert data["rejected"] is False
 
 
