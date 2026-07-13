@@ -975,9 +975,16 @@ git commit -m "test: add one-command full verification runner"
 ## Task 7: GitHub Actions Verification
 
 **Files:**
+- Modify: `pyproject.toml`
 - Create: `.github/workflows/verify.yml`
 
-- [ ] **Step 1: Create the workflow**
+- [ ] **Step 1: Pin uv and create the workflow**
+
+In the existing `[tool.uv]` table in `pyproject.toml`, add:
+
+```toml
+required-version = "==0.9.6"
+```
 
 Create `.github/workflows/verify.yml`:
 
@@ -989,6 +996,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -999,10 +1010,14 @@ jobs:
       matrix:
         python-version: ["3.10", "3.14"]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
+          version: "0.9.6"
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --extra dev --locked
@@ -1012,34 +1027,43 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
+          version: "0.9.6"
           python-version: "3.14"
           enable-cache: true
       - run: uv sync --extra dev --locked
       - run: uv run python scripts/verify.py
 ```
 
-GitHub Actions is the initial hosted runner because the repository has no existing CI provider. The authoritative entry point remains `scripts/verify.py`, so another provider can invoke the same command without changing test semantics.
+GitHub Actions is the initial hosted runner because the repository has no existing CI provider. The authoritative entry point remains `scripts/verify.py`, so another provider can invoke the same command without changing test semantics. The integration job intentionally runs the complete verifier for local/CI parity; an integration-only runner is not introduced at this stage.
 
 - [ ] **Step 2: Validate workflow syntax and local parity**
 
 Run:
 
 ```bash
-uv run python scripts/verify.py
+uv --version
+uv sync --extra dev --locked
+uv run pytest -m "not integration" -q
+uv run ruff check backend
+uv run mypy --explicit-package-bases backend/app --ignore-missing-imports
+uv run python -c 'from pathlib import Path; import yaml; w = yaml.safe_load(Path(".github/workflows/verify.yml").read_text()); jobs = w["jobs"]; assert w["concurrency"] == {"group": "verify-" + chr(36) + "{{ github.workflow }}-" + chr(36) + "{{ github.ref }}", "cancel-in-progress": True}; assert [jobs[name]["timeout-minutes"] for name in ("unit-and-static", "integration")] == [15, 30]; assert all(step.get("with", {}).get("persist-credentials") is False for job in jobs.values() for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")); assert all(step.get("with", {}).get("version") == "0.9.6" for job in jobs.values() for step in job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@"))'
 git diff --check
 ```
 
-Expected: full verification passes and Git reports no whitespace errors. Hosted workflow success remains required once a GitHub remote exists.
+Expected: uv reports 0.9.6, dependency sync is locked, non-integration tests and static checks pass, and Git reports no whitespace errors. Workflow structure validation confirms the concurrency policy, job timeouts, disabled credential persistence, and pinned uv version. Hosted workflow success remains required once a GitHub remote exists.
 
 - [ ] **Step 3: Commit the workflow**
 
 ```bash
-git add .github/workflows/verify.yml
-git commit -m "ci: verify supported Python and integration stack"
+git add pyproject.toml .github/workflows/verify.yml docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
+git commit -m "ci: pin uv and bound verification jobs"
 ```
 
 ## Task 8: Documentation and WP0 Exit Review
