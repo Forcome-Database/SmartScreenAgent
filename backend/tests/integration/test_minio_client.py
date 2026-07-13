@@ -1,5 +1,6 @@
 import io
 import socket
+from uuid import uuid4
 
 import pytest
 
@@ -29,7 +30,7 @@ def storage() -> MinIOStorage:
 
 
 def test_put_and_get(storage: MinIOStorage) -> None:
-    key = "test/hello.txt"
+    key = f"test/hello-{uuid4().hex}.txt"
     try:
         storage.put_object(key, io.BytesIO(b"hello"), 5, content_type="text/plain")
         assert storage.get_object(key) == b"hello"
@@ -38,7 +39,7 @@ def test_put_and_get(storage: MinIOStorage) -> None:
 
 
 def test_presigned_url(storage: MinIOStorage) -> None:
-    key = "test/presigned.txt"
+    key = f"test/presigned-{uuid4().hex}.txt"
     try:
         storage.put_object(key, io.BytesIO(b"hello"), 5, content_type="text/plain")
         assert storage.presigned_get_url(key, expires_seconds=300).startswith("http")

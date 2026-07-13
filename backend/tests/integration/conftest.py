@@ -115,8 +115,55 @@ async def client():
 @pytest.fixture(scope="session")
 def celery_worker() -> Iterator[None]:
     from celery.contrib.testing.worker import start_worker
+    from redis import Redis
 
+    from backend.app.config import get_settings
     from backend.app.tasks.celery_app import celery_app
+    from backend.tests.integration.isolation import (
+        CELERY_QUEUE,
+        CELERY_RESULT_PREFIX,
+        cleanup_celery_keys,
+    )
 
-    with start_worker(celery_app, pool="solo", perform_ping_check=False):
-        yield
+    redis_client = Redis.from_url(get_settings().REDIS_URL)
+    previous_queue = celery_app.conf.task_default_queue
+    previous_backend_options = celery_app.conf.result_backend_transport_options
+    previous_backend_cache = celery_app._backend_cache
+    backend_missing = object()
+    previous_local_backend = getattr(celery_app._local, "backend", backend_missing)
+    try:
+        cleanup_celery_keys(redis_client)
+        backend_options = dict(previous_backend_options or {})
+        backend_options["global_keyprefix"] = CELERY_RESULT_PREFIX
+        celery_app.conf.update(
+            task_default_queue=CELERY_QUEUE,
+            result_backend_transport_options=backend_options,
+        )
+        # Celery caches backends separately for thread-safe and thread-local use.
+        celery_app._backend_cache = None
+        if previous_local_backend is not backend_missing:
+            del celery_app._local.backend
+        with start_worker(
+            celery_app,
+            pool="solo",
+            perform_ping_check=False,
+            queues=[CELERY_QUEUE],
+        ):
+            yield
+    finally:
+        try:
+            cleanup_celery_keys(redis_client)
+        finally:
+            try:
+                celery_app.conf.update(
+                    task_default_queue=previous_queue,
+                    result_backend_transport_options=previous_backend_options,
+                )
+                celery_app._backend_cache = previous_backend_cache
+                if previous_local_backend is backend_missing:
+                    if hasattr(celery_app._local, "backend"):
+                        del celery_app._local.backend
+                else:
+                    celery_app._local.backend = previous_local_backend
+            finally:
+                redis_client.close()

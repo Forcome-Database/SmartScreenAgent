@@ -1,6 +1,7 @@
 """End-to-end smoke tests for the app and its external services."""
 
 import io
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -22,7 +23,7 @@ async def test_full_smoke() -> None:
 
     storage = MinIOStorage()
     storage.ensure_bucket()
-    key = "smoke/test.bin"
+    key = f"smoke/test-{uuid4().hex}.bin"
     try:
         storage.put_object(
             key,
@@ -38,4 +39,8 @@ async def test_full_smoke() -> None:
 def test_celery_ping_when_worker_up(celery_worker) -> None:
     from backend.app.tasks.celery_app import ping
 
-    assert ping.delay().get(timeout=10) == "pong"
+    result = ping.delay()
+    try:
+        assert result.get(timeout=10) == "pong"
+    finally:
+        result.forget()

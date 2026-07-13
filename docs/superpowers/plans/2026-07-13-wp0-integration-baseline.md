@@ -531,6 +531,8 @@ git commit -m "test: add isolated integration dependency stack"
 - Modify: `backend/tests/integration/test_minio_client.py`
 - Modify: `backend/tests/integration/test_smoke.py`
 - Modify: `backend/tests/integration/test_db_migrations.py`
+- Create: `backend/tests/integration/isolation.py`
+- Create: `backend/tests/unit/test_integration_isolation.py`
 
 - [ ] **Step 1: Write strict MinIO reachability behavior**
 
@@ -545,6 +547,7 @@ Replace its private reachability fixture with:
 ```python
 import io
 import socket
+from uuid import uuid4
 
 import pytest
 
@@ -574,7 +577,7 @@ def storage() -> MinIOStorage:
 
 
 def test_put_and_get(storage: MinIOStorage) -> None:
-    key = "test/hello.txt"
+    key = f"test/hello-{uuid4().hex}.txt"
     try:
         storage.put_object(key, io.BytesIO(b"hello"), 5, content_type="text/plain")
         assert storage.get_object(key) == b"hello"
@@ -583,7 +586,7 @@ def test_put_and_get(storage: MinIOStorage) -> None:
 
 
 def test_presigned_url(storage: MinIOStorage) -> None:
-    key = "test/presigned.txt"
+    key = f"test/presigned-{uuid4().hex}.txt"
     try:
         storage.put_object(key, io.BytesIO(b"hello"), 5, content_type="text/plain")
         assert storage.presigned_get_url(key, expires_seconds=300).startswith("http")
@@ -591,19 +594,118 @@ def test_presigned_url(storage: MinIOStorage) -> None:
         storage.delete_object(key)
 ```
 
-- [ ] **Step 2: Add an embedded Celery worker fixture**
+- [ ] **Step 2: Add shared isolation helpers and an embedded Celery worker fixture**
+
+Create `backend/tests/integration/isolation.py` with the WP0 Redis namespace, selective cleanup, safe PostgreSQL identifier quoting, and URL derivation used by the worker and migration test:
+
+```python
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Protocol
+
+from sqlalchemy.engine import make_url
+
+CELERY_QUEUE = "smartscreen-wp0-test"
+CELERY_BINDING_KEY = f"_kombu.binding.{CELERY_QUEUE}"
+CELERY_RESULT_PREFIX = f"{CELERY_QUEUE}:"
+
+
+@dataclass(frozen=True)
+class MigrationDatabaseUrls:
+    admin_dsn: str
+    async_url: str
+    sync_url: str
+
+
+class RedisKeyClient(Protocol):
+    def scan_iter(self, *, match: str) -> Iterable[bytes]: ...
+    def delete(self, *keys: str | bytes) -> object: ...
+
+
+def migration_database_urls(
+    configured_async_url: str, database_name: str
+) -> MigrationDatabaseUrls:
+    configured = make_url(configured_async_url)
+    admin = configured.set(drivername="postgresql", database="postgres")
+    temporary_async = configured.set(database=database_name)
+    temporary_sync = configured.set(drivername="postgresql", database=database_name)
+    return MigrationDatabaseUrls(
+        admin_dsn=admin.render_as_string(hide_password=False),
+        async_url=temporary_async.render_as_string(hide_password=False),
+        sync_url=temporary_sync.render_as_string(hide_password=False),
+    )
+
+
+def quote_postgres_identifier(identifier: str) -> str:
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def cleanup_celery_keys(client: RedisKeyClient) -> None:
+    result_keys = tuple(client.scan_iter(match=f"{CELERY_RESULT_PREFIX}*"))
+    client.delete(CELERY_QUEUE, CELERY_BINDING_KEY, *result_keys)
+```
+
+Add focused unit coverage in `backend/tests/unit/test_integration_isolation.py` for URL replacement, identifier quoting, and the exact Redis keys selected for deletion.
 
 Append to `backend/tests/integration/conftest.py`:
 
 ```python
 @pytest.fixture(scope="session")
-def celery_worker():
+def celery_worker() -> Iterator[None]:
     from celery.contrib.testing.worker import start_worker
+    from redis import Redis
 
+    from backend.app.config import get_settings
     from backend.app.tasks.celery_app import celery_app
+    from backend.tests.integration.isolation import (
+        CELERY_QUEUE,
+        CELERY_RESULT_PREFIX,
+        cleanup_celery_keys,
+    )
 
-    with start_worker(celery_app, pool="solo", perform_ping_check=False):
-        yield
+    redis_client = Redis.from_url(get_settings().REDIS_URL)
+    previous_queue = celery_app.conf.task_default_queue
+    previous_backend_options = celery_app.conf.result_backend_transport_options
+    previous_backend_cache = celery_app._backend_cache
+    backend_missing = object()
+    previous_local_backend = getattr(celery_app._local, "backend", backend_missing)
+    try:
+        cleanup_celery_keys(redis_client)
+        backend_options = dict(previous_backend_options or {})
+        backend_options["global_keyprefix"] = CELERY_RESULT_PREFIX
+        celery_app.conf.update(
+            task_default_queue=CELERY_QUEUE,
+            result_backend_transport_options=backend_options,
+        )
+        # Celery caches backends separately for thread-safe and thread-local use.
+        celery_app._backend_cache = None
+        if previous_local_backend is not backend_missing:
+            del celery_app._local.backend
+        with start_worker(
+            celery_app,
+            pool="solo",
+            perform_ping_check=False,
+            queues=[CELERY_QUEUE],
+        ):
+            yield
+    finally:
+        try:
+            cleanup_celery_keys(redis_client)
+        finally:
+            try:
+                celery_app.conf.update(
+                    task_default_queue=previous_queue,
+                    result_backend_transport_options=previous_backend_options,
+                )
+                celery_app._backend_cache = previous_backend_cache
+                if previous_local_backend is backend_missing:
+                    if hasattr(celery_app._local, "backend"):
+                        del celery_app._local.backend
+                else:
+                    celery_app._local.backend = previous_local_backend
+            finally:
+                redis_client.close()
 ```
 
 Replace the skipped Celery test in `backend/tests/integration/test_smoke.py` with:
@@ -612,7 +714,11 @@ Replace the skipped Celery test in `backend/tests/integration/test_smoke.py` wit
 def test_celery_ping_when_worker_up(celery_worker) -> None:
     from backend.app.tasks.celery_app import ping
 
-    assert ping.delay().get(timeout=10) == "pong"
+    result = ping.delay()
+    try:
+        assert result.get(timeout=10) == "pong"
+    finally:
+        result.forget()
 ```
 
 - [ ] **Step 3: Replace the migration history smoke with a round trip**
@@ -620,58 +726,118 @@ def test_celery_ping_when_worker_up(celery_worker) -> None:
 Replace `backend/tests/integration/test_db_migrations.py` with:
 
 ```python
+import os
 import subprocess
+import sys
 from pathlib import Path
+from uuid import uuid4
 
+import asyncpg
 import pytest
+
+from backend.app.config import get_settings
+from backend.tests.integration.isolation import (
+    migration_database_urls,
+    quote_postgres_identifier,
+)
 
 pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _alembic(*args: str) -> subprocess.CompletedProcess[str]:
+def _alembic(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["uv", "run", "alembic", *args],
+        [sys.executable, "-m", "alembic", *args],
         capture_output=True,
         text=True,
         timeout=90,
         cwd=REPO_ROOT,
+        env=env,
     )
 
 
-def test_alembic_round_trip_from_base() -> None:
-    downgrade = _alembic("downgrade", "base")
-    assert downgrade.returncode == 0, downgrade.stderr
+async def _create_database(admin_dsn: str, database_name: str) -> None:
+    connection = await asyncpg.connect(admin_dsn)
+    try:
+        await connection.execute(
+            f"CREATE DATABASE {quote_postgres_identifier(database_name)}"
+        )
+    finally:
+        await connection.close()
 
-    upgrade = _alembic("upgrade", "head")
-    assert upgrade.returncode == 0, upgrade.stderr
 
-    current = _alembic("current")
-    assert current.returncode == 0, current.stderr
-    assert "3884ec28fea9" in current.stdout
+async def _drop_database(admin_dsn: str, database_name: str) -> None:
+    connection = await asyncpg.connect(admin_dsn)
+    try:
+        await connection.execute(
+            """
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()
+            """,
+            database_name,
+        )
+        await connection.execute(
+            f"DROP DATABASE IF EXISTS {quote_postgres_identifier(database_name)}"
+        )
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_alembic_round_trip_from_base() -> None:
+    database_name = f"smartscreen_migration_{uuid4().hex}"
+    urls = migration_database_urls(get_settings().DATABASE_URL, database_name)
+    env = os.environ.copy()
+    env["DATABASE_URL"] = urls.async_url
+    env["DATABASE_URL_SYNC"] = urls.sync_url
+
+    try:
+        await _create_database(urls.admin_dsn, database_name)
+        downgrade = _alembic("downgrade", "base", env=env)
+        assert downgrade.returncode == 0, downgrade.stderr
+        upgrade = _alembic("upgrade", "head", env=env)
+        assert upgrade.returncode == 0, upgrade.stderr
+        current = _alembic("current", env=env)
+        assert current.returncode == 0, current.stderr
+        assert "3884ec28fea9" in current.stdout
+    finally:
+        await _drop_database(urls.admin_dsn, database_name)
 ```
 
-Do not run integration tests in parallel: this migration test intentionally owns the disposable test database while it cycles the schema.
+The migration cycle must never target the configured application database. It creates a UUID-named database on the same PostgreSQL server and drops it in `finally`, terminating only sessions attached to that exact temporary database.
 
 - [ ] **Step 4: Start the test stack and run the focused gates**
 
 PowerShell:
 
 ```powershell
-docker compose -f docker-compose.test.yml up -d --wait
 $env:SMARTSCREEN_REQUIRE_INTEGRATION='1'
-uv run pytest backend/tests/integration/test_minio_client.py backend/tests/integration/test_smoke.py backend/tests/integration/test_db_migrations.py -v -m integration
-Remove-Item Env:SMARTSCREEN_REQUIRE_INTEGRATION
-docker compose -f docker-compose.test.yml down -v --remove-orphans
+try {
+    docker compose -f docker-compose.test.yml up -d --wait
+    uv run alembic upgrade head
+    docker compose -f docker-compose.test.yml exec -T redis redis-cli -n 15 SET wp0-unrelated-proof keep
+    uv run pytest backend/tests/integration/test_minio_client.py backend/tests/integration/test_smoke.py backend/tests/integration/test_db_migrations.py -v -m integration
+    uv run pytest -m integration -q -rs
+    uv run pytest -m "not integration" -q
+    # Assert app revision=head, temp DB count=0, WP0 Redis key count=0,
+    # unrelated Redis value=keep, and MinIO object count=0.
+    docker compose -f docker-compose.test.yml exec -T redis redis-cli -n 15 DEL wp0-unrelated-proof
+} finally {
+    Remove-Item Env:SMARTSCREEN_REQUIRE_INTEGRATION -ErrorAction SilentlyContinue
+    docker compose -f docker-compose.test.yml down -v --remove-orphans
+}
 ```
 
 Expected: MinIO read/write/presign, health, Celery ping, and Alembic round-trip tests pass with zero skips.
 
+After the run, verify the configured application database is still at head, no `smartscreen_migration_%` database remains, no WP0 queue/binding/result key remains, a seeded unrelated Redis key survives until explicitly removed, and the MinIO test bucket is empty. Always put Compose teardown in `finally` while performing these checks.
+
 - [ ] **Step 5: Commit the real integration gates**
 
 ```bash
-git add -A -- backend/tests/integration backend/tests/unit/test_minio_client.py
-git commit -m "test: enforce storage worker and migration integration gates"
+git add -A -- backend/tests/integration backend/tests/unit/test_integration_isolation.py docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
+git commit -m "test: isolate migration and celery integration state"
 ```
 
 ## Task 6: Cross-Platform Verification Runner
