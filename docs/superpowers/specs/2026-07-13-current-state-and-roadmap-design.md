@@ -44,14 +44,14 @@ Verification results:
 
 These results establish a healthy unit-level baseline. They do not prove that database migrations, real object storage, the real MinerU service, the real LLM gateway, or the full HTTP workflow operate correctly in a deployed environment.
 
-### 3.1 WP0 local verification evidence (2026-07-13)
+### 3.1 WP0 verification evidence (2026-07-13)
 
 On branch `codex/wp0-integration-baseline`, the locked local verification path produced:
 
 - `uv sync --extra dev --locked` and `uv run python scripts/verify.py` passed: 102 non-integration tests and 16 integration tests completed with zero skips.
 - Ruff, mypy, the real migration round trip, MinIO, Redis/Celery, and post-run clean-state checks passed.
 
-Exact local environment, timing, cleanup, and commit-range evidence is recorded in the [active WP0 plan](../plans/2026-07-13-wp0-integration-baseline.md#local-execution-evidence). This is local evidence only: the repository has no configured Git remote, so no hosted GitHub Actions run or run URL exists. WP0 therefore remains in progress, and WP1 remains blocked on WP0.
+Exact local environment, timing, cleanup, and commit-range evidence is recorded in the [WP0 plan](../plans/2026-07-13-wp0-integration-baseline.md#completion-evidence). Hosted [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679) passed for Python 3.10, Python 3.14, and the full integration job at commit `b3447ec`. WP0 is complete; WP1 is ready for specification and implementation planning.
 
 ## 4. Implemented System
 
@@ -342,7 +342,7 @@ The following remain later extensions:
 
 ### WP0: Reproducible integration baseline
 
-**Status:** In progress - local exit gate passed; hosted GitHub Actions run pending because no remote is configured.
+**Status:** Complete - local strict verification and hosted GitHub Actions run `29237545679` passed.
 
 **Goal:** make the existing backend verifiable with disposable dependencies.
 
@@ -353,6 +353,8 @@ The following remain later extensions:
 **Exit gate:** all existing integration tests execute rather than skip in CI; unit, integration, Ruff, and mypy gates pass.
 
 ### WP1: Security and raw-file integrity
+
+**Status:** Ready for planning - WP0 passed; an approved WP1 specification and executable implementation plan are required before coding.
 
 **Goal:** close public-write and data-loss risks before expanding the API.
 

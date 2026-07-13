@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10/3.14, uv, pytest, pytest-asyncio, FastAPI, SQLAlchemy, Alembic, PostgreSQL/pgvector, Redis, Celery, MinIO, Docker Compose, Ruff, mypy, GitHub Actions.
 
-**Execution Status:** In progress - all local gates passed; hosted GitHub Actions validation is pending because no Git remote is configured.
+**Execution Status:** Complete - local strict gates and hosted GitHub Actions run `29237545679` passed on 2026-07-13.
 
 ---
 
@@ -1113,11 +1113,9 @@ git diff --check
 
 Expected: uv reports 0.9.6, dependency sync is locked, non-integration tests and static checks pass, and Git reports no whitespace errors. Workflow structure validation confirms the concurrency policy, job timeouts, disabled credential persistence, and pinned uv version. Hosted workflow success remains required once a GitHub remote exists.
 
-- [ ] **Step 3: Run hosted workflow and record evidence**
+- [x] **Step 3: Run hosted workflow and record evidence**
 
-> **Blocked:** No GitHub remote is configured.
-
-Next action: obtain and configure the approved GitHub origin, push `codex/wp0-integration-baseline`, open a pull request, wait for the `verify` workflow, record the successful run URL, complete Task 8 Step 3, and only then mark WP0 `Complete` and WP1 `Ready` if the hosted workflow is green.
+The repository was configured with `origin`, `main` was pushed, and [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679) completed successfully. Jobs `unit-and-static (3.10)`, `unit-and-static (3.14)`, and `integration` all concluded `success` for commit `b3447ec`.
 
 - [x] **Step 4: Commit the workflow**
 
@@ -1174,9 +1172,7 @@ Expected:
 - Ruff and mypy pass.
 - Only WP0 files are modified before the final commit.
 
-- [ ] **Step 3: Record completion evidence**
-
-> **Blocked:** no GitHub remote/run URL. Local evidence is recorded below, but WP0 cannot be marked complete and WP1 cannot be made ready without hosted success.
+- [x] **Step 3: Record completion evidence**
 
 In `docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`:
 
@@ -1187,19 +1183,19 @@ In `docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`:
 In `docs/superpowers/plans/README.md`:
 
 - Mark WP0 `Complete`.
-- Mark WP1 `Ready`.
-- Link the approved WP1 implementation plan only after that plan is written.
+- Mark WP1 `Ready for planning` until its specification and implementation plan are approved.
+- Link the approved WP1 implementation plan after that plan is written.
 
 In this plan, check every executed step and append a short `## Completion Evidence` section containing the commit range and exact verification command output summary.
 
-- [x] **Step 4: Commit WP0 documentation and local status**
+- [x] **Step 4: Commit WP0 documentation and status**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md docs/superpowers/plans/README.md docs/superpowers/plans/2026-07-13-wp0-integration-baseline.md
-git commit -m "docs: record WP0 local verification status"
+git commit -m "docs: record WP0 hosted verification"
 ```
 
-## Local Execution Evidence
+## Completion Evidence
 
 - Branch: `codex/wp0-integration-baseline`.
 - Prior implementation range: `cc73f19..3710446`; the deterministic-settings hardening and this
@@ -1209,7 +1205,8 @@ git commit -m "docs: record WP0 local verification status"
 - `uv run python scripts/verify.py` under hostile inherited `JWT_ALGORITHM=RS256`, `MINERU_MODE=http`, and `CORS_ORIGINS=https://hostile.example`: 102 non-integration tests passed with 16 deselected in 14.47s; 16 integration tests passed with 102 deselected and zero skips in 12.69s.
 - Alembic revision verification, PostgreSQL temporary-database cleanup, Redis WP0-key cleanup, MinIO bucket cleanup, real MinIO checks, Redis-backed Celery ping, Ruff, and mypy all passed. Mypy checked 54 source files.
 - The isolated `smartscreenagent-wp0-test` Compose project was absent after the run; all seven unrelated containers retained the same IDs, names, images, and statuses.
-- Hosted blocker: `git remote -v` is empty, so no GitHub Actions run or run URL exists. WP0 remains in progress and WP1 remains blocked.
+- Hosted verification: [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679) passed at commit `b3447ec`; Python 3.10 unit/static, Python 3.14 unit/static, and integration jobs all concluded `success`.
+- WP0 is complete. WP1 is ready for specification and implementation planning.
 
 ## Plan Self-Review Checklist
 

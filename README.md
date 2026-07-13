@@ -6,7 +6,7 @@ AI-driven resume screening agent for HR.
 
 当前处于“后端评分原型已完成、生产化加固进行中”阶段。
 
-当前正在执行 **WP0 可重复集成基线**；本地验证已通过，仍等待托管 GitHub Actions 成功。WP0 完成后再依次处理鉴权与原文件持久化、真实 MinerU 契约和异步任务。
+**WP0 可重复集成基线已完成**；本地严格验证与托管 GitHub Actions 均已通过。下一步进入 WP1 规划，处理鉴权、上传校验和原文件持久化。
 
 当前候选人写接口尚未强制 JWT/RBAC，上传原文件也未接入 MinIO 持久化，不能直接公网部署。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
@@ -58,7 +58,7 @@ uv run python scripts/verify.py
 
 直接选择 `pytest -m integration` 时，本地不可用的外部服务可能使相关用例跳过；`scripts/verify.py` 会启动隔离依赖并启用严格模式，任何跳过或服务缺失都会使验证失败。
 
-托管工作流 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) 在 Python 3.10 和 3.14 上运行验证矩阵；托管成功仍是 WP0 完成的必要条件。
+托管工作流 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) 在 Python 3.10 和 3.14 上运行验证矩阵；WP0 验收运行见 [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679)。
 
 `MINERU_MODE=stub` 用于本地离线开发；`MINERU_MODE=http` 用于对接独立 `mineru-api` 服务。`library` 模式仍未实现。
 
