@@ -105,8 +105,8 @@ Create `backend/tests/test_bootstrap.py`:
 from collections.abc import MutableMapping
 
 TEST_ENV_DEFAULTS = {
-    "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55432/smartscreen_test",
-    "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55432/smartscreen_test",
+    "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
+    "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
     "REDIS_URL": "redis://127.0.0.1:56379/15",
     "MINIO_ENDPOINT": "127.0.0.1:59000",
     "MINIO_ACCESS_KEY": "smartscreen-test",
@@ -440,7 +440,7 @@ services:
       POSTGRES_PASSWORD: smartscreen
       POSTGRES_DB: smartscreen_test
     ports:
-      - "55432:5432"
+      - "55433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U smartscreen -d smartscreen_test"]
       interval: 2s
@@ -498,7 +498,7 @@ docker compose -f docker-compose.test.yml up -d --wait
 docker compose -f docker-compose.test.yml ps
 ```
 
-Expected: PostgreSQL, Redis, and MinIO report healthy; host ports are 55432, 56379, and 59000/59001.
+Expected: PostgreSQL, Redis, and MinIO report healthy; host ports are 55433, 56379, and 59000/59001.
 
 - [ ] **Step 4: Stop and remove the disposable stack**
 
@@ -689,8 +689,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ["docker", "compose", "-f", "docker-compose.test.yml"]
 TEST_ENV = {
-    "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55432/smartscreen_test",
-    "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55432/smartscreen_test",
+    "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
+    "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
     "REDIS_URL": "redis://127.0.0.1:56379/15",
     "MINIO_ENDPOINT": "127.0.0.1:59000",
     "MINIO_ACCESS_KEY": "smartscreen-test",

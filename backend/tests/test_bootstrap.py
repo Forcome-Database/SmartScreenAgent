@@ -1,8 +1,8 @@
 from collections.abc import MutableMapping
 
 TEST_ENV_DEFAULTS = {
-    "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55432/smartscreen_test",
-    "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55432/smartscreen_test",
+    "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
+    "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
     "REDIS_URL": "redis://127.0.0.1:56379/15",
     "MINIO_ENDPOINT": "127.0.0.1:59000",
     "MINIO_ACCESS_KEY": "smartscreen-test",
