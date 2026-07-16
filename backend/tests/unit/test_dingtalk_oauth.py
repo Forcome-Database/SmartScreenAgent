@@ -2,7 +2,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.app.services.dingtalk.oauth import DingTalkOAuthClient, DingTalkUserInfo
+from backend.app.services.dingtalk.oauth import (
+    DingTalkOAuthClient,
+    DingTalkOAuthError,
+    DingTalkUserInfo,
+)
 
 
 @pytest.mark.asyncio
@@ -34,5 +38,5 @@ async def test_exchange_code_network_error(monkeypatch):
         "_get_user_access_token",
         AsyncMock(side_effect=httpx.HTTPStatusError("400", request=None, response=None)),
     )
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(DingTalkOAuthError):
         await client.exchange_auth_code("bad-code")

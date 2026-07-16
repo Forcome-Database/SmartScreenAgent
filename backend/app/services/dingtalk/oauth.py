@@ -17,6 +17,10 @@ class DingTalkUserInfo:
     display_name: str
 
 
+class DingTalkOAuthError(RuntimeError):
+    pass
+
+
 class DingTalkOAuthClient:
     """钉钉 OAuth 客户端。端点/字段名来自 docs/specs/research/dingtalk-oauth.md（OAS 实读）。"""
 
@@ -54,5 +58,11 @@ class DingTalkOAuthClient:
             )
 
     async def exchange_auth_code(self, auth_code: str) -> DingTalkUserInfo:
-        token = await self._get_user_access_token(auth_code)
-        return await self._fetch_user_info(token)
+        try:
+            token = await self._get_user_access_token(auth_code)
+            info = await self._fetch_user_info(token)
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise DingTalkOAuthError("DingTalk OAuth exchange failed") from exc
+        if not info.union_id or not info.display_name:
+            raise DingTalkOAuthError("DingTalk OAuth response missing user identity")
+        return info
