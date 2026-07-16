@@ -180,9 +180,9 @@
   uv run python scripts/verify.py
   ```
 
-- [x] Confirm hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) passes Python 3.10, Python 3.14, and strict integration jobs.
+- [x] Confirm hosted [GitHub Actions run 29474031067](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29474031067) passes Python 3.10, Python 3.14, and strict integration jobs at the latest evidence SHA.
 - [x] Record exact local and hosted test counts, migration revisions, cleanup evidence, and measured coverage below.
-- [ ] Update WP1 to Complete and WP2 to Ready for planning in the plan index and authoritative roadmap only after every exit criterion passes.
+- [x] Update WP1 to Complete and WP2 to Ready for planning in the plan index and authoritative roadmap after every exit criterion passes.
 - [x] Commit documentation and completion evidence (`d52aac2`).
 
 ## Required Exit Evidence
@@ -213,8 +213,10 @@ Local implementation gate passed on 2026-07-16:
 - Non-integration coverage remained 76% overall; `backend/app/deps.py` increased from 0% to 97%, upload validation reached 95%, and resume storage reached 86%.
 - Clean-state checks passed for migration databases, application tables, Redis/Celery keys, MinIO objects, and temporary resume files.
 - Windows reserved port ranges blocked the historical MinIO test port `59000`; the isolated compose port is now configurable and defaults to `61000`/`61001`.
-- Hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) passed Python 3.10, Python 3.14, and strict integration at commit `c79a384` with zero failed or skipped jobs.
+- Hosted [GitHub Actions run 29474031067](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29474031067) passed Python 3.10, Python 3.14, and strict integration at commit `662b76b` with zero failed or skipped jobs.
+- The configured deployment database `localhost:5432/smartscreen` contained zero candidates at revision `3884ec28fea9`. It was upgraded to `b57c2f9e1a6d`, after which the exact legacy metadata query returned zero candidate rows and zero legacy rows.
+- Legacy disposition for this configured deployment: no backfill or quarantine is required. A different future deployment database must repeat the same rollout query before promotion.
 
-Still required before WP1 can be marked Complete:
+## Exit Decision
 
-- Record the legacy metadata count/disposition for the actual target deployment (the disposable test database count is zero).
+WP1 is **Complete** on 2026-07-16 for the repository's configured deployment scope. WP2 is **Ready for planning**.

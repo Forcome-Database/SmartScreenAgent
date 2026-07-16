@@ -63,7 +63,7 @@ The approved WP1 implementation passed the locked local verification path:
 - Ruff passed; mypy passed for 59 application source files.
 - Post-run checks found no migration databases, application rows, Redis/Celery keys, MinIO objects, or temporary resume files.
 
-WP1 remains **In progress** only until the target deployment's legacy raw-file metadata count and disposition are recorded. The implementation is committed, and hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) passed Python 3.10, Python 3.14, and strict integration. WP2 therefore remains blocked pending that deployment evidence.
+WP1 is **Complete**. The implementation is committed, hosted [GitHub Actions run 29474031067](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29474031067) passed Python 3.10, Python 3.14, and strict integration, and the configured deployment database upgraded to `b57c2f9e1a6d` with zero candidate and legacy rows requiring disposition. WP2 is **Ready for planning**.
 
 ## 4. Implemented System
 
@@ -375,7 +375,7 @@ The following remain later extensions:
 
 ### WP1: Security and raw-file integrity
 
-**Status:** In progress - approved implementation passed the full local gate and hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) on 2026-07-16; only target-deployment legacy metadata disposition remains.
+**Status:** Complete - approved implementation passed the full local gate and hosted [GitHub Actions run 29474031067](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29474031067) on 2026-07-16; the configured deployment database upgraded with zero legacy rows requiring disposition.
 
 **Goal:** close public-write and data-loss risks before expanding the API.
 
@@ -386,6 +386,8 @@ The following remain later extensions:
 **Exit gate:** unauthorized writes fail; authorized roles pass; every successful upload references an existing private object; failed uploads leave no orphaned object or candidate row.
 
 ### WP2: Production parser contract and validated AI output
+
+**Status:** Ready for planning.
 
 **Goal:** replace assumed external contracts with verified adapters and typed results.
 
