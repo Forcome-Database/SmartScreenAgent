@@ -37,8 +37,8 @@ services:
       MINIO_ROOT_USER: smartscreen-test
       MINIO_ROOT_PASSWORD: smartscreen-test-secret
     ports:
-      - "127.0.0.1:59000:9000"
-      - "127.0.0.1:59001:9001"
+      - "127.0.0.1:${SMARTSCREEN_TEST_MINIO_PORT:-61000}:9000"
+      - "127.0.0.1:${SMARTSCREEN_TEST_MINIO_CONSOLE_PORT:-61001}:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 2s

@@ -5,6 +5,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -42,7 +43,7 @@ TEST_ENV = {
     "SMARTSCREEN_REQUIRE_INTEGRATION": "1",
     "COMPOSE_PROJECT_NAME": COMPOSE_PROJECT_NAME,
 }
-HEAD_REVISION = "3884ec28fea9"
+HEAD_REVISION = "b57c2f9e1a6d"
 CELERY_KEYS = (CELERY_QUEUE, CELERY_BINDING_KEY)
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -89,6 +90,18 @@ async def assert_no_migration_databases(env: dict[str, str]) -> None:
         await connection.close()
 
 
+async def assert_application_tables_empty(env: dict[str, str]) -> None:
+    dsn = env["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    connection = await asyncpg.connect(dsn)
+    try:
+        for table in ("audit_logs", "scores", "candidates", "users"):
+            count = await connection.fetchval(f'SELECT count(*) FROM "{table}"')
+            if count:
+                raise AssertionError(f"application table {table} contains {count} rows")
+    finally:
+        await connection.close()
+
+
 def assert_no_celery_keys(env: dict[str, str]) -> None:
     client = Redis.from_url(env["REDIS_URL"])
     try:
@@ -122,12 +135,25 @@ def assert_minio_bucket_empty(env: dict[str, str]) -> None:
         http_client.clear()
 
 
+def assert_no_temp_uploads() -> None:
+    temp_dir = Path(tempfile.gettempdir())
+    leftovers = sorted(
+        path.name
+        for pattern in ("smartscreen-upload-*", "smartscreen-worker-*")
+        for path in temp_dir.glob(pattern)
+    )
+    if leftovers:
+        raise AssertionError(f"temporary resume files remain: {', '.join(leftovers)}")
+
+
 def assert_clean_state(current_output: str, env: dict[str, str]) -> None:
     try:
         assert_head_revision(current_output)
         asyncio.run(assert_no_migration_databases(env))
+        asyncio.run(assert_application_tables_empty(env))
         assert_no_celery_keys(env)
         assert_minio_bucket_empty(env)
+        assert_no_temp_uploads()
     except AssertionError:
         raise
     except Exception as exc:

@@ -4,7 +4,7 @@ TEST_ENV_DEFAULTS = {
     "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
     "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
     "REDIS_URL": "redis://127.0.0.1:56379/15",
-    "MINIO_ENDPOINT": "127.0.0.1:59000",
+    "MINIO_ENDPOINT": "127.0.0.1:61000",
     "MINIO_ACCESS_KEY": "smartscreen-test",
     "MINIO_SECRET_KEY": "smartscreen-test-secret",
     "MINIO_BUCKET": "resumes-test",
@@ -28,6 +28,9 @@ TEST_ENV_DEFAULTS = {
     "MINERU_MODE": "stub",
     "MINERU_BASE_URL": "",
     "MINERU_API_KEY": "",
+    "MAX_RESUME_FILE_BYTES": "20971520",
+    "UPLOAD_CHUNK_BYTES": "1048576",
+    "MALWARE_SCAN_MODE": "disabled",
     "CORS_ORIGINS": "http://localhost:3000",
 }
 
