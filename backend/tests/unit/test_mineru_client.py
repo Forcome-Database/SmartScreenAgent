@@ -1,11 +1,12 @@
 import io
+import json
 import zipfile
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
-from httpx import Response
+from httpx import Request, Response
 
 from backend.app.config import get_settings
 from backend.app.services.parser.errors import (
@@ -16,41 +17,36 @@ from backend.app.services.parser.errors import (
 )
 from backend.app.services.parser.mineru_client import MinerUClient, ParseResult
 
+UPLOAD_URL = "https://mineru.oss-cn-shanghai.aliyuncs.com/api-upload/signed?token=x"
+RESULT_URL = "https://cdn-mineru.openxlab.org.cn/pdf/result.zip?token=y"
+BATCH_ID = "2bb2f0ec-a336-4a0a-b61a-241afaf9cc87"
+
 
 def _zip_result(markdown: str = "# 张三\n外贸经历") -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("resume/auto/resume.md", markdown.encode())
+        archive.writestr("full.md", markdown.encode())
     return output.getvalue()
 
 
-def _health(protocol: int = 2) -> dict:
+def _envelope(data: dict, *, code: int | str = 0) -> dict:
     return {
-        "status": "healthy",
-        "version": "3.4.4",
-        "protocol_version": protocol,
-        "queued_tasks": 0,
-        "processing_tasks": 0,
-        "completed_tasks": 0,
-        "failed_tasks": 0,
-        "max_concurrent_requests": 2,
+        "code": code,
+        "data": data,
+        "msg": "ok",
+        "trace_id": "trace-123",
     }
 
 
-def _task(status: str) -> dict:
-    return {
-        "task_id": "task-123",
-        "status": status,
-        "backend": "hybrid-engine",
-        "file_names": ["resume.pdf"],
-        "created_at": "2026-07-16T00:00:00Z",
-        "started_at": None,
-        "completed_at": None,
-        "error": None,
-        "status_url": "https://mineru.example/tasks/task-123",
-        "result_url": "https://mineru.example/tasks/task-123/result",
-        "queued_ahead": 0,
+def _status(data_id: str, state: str, **extra) -> dict:
+    item = {
+        "file_name": "resume.pdf",
+        "data_id": data_id,
+        "state": state,
+        "err_msg": "",
+        **extra,
     }
+    return _envelope({"batch_id": BATCH_ID, "extract_result": [item]})
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +54,13 @@ def _reset_settings():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+def _official_settings(monkeypatch) -> None:
+    monkeypatch.setenv("MINERU_MODE", "official")
+    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.net")
+    monkeypatch.setenv("MINERU_API_KEY", "secret")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
 
 
 @pytest.mark.asyncio
@@ -75,70 +78,61 @@ async def test_stub_mode_returns_dummy_markdown(monkeypatch, tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_http_mode_uses_protocol_two_task_flow(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
-    monkeypatch.setenv("MINERU_API_KEY", "secret")
-    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+async def test_official_v4_flow_is_typed_and_keeps_token_on_api_origin(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _official_settings(monkeypatch)
     pdf = tmp_path / "resume.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
+    captured: dict[str, str] = {}
 
-    respx.get("https://mineru.example/health").mock(return_value=Response(200, json=_health()))
-    submit = respx.post("https://mineru.example/tasks").mock(
-        return_value=Response(
-            202,
-            json={
-                **_task("pending"),
-                "status_url": "https://evil.example/redirect",
-                "result_url": "https://evil.example/result",
-                "message": "Task submitted successfully",
-            },
-        )
-    )
-    status = respx.get("https://mineru.example/tasks/task-123").mock(
-        side_effect=[
-            Response(200, json=_task("processing")),
-            Response(200, json=_task("completed")),
-        ]
-    )
-    result_route = respx.get("https://mineru.example/tasks/task-123/result").mock(
-        return_value=Response(
+    def submit(request: Request) -> Response:
+        payload = json.loads(request.content)
+        captured["data_id"] = payload["files"][0]["data_id"]
+        assert payload == {
+            "files": [{"name": "resume.pdf", "data_id": captured["data_id"]}],
+            "model_version": "vlm",
+            "language": "ch",
+            "enable_formula": True,
+            "enable_table": True,
+        }
+        return Response(
             200,
-            content=_zip_result(),
-            headers={"content-type": "application/zip"},
+            json=_envelope({"batch_id": BATCH_ID, "file_urls": [UPLOAD_URL]}),
         )
+
+    poll_count = 0
+
+    def poll(request: Request) -> Response:
+        nonlocal poll_count
+        states = ["waiting-file", "pending", "running", "converting", "done"]
+        state = states[poll_count]
+        poll_count += 1
+        extra = {"full_zip_url": RESULT_URL} if state == "done" else {}
+        return Response(200, json=_status(captured["data_id"], state, **extra))
+
+    submit_route = respx.post("https://mineru.net/api/v4/file-urls/batch").mock(side_effect=submit)
+    upload_route = respx.put(UPLOAD_URL).mock(return_value=Response(200))
+    poll_route = respx.get(f"https://mineru.net/api/v4/extract-results/batch/{BATCH_ID}").mock(
+        side_effect=poll
     )
+    result_route = respx.get(RESULT_URL).mock(return_value=Response(200, content=_zip_result()))
 
     result = await MinerUClient().parse(pdf)
 
     assert result.markdown.startswith("# 张三")
-    assert result.task_id == "task-123"
-    assert result.backend == "hybrid-engine"
-    assert result.service_version == "3.4.4"
-    assert result.protocol_version == 2
-    assert result.compressed_bytes > 0
-    assert submit.called and status.call_count == 2 and result_route.called
-    request = submit.calls[0].request
-    assert request.headers["authorization"] == "Bearer secret"
-    assert b'name="files"' in request.content
-    assert b'name="response_format_zip"' in request.content
-    assert b"true" in request.content
-    assert not respx.calls[-1].request.url.host == "evil.example"
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_rejects_protocol_mismatch(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
-    pdf = tmp_path / "resume.pdf"
-    pdf.write_bytes(b"x")
-    respx.get("https://mineru.example/health").mock(
-        return_value=Response(200, json=_health(protocol=3))
-    )
-
-    with pytest.raises(MinerUContractError, match="protocol"):
-        await MinerUClient().parse(pdf)
+    assert result.task_id == BATCH_ID
+    assert result.backend == "vlm"
+    assert result.service_version == "official-api-v4"
+    assert result.protocol_version == 4
+    assert result.source == "official"
+    assert submit_route.called and upload_route.called and poll_route.call_count == 5
+    assert result_route.called
+    assert submit_route.calls[0].request.headers["authorization"] == "Bearer secret"
+    assert poll_route.calls[0].request.headers["authorization"] == "Bearer secret"
+    assert "authorization" not in upload_route.calls[0].request.headers
+    assert "content-type" not in upload_route.calls[0].request.headers
+    assert "authorization" not in result_route.calls[0].request.headers
 
 
 @pytest.mark.asyncio
@@ -153,33 +147,85 @@ async def test_rejects_protocol_mismatch(monkeypatch, tmp_path: Path) -> None:
 async def test_wraps_transport_failure_as_unavailable(
     monkeypatch, tmp_path: Path, transport_error: httpx.TransportError
 ) -> None:
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
+    _official_settings(monkeypatch)
     pdf = tmp_path / "resume.pdf"
     pdf.write_bytes(b"x")
-    respx.get("https://mineru.example/health").mock(
-        side_effect=transport_error
-    )
+    respx.post("https://mineru.net/api/v4/file-urls/batch").mock(side_effect=transport_error)
 
     with pytest.raises(MinerUUnavailableError) as exc_info:
         await MinerUClient().parse(pdf)
     assert "protocol details" not in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    "url,allowed_hosts,require_zip",
+    [
+        (
+            "http://mineru.oss-cn-shanghai.aliyuncs.com/x",
+            ("mineru.oss-cn-shanghai.aliyuncs.com",),
+            False,
+        ),
+        (
+            "https://user:secret@mineru.oss-cn-shanghai.aliyuncs.com/x",
+            ("mineru.oss-cn-shanghai.aliyuncs.com",),
+            False,
+        ),
+        (
+            "https://mineru.oss-cn-shanghai.aliyuncs.com:444/x",
+            ("mineru.oss-cn-shanghai.aliyuncs.com",),
+            False,
+        ),
+        (
+            "https://mineru.oss-cn-shanghai.aliyuncs.com/x#fragment",
+            ("mineru.oss-cn-shanghai.aliyuncs.com",),
+            False,
+        ),
+        ("https://127.0.0.1/x", ("127.0.0.1",), False),
+        (
+            "https://mineru.oss-cn-shanghai.aliyuncs.com.evil.test/x",
+            ("mineru.oss-cn-shanghai.aliyuncs.com",),
+            False,
+        ),
+        ("https://cdn-mineru.openxlab.org.cn/not-zip", ("cdn-mineru.openxlab.org.cn",), True),
+    ],
+)
+def test_rejects_unsafe_asset_urls(
+    url: str, allowed_hosts: tuple[str, ...], require_zip: bool
+) -> None:
+    with pytest.raises(MinerUContractError):
+        MinerUClient._validate_asset_url(
+            url,
+            allowed_hosts=allowed_hosts,
+            require_zip=require_zip,
+        )
+
+
 @pytest.mark.asyncio
 @respx.mock
-async def test_terminal_task_failure_is_typed(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
-    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+async def test_failed_task_is_sanitized(monkeypatch, tmp_path: Path) -> None:
+    _official_settings(monkeypatch)
     pdf = tmp_path / "resume.pdf"
     pdf.write_bytes(b"x")
-    respx.get("https://mineru.example/health").mock(return_value=Response(200, json=_health()))
-    respx.post("https://mineru.example/tasks").mock(
-        return_value=Response(202, json={**_task("pending"), "message": "submitted"})
-    )
-    respx.get("https://mineru.example/tasks/task-123").mock(
-        return_value=Response(200, json={**_task("failed"), "error": "private provider text"})
+    captured: dict[str, str] = {}
+
+    def submit(request: Request) -> Response:
+        captured["data_id"] = json.loads(request.content)["files"][0]["data_id"]
+        return Response(
+            200,
+            json=_envelope({"batch_id": BATCH_ID, "file_urls": [UPLOAD_URL]}),
+        )
+
+    respx.post("https://mineru.net/api/v4/file-urls/batch").mock(side_effect=submit)
+    respx.put(UPLOAD_URL).mock(return_value=Response(200))
+    respx.get(f"https://mineru.net/api/v4/extract-results/batch/{BATCH_ID}").mock(
+        side_effect=lambda request: Response(
+            200,
+            json=_status(
+                captured["data_id"],
+                "failed",
+                err_msg="private provider text and signed URL",
+            ),
+        )
     )
 
     with pytest.raises(MinerUTaskError) as exc_info:
@@ -189,25 +235,79 @@ async def test_terminal_task_failure_is_typed(monkeypatch, tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_rejects_mismatched_result_identity(monkeypatch, tmp_path: Path) -> None:
+    _official_settings(monkeypatch)
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"x")
+    respx.post("https://mineru.net/api/v4/file-urls/batch").mock(
+        return_value=Response(
+            200,
+            json=_envelope({"batch_id": BATCH_ID, "file_urls": [UPLOAD_URL]}),
+        )
+    )
+    respx.put(UPLOAD_URL).mock(return_value=Response(200))
+    respx.get(f"https://mineru.net/api/v4/extract-results/batch/{BATCH_ID}").mock(
+        return_value=Response(200, json=_status("wrong-data-id", "pending"))
+    )
+
+    with pytest.raises(MinerUContractError, match="identity"):
+        await MinerUClient().parse(pdf)
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        (Response(429), MinerUUnavailableError),
+        (Response(503), MinerUUnavailableError),
+        (Response(302, headers={"location": "https://evil.test"}), MinerUContractError),
+        (Response(200, json=_envelope({}, code=-60002)), MinerUTaskError),
+        (Response(200, json=_envelope({}, code=-10001)), MinerUUnavailableError),
+        (Response(200, json=_envelope({}, code="UNKNOWN")), MinerUContractError),
+    ],
+)
+async def test_submission_failures_are_typed(
+    monkeypatch, tmp_path: Path, response: Response, expected: type[Exception]
+) -> None:
+    _official_settings(monkeypatch)
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"x")
+    respx.post("https://mineru.net/api/v4/file-urls/batch").mock(return_value=response)
+
+    with pytest.raises(expected):
+        await MinerUClient().parse(pdf)
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_rejects_oversized_result_before_writing(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
-    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+    _official_settings(monkeypatch)
     monkeypatch.setenv("MINERU_RESULT_MAX_BYTES", "4")
     pdf = tmp_path / "resume.pdf"
     pdf.write_bytes(b"x")
-    respx.get("https://mineru.example/health").mock(return_value=Response(200, json=_health()))
-    respx.post("https://mineru.example/tasks").mock(
-        return_value=Response(202, json={**_task("pending"), "message": "submitted"})
+    captured: dict[str, str] = {}
+
+    def submit(request: Request) -> Response:
+        captured["data_id"] = json.loads(request.content)["files"][0]["data_id"]
+        return Response(
+            200,
+            json=_envelope({"batch_id": BATCH_ID, "file_urls": [UPLOAD_URL]}),
+        )
+
+    respx.post("https://mineru.net/api/v4/file-urls/batch").mock(side_effect=submit)
+    respx.put(UPLOAD_URL).mock(return_value=Response(200))
+    respx.get(f"https://mineru.net/api/v4/extract-results/batch/{BATCH_ID}").mock(
+        side_effect=lambda request: Response(
+            200,
+            json=_status(captured["data_id"], "done", full_zip_url=RESULT_URL),
+        )
     )
-    respx.get("https://mineru.example/tasks/task-123").mock(
-        return_value=Response(200, json=_task("completed"))
-    )
-    respx.get("https://mineru.example/tasks/task-123/result").mock(
+    respx.get(RESULT_URL).mock(
         return_value=Response(
             200,
             content=_zip_result(),
-            headers={"content-type": "application/zip", "content-length": "999"},
+            headers={"content-length": "999"},
         )
     )
 

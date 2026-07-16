@@ -5,13 +5,12 @@ import pytest
 from pydantic import ValidationError
 
 from backend.app.services.parser.contracts import (
-    MinerUHealth,
-    MinerUSubmission,
-    MinerUTaskStatus,
+    MinerUOfficialBatchResponse,
+    MinerUOfficialUploadResponse,
 )
 
 CONTRACTS = Path(__file__).parents[1] / "contracts"
-MINERU = CONTRACTS / "mineru" / "3.4.4"
+MINERU = CONTRACTS / "mineru" / "official-v4"
 
 
 def _load(path: Path) -> dict:
@@ -21,22 +20,23 @@ def _load(path: Path) -> dict:
 
 
 def test_source_derived_mineru_fixtures_match_typed_contracts() -> None:
-    health = MinerUHealth.model_validate(_load(MINERU / "health.json"))
-    submission = MinerUSubmission.model_validate(_load(MINERU / "submission.json"))
+    submission = MinerUOfficialUploadResponse.model_validate(_load(MINERU / "upload-response.json"))
     statuses = [
-        MinerUTaskStatus.model_validate(_load(path))
+        MinerUOfficialBatchResponse.model_validate(_load(path))
         for path in sorted(MINERU.glob("status-*.json"))
     ]
 
-    assert health.version == "3.4.4"
-    assert health.protocol_version == 2
-    assert submission.task_id == "synthetic-task-001"
-    assert {status.status for status in statuses} == {"pending", "completed", "failed"}
+    assert submission.data.batch_id == "2bb2f0ec-a336-4a0a-b61a-241afaf9cc87"
+    assert {status.data.extract_result[0].state for status in statuses} == {
+        "pending",
+        "done",
+        "failed",
+    }
 
 
 def test_malformed_source_fixture_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        MinerUHealth.model_validate(_load(MINERU / "malformed-extra-field.json"))
+        MinerUOfficialUploadResponse.model_validate(_load(MINERU / "malformed-extra-field.json"))
 
 
 def test_newapi_fixtures_pin_supported_structured_output_modes() -> None:

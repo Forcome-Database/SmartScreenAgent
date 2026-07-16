@@ -1,0 +1,30 @@
+{
+  "capture_type": "sanitized_runtime_evidence",
+  "captured_at": "2026-07-16T15:55:41+08:00",
+  "endpoint_environment": "mineru.net/api/v4",
+  "api_version": "v4",
+  "model_version": "vlm",
+  "formats": {
+    "pdf": "passed",
+    "docx": "passed",
+    "png": "passed",
+    "jpg": "passed"
+  },
+  "flow": {
+    "upload_url_request": "passed",
+    "signed_put": "passed",
+    "batch_poll": "passed",
+    "zip_download": "passed",
+    "archive_validation": "passed"
+  },
+  "asset_hosts": {
+    "upload": "mineru.oss-cn-shanghai.aliyuncs.com",
+    "result": "cdn-mineru.openxlab.org.cn"
+  },
+  "pytest": {
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0
+  },
+  "secrets_captured": false
+}

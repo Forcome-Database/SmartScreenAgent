@@ -1,5 +1,16 @@
 # MinerU Integration — Research Notes
 
+> **Superseded on 2026-07-16:** This document originally evaluated a self-hosted
+> MinerU 3.x service. Production now uses the
+> [official MinerU API v4](https://mineru.net/doc/docs/index_en/). The active flow is:
+> request signed upload URLs with `POST /api/v4/file-urls/batch`; upload raw file bytes
+> to each returned URL without the API bearer token; poll
+> `GET /api/v4/extract-results/batch/{batch_id}`; then validate and download
+> `full_zip_url`. API, upload, and result traffic use isolated clients with exact-host
+> allowlists, redirects disabled, bounded downloads, and no signed URLs in logs.
+> Everything below this notice is retained as historical research and is not the
+> implemented WP2 contract.
+
 **Task:** P2 Task 0 — verify MinerU (PDF/Office parsing library) so that Task 4 (MinerU client) can be implemented without guesswork.
 
 **Researched on:** 2026-05-13

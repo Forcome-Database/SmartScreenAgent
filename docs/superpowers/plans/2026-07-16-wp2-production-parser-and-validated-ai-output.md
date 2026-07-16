@@ -6,7 +6,7 @@
 
 **Goal:** Replace the assumed MinerU and weak LLM JSON boundaries with versioned external contracts and deterministic validation that prevents unsupported parser artifacts or fabricated scores from being persisted.
 
-**Architecture:** A typed MinerU adapter performs protocol-2 health, task submission, polling, bounded result download, and safe artifact parsing. The LLM gateway exposes typed errors and explicit structured-output configuration. Pydantic extraction models and contextual judge validation run before the existing transactional ingestion/scoring boundary persists anything.
+**Architecture:** A typed MinerU adapter uses official API v4 to request signed upload URLs, upload source files with an isolated client, poll the batch by `batch_id`, download a bounded result ZIP from an allowlisted host, and safely parse its artifacts. The LLM gateway exposes typed errors and explicit structured-output configuration. Pydantic extraction models and contextual judge validation run before the existing transactional ingestion/scoring boundary persists anything.
 
 **Tech stack:** Python 3.10-3.14, FastAPI, Pydantic v2, httpx, OpenAI Python SDK, SQLAlchemy async, MinIO, pytest, respx, Ruff, mypy.
 
@@ -19,7 +19,7 @@
 - `backend/app/services/parser/result_archive.py`
 - `backend/app/services/llm/errors.py`
 - `backend/app/services/llm/structured_output.py`
-- `backend/tests/contracts/mineru/3.4.4/`
+- `backend/tests/contracts/mineru/official-v4/`
 - `backend/tests/contracts/newapi/`
 - `backend/tests/fixtures/resumes/`
 - `backend/tests/unit/test_mineru_result_archive.py`
@@ -65,39 +65,38 @@
 
 **Files:** research docs, config, environment example, contract fixtures, configuration tests.
 
-- [ ] Add failing settings tests for protocol, backend, effort, language, polling, task deadline, result limits, and structured-output mode.
-- [ ] Update MinerU research from 3.1.11 to official release 3.4.4 and API protocol 2.
-- [ ] Record official route, multipart, status, and ZIP artifact shapes from `fast_api.py` and `api_client.py`.
-- [ ] Add source-derived sanitized fixtures for health, submission, pending, completed, failed, and malformed responses.
-- [ ] Keep runtime-captured fixtures separate and clearly labeled with service version/date.
-- [ ] Add `.firecrawl/` to `.gitignore` without committing fetched pages.
-- [ ] Run focused config/fixture tests, Ruff, and mypy.
-- [ ] Commit contract baseline and configuration independently.
+- [x] Add settings tests for official mode, protocol/model version, language, polling, task deadline, exact asset hosts, result limits, and structured-output mode.
+- [x] Replace the self-hosted protocol-2 baseline with the official MinerU cloud API v4 contract.
+- [x] Record sanitized upload-request, pending, completed, failed, and malformed response shapes for `file-urls/batch` and `extract-results/batch/{batch_id}`.
+- [x] Keep runtime evidence separate and labeled with API/model version and date.
+- [x] Keep `.firecrawl/` ignored and fetched documentation untracked.
+- [x] Run focused config/fixture tests, Ruff, and mypy.
+- [x] Commit the earlier contract/configuration baseline independently; include the official-v4 replacement in this follow-up commit.
 
 ## Task 2: Introduce typed MinerU models and errors
 
 **Files:** parser contracts/errors, MinerU client, unit tests.
 
-- [ ] Add failing tests for valid/invalid health, submission, and status payloads with `extra=forbid`.
-- [ ] Add failing tests for protocol mismatch, inconsistent task IDs, unknown states, and bounded task IDs.
-- [ ] Define typed health, submission, status, parse-result, and error models.
-- [ ] Split unavailable, contract-invalid, and task/result failure errors without provider body leakage.
-- [ ] Preserve cancellation and exception chaining.
-- [ ] Run focused parser contract tests, Ruff, and mypy.
-- [ ] Commit typed MinerU boundary.
+- [x] Add tests for valid/invalid upload and batch-result payloads with `extra=forbid`.
+- [x] Add tests for inconsistent `batch_id`/`data_id`, unknown states, progress invariants, and bounded identifiers.
+- [x] Define typed upload, progress, extract-result, batch-result, parse-result, and error models.
+- [x] Split unavailable, contract-invalid, and task/result failure errors without provider body leakage.
+- [x] Preserve cancellation and exception chaining.
+- [x] Run focused parser contract tests, Ruff, and mypy.
+- [x] Include the typed official-v4 boundary in this scoped follow-up commit.
 
-## Task 3: Implement health, submit, and poll protocol
+## Task 3: Implement signed upload and batch polling
 
 **Files:** MinerU client/config/tests.
 
-- [ ] Add failing tests for exact `/health` and `/tasks` calls, repeated `files` multipart field, and every configured form field.
-- [ ] Add failing tests proving returned status/result URLs cannot redirect the client off the configured origin.
-- [ ] Add pending/processing/completed polling tests with deterministic clocks or injected sleep.
-- [ ] Add deadline, connection, timeout, 404, 409, 5xx, malformed JSON, and cancellation tests.
-- [ ] Implement protocol-2 health negotiation and construct status/result URLs from the validated task ID.
-- [ ] Emit structured metadata-only logs with trace ID and elapsed time.
-- [ ] Run focused tests, Ruff, and mypy.
-- [ ] Commit protocol client independently of archive parsing.
+- [x] Add tests for exact `POST /api/v4/file-urls/batch`, signed `PUT`, and `GET /api/v4/extract-results/batch/{batch_id}` calls.
+- [x] Prove API and blob traffic use separate clients, redirects stay disabled, bearer tokens never reach asset hosts, and hosts are exact allowlist matches.
+- [x] Add waiting/pending/running/converting/done/failed polling tests with injected sleep.
+- [x] Add deadline, connection, timeout, 4xx/5xx, malformed JSON, oversized download, and cancellation tests.
+- [x] Implement official API v4 signed upload, identity-checked polling, bounded ZIP download, and temporary-file cleanup.
+- [x] Emit metadata-only errors without provider bodies, signed queries, bearer tokens, or local paths.
+- [x] Run focused tests, Ruff, and mypy.
+- [x] Include the official-v4 client in this scoped follow-up commit.
 
 ## Task 4: Implement bounded ZIP result handling
 
@@ -167,27 +166,27 @@
 
 Local strict verification on 2026-07-16 passed 179 offline tests and 42 integration
 tests with zero skips, followed by Ruff, mypy, migration, PostgreSQL, Redis,
-MinIO, Celery, and temporary-file clean-state checks. The combined external-contract
-gate remains blocked on the MinerU protocol mismatch; WP2 is still In progress.
+MinIO, Celery, and temporary-file clean-state checks. A later full count is recorded
+after the official-v4 replacement gate below; WP2 remains In progress pending hosted CI.
 
 The configured new-api deployment was verified separately on 2026-07-16 using
 `json_schema`: model listing plus primary/fallback extraction and judge probes passed
-5/5 with zero skips for `gpt-5.6-sol`. MinerU runtime evidence remains outstanding
-because the supplied official cloud token uses MinerU API v4, while the approved WP2
-adapter targets the self-hosted protocol-2 `/health` and `/tasks` contract.
+5/5 with zero skips for `gpt-5.6-sol`. The adapter was subsequently changed to the
+official cloud API v4 and verified with all four synthetic input formats.
 
 ## Task 9: Add external runtime contract gates
 
 **Files:** external tests, fixtures, verification script, documentation.
 
-- [ ] Add synthetic, non-PII PDF, DOCX, PNG, and JPEG fixtures suitable for the real parser.
-- [ ] Add a command that requires external endpoints/credentials and fails on missing configuration or skipped `external_contract` tests.
-- [ ] Capture deployed MinerU health, OpenAPI, task/result responses, sanitized artifacts, service version, and protocol version.
-- [ ] Verify all four supported input formats produce non-empty validated Markdown/extraction.
+- [x] Add synthetic, non-PII PDF, DOCX, PNG, and JPEG fixtures suitable for the real parser.
+- [x] Add a command that requires external endpoints/credentials and fails on missing configuration or skipped `external_contract` tests.
+- [x] Capture sanitized official-v4 flow evidence for signed upload, polling, result download, API version, and model version without retaining signed URLs or provider bodies.
+- [x] Verify all four supported input formats produce non-empty validated Markdown.
 - [x] Capture the deployed new-api model list reduced to configured model IDs.
 - [x] Probe configured primary/fallback extraction and judge models for the selected structured-output mode.
-- [ ] Record exact runtime test counts, endpoint environment name, service/model versions, artifact inventory, and run location without secrets.
-- [ ] Commit sanitized runtime evidence only after review.
+- [x] Record the four-format runtime count, endpoint environment, API/model versions, artifact inventory, and secret-free evidence policy.
+- [x] Record the final combined MinerU/new-api count after the last external gate: 9 passed, 0 failed, 0 skipped in 386.38 seconds on Windows/Python 3.14.
+- [x] Review and stage only sanitized runtime evidence; no batch IDs, signed URLs, credentials, provider bodies, prompts, completions, or PII are retained.
 
 ## Task 10: Full verification, rollout documentation, and WP2 exit review
 
@@ -195,7 +194,7 @@ adapter targets the self-hosted protocol-2 `/health` and `/tasks` contract.
 
 - [ ] Update quick start and environment documentation for MinerU protocol/configuration and structured-output modes.
 - [ ] Document stable parser/AI error codes, runtime verification, rollback, and synthetic fixture policy.
-- [ ] Run the complete local matrix:
+- [x] Run the complete local matrix:
 
   ```bash
   uv sync --extra dev --locked
@@ -206,6 +205,11 @@ adapter targets the self-hosted protocol-2 `/health` and `/tasks` contract.
   uv run python scripts/verify_external_contracts.py
   ```
 
+  Final local evidence on Windows/Python 3.14: 192 offline tests and 42 strict
+  integration tests passed with zero failures; the external gate passed 9/9 with
+  zero skips in 386.38 seconds. Ruff, mypy, Alembic, PostgreSQL, Redis, MinIO,
+  temporary-file cleanup, and clean-state assertions passed.
+
 - [ ] Push scoped commits and confirm hosted Python 3.10, Python 3.14, and strict integration jobs.
 - [ ] Record exact commits, test counts, service/model versions, contract artifacts, cleanup evidence, and run URLs.
 - [ ] Mark WP2 Complete and WP3 Ready for planning only after every offline and external exit criterion passes.
@@ -215,8 +219,8 @@ adapter targets the self-hosted protocol-2 `/health` and `/tasks` contract.
 
 - Approved WP2 specification.
 - Exact scoped commit range.
-- MinerU release, service version, and API protocol version.
-- Sanitized OpenAPI, health, task, and result artifact inventory.
+- MinerU endpoint environment, official API version, and model version.
+- Sanitized upload-request, batch-result, archive, and four-format runtime evidence inventory.
 - Configured new-api model IDs and structured-output capability results.
 - Offline unit/integration counts with zero failures and strict integration zero skips.
 - External-contract count with zero failures and zero skips.

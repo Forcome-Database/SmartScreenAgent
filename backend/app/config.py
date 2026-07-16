@@ -51,14 +51,14 @@ class Settings(BaseSettings):
     MONTHLY_LLM_BUDGET_CNY: float = 1500.0
 
     # Resume parser (MinerU)
-    MINERU_MODE: Literal["http", "stub"] = "http"
-    MINERU_BASE_URL: str = ""
+    MINERU_MODE: Literal["official", "stub"] = "official"
+    MINERU_BASE_URL: str = "https://mineru.net"
     MINERU_API_KEY: str = ""
-    MINERU_EXPECTED_PROTOCOL_VERSION: int = 2
-    MINERU_BACKEND: str = "hybrid-engine"
-    MINERU_EFFORT: str = "medium"
+    MINERU_EXPECTED_PROTOCOL_VERSION: int = 4
+    MINERU_MODEL_VERSION: Literal["pipeline", "vlm"] = "vlm"
     MINERU_LANGUAGE: str = "ch"
-    MINERU_PARSE_METHOD: str = "auto"
+    MINERU_UPLOAD_HOSTS: str = "mineru.oss-cn-shanghai.aliyuncs.com"
+    MINERU_RESULT_HOSTS: str = "cdn-mineru.openxlab.org.cn"
     MINERU_POLL_INTERVAL_SECONDS: float = 1.0
     MINERU_TASK_TIMEOUT_SECONDS: float = 3600.0
     MINERU_HTTP_TIMEOUT_SECONDS: float = 120.0
@@ -78,6 +78,22 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def mineru_upload_hosts(self) -> tuple[str, ...]:
+        return tuple(
+            host.strip().casefold().rstrip(".")
+            for host in self.MINERU_UPLOAD_HOSTS.split(",")
+            if host.strip()
+        )
+
+    @property
+    def mineru_result_hosts(self) -> tuple[str, ...]:
+        return tuple(
+            host.strip().casefold().rstrip(".")
+            for host in self.MINERU_RESULT_HOSTS.split(",")
+            if host.strip()
+        )
 
 
 @lru_cache(maxsize=1)

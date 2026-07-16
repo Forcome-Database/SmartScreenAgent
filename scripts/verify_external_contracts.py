@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER_PARTS = ("example.com", "your-newapi", "sk-your-key")
 REQUIRED = (
     "MINERU_BASE_URL",
+    "MINERU_API_KEY",
     "NEWAPI_BASE_URL",
     "NEWAPI_API_KEY",
     "LLM_MODEL_EXTRACT",
@@ -37,8 +38,8 @@ def configuration_errors(environ: Mapping[str, str]) -> list[str]:
             "sk-test",
         }:
             errors.append(f"{key} still contains a placeholder/test value")
-    if environ.get("MINERU_MODE", "").strip().casefold() != "http":
-        errors.append("MINERU_MODE must be http")
+    if environ.get("MINERU_MODE", "").strip().casefold() != "official":
+        errors.append("MINERU_MODE must be official")
     return errors
 
 

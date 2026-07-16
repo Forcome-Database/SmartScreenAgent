@@ -8,11 +8,17 @@
 
 **Depends on:** WP1 complete
 
+> **Official API v4 amendment (2026-07-16):** The user selected the hosted official
+> MinerU API. The v4 `file-urls/batch` signed-upload and
+> `extract-results/batch/{batch_id}` polling contract supersedes every self-hosted
+> MinerU 3.4.4/protocol-2 `/health` and `/tasks` reference below. The archive safety,
+> typed-error, validation, transaction, and LLM requirements remain unchanged.
+
 ## 1. Purpose
 
 WP2 replaces two trusted-but-unverified boundaries in the current ingestion path:
 
-1. `MinerUClient` assumes a synchronous `/file_parse` response containing Markdown, while the current MinerU service exposes an asynchronous task protocol and result artifacts.
+1. `MinerUClient` previously assumed a synchronous `/file_parse` response; it now uses the official API v4 signed-upload, batch-poll, and result-ZIP flow.
 2. Resume extraction and LLM judging accept JSON-shaped dictionaries without enforcing the active rule schema, allowed scores, evidence provenance, or complete dimension coverage.
 
 After WP2, the application can submit a resume through the documented MinerU task protocol, validate the downloaded result artifact, produce a typed extracted resume, and persist a score only after every judge dimension and evidence quote passes deterministic validation.
@@ -21,7 +27,20 @@ WP2 keeps the existing synchronous application workflow: the request may wait wh
 
 ## 2. Verified Baseline and Current Gaps
 
-### 2.1 MinerU baseline
+### 2.1 MinerU baseline (superseded historical design)
+
+The implemented baseline is the [official MinerU API v4](https://mineru.net/doc/docs/index_en/):
+
+| Step | Contract |
+|---|---|
+| Request upload URLs | `POST /api/v4/file-urls/batch` with bearer authentication and file names/data IDs |
+| Upload each source | `PUT` raw bytes to the returned signed URL, with no API bearer header |
+| Poll batch | `GET /api/v4/extract-results/batch/{batch_id}` until `done` or `failed` |
+| Fetch artifacts | Download `full_zip_url` through an isolated client after exact-host and ZIP-path validation |
+
+API calls are locked to `https://mineru.net`; upload and result hosts are independently
+allowlisted, redirects and environment proxies are disabled, and signed URLs are never logged.
+The following protocol-2 material is retained only as the design history that this amendment replaces.
 
 The design baseline is the official MinerU `3.4.4` release published on 2026-07-10 and API protocol version `2`:
 
@@ -68,14 +87,14 @@ Sources:
 - Evidence quotes are not checked against normalized source Markdown.
 - The pipeline sums untrusted `score` fields before validation.
 - Upload and re-score routes do not expose stable AI failure codes.
-- The current `.env` has no MinerU endpoint and uses a placeholder new-api URL, so deployed runtime evidence is not yet available.
+- Local secrets stay in ignored `.env.local`; sanitized MinerU and new-api runtime evidence is committed without credentials or provider bodies.
 
 ## 3. Goals
 
-- Implement MinerU protocol version 2 health, submit, poll, and result-download behavior with typed responses and typed errors.
-- Use the asynchronous `/tasks` protocol even while the surrounding application workflow remains synchronous.
+- Implement official MinerU API v4 signed upload, batch polling, and result-download behavior with typed responses and typed errors.
+- Use the asynchronous batch protocol even while the surrounding application workflow remains synchronous.
 - Safely consume a bounded result ZIP and require exactly one non-empty Markdown result for a single-file request.
-- Capture sanitized MinerU OpenAPI, health, task, and result fixtures from the actual deployment before WP2 completion.
+- Capture sanitized MinerU upload-request, batch-result, and four-format runtime evidence before WP2 completion.
 - Use strict Pydantic models for extraction and judge responses with `extra=forbid`.
 - Verify judge dimension identity, uniqueness, completeness, tier, score, confidence, and evidence provenance against the active rule version and parsed Markdown.
 - Ensure invalid AI output cannot create a candidate or score row.
@@ -296,7 +315,7 @@ Runtime tests use a dedicated `external_contract` marker and fail rather than sk
 
 Rollout order:
 
-1. Deploy or identify MinerU, verify health protocol and capture OpenAPI/artifacts.
+1. Configure the official MinerU API v4 endpoint and capture sanitized request/result artifacts.
 2. Verify new-api model IDs and structured-output support.
 3. Run offline and external contract suites.
 4. Enable the new adapter in a non-production environment with synthetic resumes.
@@ -309,8 +328,8 @@ Rollback sets the application back to the previous image. The old synchronous `/
 WP2 is complete only when:
 
 - the specification is approved and has no unresolved implementation ambiguity;
-- MinerU 3.4.4/protocol-2 offline contract tests pass;
-- deployed MinerU health, OpenAPI, and sanitized result artifacts are captured and the four supported input formats pass;
+- official MinerU API v4 offline contract tests pass;
+- sanitized upload/batch/result artifacts are captured and the four supported input formats pass against the official endpoint;
 - configured new-api model IDs and structured-output modes are recorded from the actual gateway;
 - invalid extraction or judge output cannot create a candidate or score;
 - every persisted judge result has valid dimension/tier/score relationships and source-backed evidence;

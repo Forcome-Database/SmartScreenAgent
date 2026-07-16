@@ -97,16 +97,14 @@ def read_mineru_result_archive(
                     content_infos.append(("v1", info))
 
             if len(markdown_infos) != 1:
-                raise MinerUResultError(
-                    "MinerU result must contain exactly one Markdown file"
-                )
+                raise MinerUResultError("MinerU result must contain exactly one Markdown file")
             markdown = _read_utf8(archive, markdown_infos[0], "Markdown").strip()
             if not markdown:
                 raise MinerUResultError("MinerU result Markdown is empty")
 
             content_list: list[dict[str, Any]] | None = None
             if content_infos:
-                preferred = sorted(content_infos, key=lambda item: item[0], reverse=True)[0][1]
+                version, preferred = sorted(content_infos, key=lambda item: item[0])[0]
                 raw_content = _read_utf8(archive, preferred, "content list")
                 try:
                     parsed = json.loads(raw_content)
@@ -114,11 +112,19 @@ def read_mineru_result_archive(
                     raise MinerUResultError(
                         "invalid content list in MinerU result archive"
                     ) from exc
-                if not isinstance(parsed, list) or not all(
-                    isinstance(item, dict) for item in parsed
-                ):
-                    raise MinerUResultError("invalid content list in MinerU result archive")
-                content_list = parsed
+                if version == "v1":
+                    if not isinstance(parsed, list) or not all(
+                        isinstance(item, dict) for item in parsed
+                    ):
+                        raise MinerUResultError("invalid content list in MinerU result archive")
+                    content_list = parsed
+                else:
+                    if not isinstance(parsed, list) or not all(
+                        isinstance(page, list) and all(isinstance(item, dict) for item in page)
+                        for page in parsed
+                    ):
+                        raise MinerUResultError("invalid content list in MinerU result archive")
+                    content_list = [item for page in parsed for item in page]
 
             return MinerUArchiveResult(
                 markdown=markdown,

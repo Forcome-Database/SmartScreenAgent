@@ -1,0 +1,31 @@
+{
+  "capture_type": "sanitized_combined_external_gate",
+  "captured_at": "2026-07-16T16:16:44+08:00",
+  "run_environment": {
+    "os": "windows",
+    "python": "3.14.0"
+  },
+  "providers": {
+    "mineru": {
+      "endpoint_environment": "mineru.net/api/v4",
+      "api_version": "v4",
+      "model_version": "vlm",
+      "passed": 4
+    },
+    "newapi": {
+      "endpoint_environment": "coder.forcome.com/v1",
+      "structured_output_mode": "json_schema",
+      "model_ids": [
+        "gpt-5.6-sol"
+      ],
+      "passed": 5
+    }
+  },
+  "pytest": {
+    "passed": 9,
+    "failed": 0,
+    "skipped": 0,
+    "duration_seconds": 386.38
+  },
+  "secrets_captured": false
+}

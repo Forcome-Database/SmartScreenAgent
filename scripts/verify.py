@@ -83,9 +83,7 @@ async def assert_no_migration_databases(env: dict[str, str]) -> None:
         )
         leftovers = [row["datname"] for row in rows]
         if leftovers:
-            raise AssertionError(
-                f"temporary migration databases remain: {', '.join(leftovers)}"
-            )
+            raise AssertionError(f"temporary migration databases remain: {', '.join(leftovers)}")
     finally:
         await connection.close()
 
@@ -139,7 +137,11 @@ def assert_no_temp_uploads() -> None:
     temp_dir = Path(tempfile.gettempdir())
     leftovers = sorted(
         path.name
-        for pattern in ("smartscreen-upload-*", "smartscreen-worker-*")
+        for pattern in (
+            "smartscreen-upload-*",
+            "smartscreen-worker-*",
+            "smartscreen-mineru-*",
+        )
         for path in temp_dir.glob(pattern)
     )
     if leftovers:

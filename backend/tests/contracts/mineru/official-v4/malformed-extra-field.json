@@ -1,0 +1,10 @@
+{
+  "code": 0,
+  "data": {
+    "batch_id": "batch-123",
+    "file_urls": ["https://example.invalid/upload"],
+    "unexpected": "rejected"
+  },
+  "msg": "ok",
+  "trace_id": "trace-123"
+}

@@ -28,7 +28,7 @@ def test_reads_one_markdown_and_content_list(tmp_path: Path) -> None:
         {
             "resume/auto/resume.md": "# 张三\n外贸经历".encode(),
             "resume/auto/resume_content_list_v2.json": json.dumps(
-                content_list, ensure_ascii=False
+                [content_list], ensure_ascii=False
             ).encode(),
         },
     )
@@ -44,6 +44,28 @@ def test_reads_one_markdown_and_content_list(tmp_path: Path) -> None:
     assert result.content_list == content_list
     assert result.member_count == 2
     assert result.uncompressed_bytes > 0
+
+
+def test_prefers_stable_flat_content_list_v1(tmp_path: Path) -> None:
+    archive_path = tmp_path / "result.zip"
+    flat = [{"type": "text", "text": "stable"}]
+    _write_zip(
+        archive_path,
+        {
+            "full.md": b"# Resume",
+            "resume_content_list.json": json.dumps(flat).encode(),
+            "resume_content_list_v2.json": json.dumps([[{"type": "paragraph"}]]).encode(),
+        },
+    )
+
+    result = read_mineru_result_archive(
+        archive_path,
+        max_members=10,
+        max_uncompressed_bytes=1024 * 1024,
+        max_compression_ratio=100,
+    )
+
+    assert result.content_list == flat
 
 
 @pytest.mark.parametrize(

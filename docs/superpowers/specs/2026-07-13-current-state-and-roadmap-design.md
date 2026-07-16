@@ -78,7 +78,7 @@ The repository currently contains:
 - DingTalk OAuth exchange and local user upsert.
 - JWT creation and current-user lookup.
 - An OpenAI-compatible LLM gateway with retry and model fallback.
-- MinerU stub and HTTP parsing modes.
+- MinerU stub and official API v4 parsing modes.
 - Resume extraction, PII encryption, and PII deduplication hashing.
 - Excel import for six job families.
 - Hard filters, deterministic rule methods, LLM judging, grading, score persistence, and audit rows.
@@ -143,7 +143,7 @@ Status values:
 | DingTalk login | P1 foundation | OAuth exchange, user upsert, JWT issue | OAuth/JWT unit tests | Partial |
 | JWT/RBAC on write APIs | Product design section 11.3 and WP1 design | Candidate routes require database-authoritative `hr`, `hr_lead`, or `admin` | Unit and real HTTP/PostgreSQL authorization matrix passes | Implemented |
 | Excel rule import | P2 scoring plan | Six sheets, two layouts, CLI persistence | Unit and integration tests | Implemented |
-| MinerU integration | P2 scoring plan | Stub and assumed synchronous `/file_parse` HTTP contract | HTTP mocks only | Partial |
+| MinerU integration | WP2 scoring plan | Stub plus official API v4 signed-upload/batch-poll/result-ZIP contract | Unit fixtures plus four-format external runtime probe | Locally verified |
 | Resume extraction | P2 scoring plan | LLM JSON extraction with one retry | Unit tests with mock gateway | Partial |
 | Three-stage scoring | P2 scoring plan | Hard filter, deterministic rules, LLM judge | Unit and DB integration tests | Implemented |
 | Evidence-backed scoring | Product design core value | Evidence fields are requested but not validated against source text | Mocked judge tests | Partial |
@@ -197,7 +197,7 @@ Candidate write endpoints are public. The current-user dependency exposes token 
 
 Research describes task submission, polling, and result artifacts, while code assumes a synchronous `/file_parse` response containing Markdown. The mock contract is useful for development but is not a production integration contract.
 
-**Resolution:** capture the deployed MinerU OpenAPI document and sample result artifacts. Implement an adapter against that evidence before batch ingestion.
+**Resolution:** implement the documented official API v4 signed-upload, batch-poll, and result-ZIP contract; retain sanitized shape fixtures and four-format runtime evidence before batch ingestion.
 
 ### D-06: The asynchronous architecture is not the active path
 
@@ -387,11 +387,11 @@ The following remain later extensions:
 
 ### WP2: Production parser contract and validated AI output
 
-**Status:** In progress - the [WP2 design](2026-07-16-wp2-production-parser-and-validated-ai-output-design.md) was approved on 2026-07-16 and the [implementation plan](../plans/2026-07-16-wp2-production-parser-and-validated-ai-output.md) is active. Runtime MinerU and new-api endpoints remain required for the final external-contract gate.
+**Status:** In progress - the [WP2 design](2026-07-16-wp2-production-parser-and-validated-ai-output-design.md) was approved on 2026-07-16 and the [implementation plan](../plans/2026-07-16-wp2-production-parser-and-validated-ai-output.md) is active. MinerU official-v4 four-format and new-api runtime probes pass locally; hosted CI remains required for the final exit review.
 
 **Goal:** replace assumed external contracts with verified adapters and typed results.
 
-**Includes:** captured MinerU OpenAPI/artifacts, submission/poll/download adapter as required by the real service, parser contract tests, typed extraction/judge responses, score/evidence validation, and stable error codes.
+**Includes:** sanitized MinerU official-v4 request/result shapes and runtime evidence, signed-upload/poll/download adapter, parser contract tests, typed extraction/judge responses, score/evidence validation, and stable error codes.
 
 **Depends on:** WP1 object persistence.
 

@@ -60,9 +60,9 @@ uv run python scripts/verify.py
 
 托管工作流 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) 在 Python 3.10 和 3.14 上运行验证矩阵；WP0 验收运行见 [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679)。
 
-`MINERU_MODE=stub` 用于本地离线开发；`MINERU_MODE=http` 用于对接独立 `mineru-api` 服务。`library` 模式仍未实现。
+`MINERU_MODE=stub` 仅用于离线开发和测试；生产使用 `MINERU_MODE=official`，通过官方 MinerU API v4 申请签名上传地址、轮询批次并下载结果 ZIP。
 
-候选人上传和评分 API 已要求 Bearer JWT，允许角色为 `hr`、`hr_lead`、`admin`。真实 MinerU 和 AI 输出契约尚未完成生产验证，因此仍不能直接公网部署。
+候选人上传和评分 API 已要求 Bearer JWT，允许角色为 `hr`、`hr_lead`、`admin`。MinerU 官方 API v4 四格式与 new-api 严格结构化输出已通过本地真实端点契约门禁；公网部署前仍需完成托管 CI、生产密钥托管和运行环境验收。
 
 ## 设计文档
 
@@ -169,13 +169,12 @@ WHERE raw_file_key IS NULL
    OR raw_file_original_name_cipher IS NULL;
 ```
 
-### MinerU 解析器三种模式
+### MinerU 解析器模式
 
 `MINERU_MODE` 环境变量：
 
 - `stub` — 本地开发/测试，返回固定 markdown
-- `http` — 调远端 mineru-api 服务（推荐生产）；需要 `MINERU_BASE_URL`、`MINERU_API_KEY`
-- `library` — 直接 import mineru 库（暂未实现，留 P3）
+- `official` — 调用官方 MinerU API v4；需要 `MINERU_BASE_URL=https://mineru.net`、`MINERU_API_KEY`，默认模型为 `vlm`
 
 详见 `docs/specs/research/mineru.md`。
 

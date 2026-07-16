@@ -1,0 +1,17 @@
+{
+  "code": 0,
+  "data": {
+    "batch_id": "2bb2f0ec-a336-4a0a-b61a-241afaf9cc87",
+    "extract_result": [
+      {
+        "file_name": "synthetic.pdf",
+        "data_id": "smartscreen-synthetic",
+        "state": "done",
+        "err_msg": "",
+        "full_zip_url": "https://cdn-mineru.openxlab.org.cn/pdf/sanitized.zip"
+      }
+    ]
+  },
+  "msg": "ok",
+  "trace_id": "sanitized-trace-id"
+}
