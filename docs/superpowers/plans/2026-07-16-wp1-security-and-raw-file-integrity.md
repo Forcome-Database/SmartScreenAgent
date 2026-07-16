@@ -103,7 +103,7 @@
 - [x] Implement `UploadValidationError` with stable HTTP status/code mapping at the router boundary.
 - [x] Add `MalwareScanner` protocol and `DisabledMalwareScanner`; reject unknown configured modes.
 - [x] Verify temporary files are always removed by the route-level `finally` block rather than relying only on background tasks.
-- [x] Run unit tests, Ruff, and mypy; commit the validation boundary locally (commit pending final user authorization).
+- [x] Run unit tests, Ruff, and mypy; commit the validation boundary locally (`991fe5d`).
 
 ## Task 4: Strengthen MinIO primitives and private-object verification
 
@@ -116,7 +116,7 @@
 - [x] Run blocking MinIO calls through `anyio.to_thread.run_sync` from async services.
 - [x] Add real MinIO tests for put/stat/get, anonymous denial, presigned access, deletion, checksum/size mismatch, and cleanup.
 - [x] Ensure test object prefixes remain isolated and strict verification cleanup detects leaked WP1 test objects.
-- [x] Run focused unit and integration tests; commit pending final user authorization.
+- [x] Run focused unit and integration tests and commit the storage boundary (`991fe5d`).
 
 ## Task 5: Make upload ingestion atomic at the database boundary
 
@@ -133,7 +133,7 @@
 - [x] For duplicates, delete the new object, return the existing candidate with `status=duplicate`, and do not overwrite the original file reference.
 - [x] Replace the Celery task's arbitrary `file_path` input with a serialized verified raw-file reference: object key, SHA-256, size, canonical content type, and encrypted original filename.
 - [x] In the worker, download the object to a safe temporary suffix, verify size and SHA-256, invoke the shared application service, and delete the local copy in `finally`. Do not enqueue this task from HTTP until WP3 provides a durable job record.
-- [x] Run pipeline, task-ingest, and P2 integration tests; commit pending final user authorization.
+- [x] Run pipeline, task-ingest, and P2 integration tests and commit the ingestion boundary (`991fe5d`).
 
 ## Task 6: Wire secure upload, persistence, and compensation into HTTP
 
@@ -180,8 +180,8 @@
   uv run python scripts/verify.py
   ```
 
-- [ ] Confirm hosted GitHub Actions passes Python 3.10, Python 3.14, and strict integration jobs.
-- [x] Record exact local test counts, migration revisions, cleanup evidence, and measured coverage below; hosted run URL remains pending.
+- [x] Confirm hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) passes Python 3.10, Python 3.14, and strict integration jobs.
+- [x] Record exact local and hosted test counts, migration revisions, cleanup evidence, and measured coverage below.
 - [ ] Update WP1 to Complete and WP2 to Ready for planning in the plan index and authoritative roadmap only after every exit criterion passes.
 - [x] Commit documentation and completion evidence (`d52aac2`).
 
@@ -213,8 +213,8 @@ Local implementation gate passed on 2026-07-16:
 - Non-integration coverage remained 76% overall; `backend/app/deps.py` increased from 0% to 97%, upload validation reached 95%, and resume storage reached 86%.
 - Clean-state checks passed for migration databases, application tables, Redis/Celery keys, MinIO objects, and temporary resume files.
 - Windows reserved port ranges blocked the historical MinIO test port `59000`; the isolated compose port is now configurable and defaults to `61000`/`61001`.
+- Hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) passed Python 3.10, Python 3.14, and strict integration at commit `c79a384` with zero failed or skipped jobs.
 
 Still required before WP1 can be marked Complete:
 
-- Push and record a hosted GitHub Actions run passing Python 3.10, Python 3.14, and strict integration.
 - Record the legacy metadata count/disposition for the actual target deployment (the disposable test database count is zero).

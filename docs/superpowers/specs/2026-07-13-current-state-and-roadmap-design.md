@@ -63,7 +63,7 @@ The approved WP1 implementation passed the locked local verification path:
 - Ruff passed; mypy passed for 59 application source files.
 - Post-run checks found no migration databases, application rows, Redis/Celery keys, MinIO objects, or temporary resume files.
 
-WP1 remains **In progress** until the implementation is committed and the hosted Python 3.10, Python 3.14, and integration jobs pass. WP2 therefore remains blocked.
+WP1 remains **In progress** only until the target deployment's legacy raw-file metadata count and disposition are recorded. The implementation is committed, and hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) passed Python 3.10, Python 3.14, and strict integration. WP2 therefore remains blocked pending that deployment evidence.
 
 ## 4. Implemented System
 
@@ -375,7 +375,7 @@ The following remain later extensions:
 
 ### WP1: Security and raw-file integrity
 
-**Status:** In progress - approved implementation passed the full local gate on 2026-07-16; commit and hosted CI evidence are still required.
+**Status:** In progress - approved implementation passed the full local gate and hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) on 2026-07-16; only target-deployment legacy metadata disposition remains.
 
 **Goal:** close public-write and data-loss risks before expanding the API.
 

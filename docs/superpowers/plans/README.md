@@ -31,7 +31,7 @@ Historical plans may contain unchecked boxes even when their work was committed.
 
 On 2026-07-13, the strict local WP0 gate passed 102 non-integration tests and 16 integration tests with zero skips, plus static, migration, and clean-state checks. Hosted [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679) then passed both Python matrix jobs and the integration job at commit `b3447ec`. Exact results are recorded in the [WP0 completion evidence](2026-07-13-wp0-integration-baseline.md#completion-evidence).
 
-On 2026-07-16, the approved WP1 implementation passed the local strict gate: 142 non-integration tests and 36 integration tests with zero skips, Alembic head `b57c2f9e1a6d`, Ruff, mypy, real PostgreSQL/Redis/Celery/MinIO checks, and post-run clean-state checks. WP1 remains In progress until scoped commits and hosted CI evidence are recorded in the [WP1 plan](2026-07-16-wp1-security-and-raw-file-integrity.md#completion-evidence).
+On 2026-07-16, the approved WP1 implementation passed the local strict gate: 142 non-integration tests and 36 integration tests with zero skips, Alembic head `b57c2f9e1a6d`, Ruff, mypy, real PostgreSQL/Redis/Celery/MinIO checks, and post-run clean-state checks. The implementation was split into scoped commits and hosted [GitHub Actions run 29473908879](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29473908879) passed Python 3.10, Python 3.14, and strict integration. WP1 remains In progress only until the target deployment's legacy raw-file metadata count and disposition are recorded in the [WP1 plan](2026-07-16-wp1-security-and-raw-file-integrity.md#completion-evidence).
 
 ## Planning Rules
 
