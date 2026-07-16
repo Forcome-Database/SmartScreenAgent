@@ -53,6 +53,18 @@ On branch `codex/wp0-integration-baseline`, the locked local verification path p
 
 Exact local environment, timing, cleanup, and commit-range evidence is recorded in the [WP0 plan](../plans/2026-07-13-wp0-integration-baseline.md#completion-evidence). Hosted [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679) passed for Python 3.10, Python 3.14, and the full integration job at commit `b3447ec`. WP0 is complete; WP1 is ready for specification and implementation planning.
 
+### 3.2 WP1 local verification evidence (2026-07-16)
+
+The approved WP1 implementation passed the locked local verification path:
+
+- 142 non-integration tests and 36 integration tests completed with zero skips.
+- Alembic upgraded through revision `b57c2f9e1a6d`; empty-database and previous-revision round trips passed.
+- Real PostgreSQL, Redis/Celery worker, MinIO privacy/presigned access, upload persistence, duplicate cleanup, and failure compensation tests passed.
+- Ruff passed; mypy passed for 59 application source files.
+- Post-run checks found no migration databases, application rows, Redis/Celery keys, MinIO objects, or temporary resume files.
+
+WP1 remains **In progress** until the implementation is committed and the hosted Python 3.10, Python 3.14, and integration jobs pass. WP2 therefore remains blocked.
+
 ## 4. Implemented System
 
 ### 4.1 Runtime components
@@ -71,6 +83,8 @@ The repository currently contains:
 - Excel import for six job families.
 - Hard filters, deterministic rule methods, LLM judging, grading, score persistence, and audit rows.
 - Candidate upload and candidate re-score HTTP endpoints.
+- JWT/RBAC enforcement for candidate writes.
+- Streamed upload validation and verified private MinIO resume persistence.
 - A Typer CLI for importing rules.
 
 ### 4.2 Exposed HTTP surface
@@ -82,8 +96,8 @@ The implemented application exposes only:
 | GET | `/` | Public | Service identity |
 | GET | `/healthz` | Public | Dependency health |
 | POST | `/auth/dingtalk/login` | Public | Exchange DingTalk auth code for JWT |
-| POST | `/api/v1/candidates/upload` | Public | Synchronous parse, extract, and optional score |
-| POST | `/api/v1/candidates/{candidate_id}/score` | Public | Re-score a candidate for a JD |
+| POST | `/api/v1/candidates/upload` | Bearer JWT: `hr`, `hr_lead`, `admin` | Persist, parse, extract, and optionally score |
+| POST | `/api/v1/candidates/{candidate_id}/score` | Bearer JWT: `hr`, `hr_lead`, `admin` | Re-score a candidate for a JD |
 
 There are no list, detail, rule-management, feedback, report, audit-export, settings, batch-job, or MCP endpoints.
 
@@ -93,15 +107,18 @@ The current synchronous flow is:
 
 ```text
 HTTP upload
-  -> temporary local file
+  -> authorize database user role
+  -> bounded stream, hash, and file validation
+  -> verified private MinIO object
   -> MinerU parse
   -> LLM structured extraction
-  -> Candidate upsert by pii_hash
+  -> Candidate insert or explicit duplicate resolution by pii_hash
   -> optional ScoringPipeline
        -> hard filters
        -> deterministic rules
        -> LLM judge
-       -> Score and AuditLog commit
+       -> Score and AuditLog flush
+  -> one application-service database commit
   -> temporary file deletion
 ```
 
@@ -120,17 +137,17 @@ Status values:
 | Capability | Historical intent | Code | Test evidence | Status |
 |---|---|---|---|---|
 | FastAPI service and health | P1 foundation | Implemented | Unit/integration tests exist | Implemented |
-| PostgreSQL schema and migrations | P1 foundation | Nine business tables and baseline migration | Direct non-strict selection may skip without a database; the strict WP0 verifier passed a real migration round trip | Partial |
+| PostgreSQL schema and migrations | P1 foundation | Nine business tables, baseline migration, and WP1 raw-file metadata revision | Strict WP1 verification passed empty and previous-revision round trips | Implemented |
 | PII field encryption and dedupe | Product design section 11 | Fernet fields and SHA-256 dedupe | Unit tests pass | Implemented |
-| MinIO private resume storage | Product design section 11.1 | Client exists; upload flow does not use it | Strict real-client integration passed; the upload flow still does not persist original files | Defective |
+| MinIO private resume storage | Product design section 11.1 | New uploads persist verified immutable private objects with checksum/size metadata | Real MinIO privacy, persistence, duplicate, and compensation tests pass; legacy rows require rollout reconciliation | Implemented |
 | DingTalk login | P1 foundation | OAuth exchange, user upsert, JWT issue | OAuth/JWT unit tests | Partial |
-| JWT/RBAC on write APIs | Product design section 11.3 and 2026-07-08 JWT/RBAC design | Dependencies exist but candidate routes do not use them | No dependency coverage | Designed |
+| JWT/RBAC on write APIs | Product design section 11.3 and WP1 design | Candidate routes require database-authoritative `hr`, `hr_lead`, or `admin` | Unit and real HTTP/PostgreSQL authorization matrix passes | Implemented |
 | Excel rule import | P2 scoring plan | Six sheets, two layouts, CLI persistence | Unit and integration tests | Implemented |
 | MinerU integration | P2 scoring plan | Stub and assumed synchronous `/file_parse` HTTP contract | HTTP mocks only | Partial |
 | Resume extraction | P2 scoring plan | LLM JSON extraction with one retry | Unit tests with mock gateway | Partial |
 | Three-stage scoring | P2 scoring plan | Hard filter, deterministic rules, LLM judge | Unit and DB integration tests | Implemented |
 | Evidence-backed scoring | Product design core value | Evidence fields are requested but not validated against source text | Mocked judge tests | Partial |
-| Candidate upload API | P2 scoring plan | Synchronous endpoint | Strict DB-backed integration passed with controlled MinerU/LLM fakes; production auth, storage, and external contracts remain incomplete | Partial |
+| Candidate upload API | P2 scoring plan | Authenticated synchronous endpoint with validation, private storage, compensation, and explicit duplicates | Strict DB/MinIO-backed integration passes; production parser and AI contracts remain incomplete | Partial |
 | Candidate query API | P2 Task 14 title promised upload, score, and query | No query route | None | Absent |
 | Batch upload and async status | Original W5 | Celery entry point only | Task orchestration test exists | Partial |
 | Candidate list and scorecard | Original W3-W5 | No API or UI | None | Absent |
@@ -166,11 +183,15 @@ The P1 plan contains 134 unchecked items, the P2 plan 73, and the hardening plan
 
 **Resolution:** object persistence must precede parsing. Store an immutable object key, not a local path. Define cleanup behavior for failed ingestion and rejected uploads.
 
+**WP1 update:** resolved for every new upload. Legacy rows remain an explicit rollout reconciliation gate.
+
 ### D-04: Security design is approved but not enforced
 
 Candidate write endpoints are public. The current-user dependency exposes token decode exception text. There is no role dependency or route-level authorization.
 
 **Resolution:** implement the 2026-07-08 JWT/RBAC design before adding more business APIs. Normalize authentication errors and test the real dependency chain.
+
+**WP1 update:** resolved for candidate upload and re-score routes with database-authoritative roles and stable 401/403 responses.
 
 ### D-05: MinerU research and implementation assume different wire contracts
 
@@ -354,7 +375,7 @@ The following remain later extensions:
 
 ### WP1: Security and raw-file integrity
 
-**Status:** Ready for planning - WP0 passed; an approved WP1 specification and executable implementation plan are required before coding.
+**Status:** In progress - approved implementation passed the full local gate on 2026-07-16; commit and hosted CI evidence are still required.
 
 **Goal:** close public-write and data-loss risks before expanding the API.
 

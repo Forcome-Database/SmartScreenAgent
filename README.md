@@ -6,9 +6,9 @@ AI-driven resume screening agent for HR.
 
 当前处于“后端评分原型已完成、生产化加固进行中”阶段。
 
-**WP0 可重复集成基线已完成**；本地严格验证与托管 GitHub Actions 均已通过。下一步进入 WP1 规划，处理鉴权、上传校验和原文件持久化。
+**WP0 可重复集成基线已完成**。**WP1 安全与原文件完整性已经完成本地实现和严格验证，等待托管 CI 验收**：候选人写接口已强制 JWT/RBAC，上传会经过流式大小/类型/文件签名校验并持久化到私有 MinIO。
 
-当前候选人写接口尚未强制 JWT/RBAC，上传原文件也未接入 MinIO 持久化，不能直接公网部署。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+项目仍不能直接公网部署：WP2 尚需验证真实 MinerU 契约和 AI 输出，WP3 尚需把同步处理切换为可恢复的异步任务。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 
@@ -62,15 +62,17 @@ uv run python scripts/verify.py
 
 `MINERU_MODE=stub` 用于本地离线开发；`MINERU_MODE=http` 用于对接独立 `mineru-api` 服务。`library` 模式仍未实现。
 
-P2 的候选人上传和评分 API 尚未强制 JWT/RBAC，不能直接公网部署。
+候选人上传和评分 API 已要求 Bearer JWT，允许角色为 `hr`、`hr_lead`、`admin`。真实 MinerU 和 AI 输出契约尚未完成生产验证，因此仍不能直接公网部署。
 
 ## 设计文档
 
 - 当前状态与交付路线图（权威）：`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`
+- WP1 安全与原文件完整性规格：`docs/superpowers/specs/2026-07-16-wp1-security-and-raw-file-integrity-design.md`
+- WP1 实施与验证记录：`docs/superpowers/plans/2026-07-16-wp1-security-and-raw-file-integrity.md`
 - 后续工作包计划索引：`docs/superpowers/plans/README.md`
 - 原始产品设计（历史愿景）：`docs/specs/2026-05-12-resume-screening-agent-design.md`
 - P1/P2 历史实施计划：`docs/specs/plans/`
-- 已批准、尚未实现的 JWT/RBAC 设计：`docs/superpowers/specs/2026-07-08-jwt-rbac-p2-api-design.md`
+- 已并入 WP1 的 JWT/RBAC 历史设计：`docs/superpowers/specs/2026-07-08-jwt-rbac-p2-api-design.md`
 - 调研笔记：`docs/specs/research/`
   - `newapi.md` — LLM 网关接入
   - `dingtalk-oauth.md` — 钉钉 OAuth 流程（基于 OAS 实读）
@@ -95,7 +97,8 @@ backend/
 │   ├── services/
 │   │   ├── llm/             # LLMGateway (newapi + fallback)
 │   │   ├── dingtalk/        # OAuth client
-│   │   └── storage/         # MinIO client
+│   │   ├── storage/         # MinIO client + verified resume objects
+│   │   └── upload/          # streamed validation + malware seam
 │   ├── security/            # JWT + PII (Fernet) crypto
 │   └── tasks/               # Celery app
 └── tests/
@@ -129,13 +132,41 @@ uv run python -m backend.app.cli.import_rules import-rules 招聘JD整理-智能
 ### 上传简历 + 评分（同步）
 
 ```bash
-# 上传简历（PDF/Word/图片），返回 candidate_id
-curl -F "file=@resume.pdf" http://localhost:8000/api/v1/candidates/upload
+# 用钉钉授权码换取 JWT（示例需要 jq）
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/dingtalk/login \
+  -H "Content-Type: application/json" \
+  -d '{"auth_code":"<dingtalk-auth-code>"}' | jq -r .token)
+
+# 上传简历，返回 candidate_id 和 parsed/duplicate 状态
+curl -F "file=@resume.pdf" \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/api/v1/candidates/upload
 
 # 对指定岗位评分
-curl -X POST http://localhost:8000/api/v1/candidates/<id>/score \
+curl -X POST http://127.0.0.1:8000/api/v1/candidates/<id>/score \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"jd_code": "FOREIGN_TRADE"}'
+```
+
+上传边界：
+
+- 支持 PDF、DOCX、PNG、JPEG；旧版 DOC 暂不支持。
+- 默认最大 20 MiB，可用 `MAX_RESUME_FILE_BYTES` 调整。
+- 原文件使用不含 PII 的不可变键写入私有 MinIO，并校验大小和 SHA-256。
+- 重复身份返回 `status: duplicate`，本次重复对象会被清理。
+- 稳定错误码包括 `invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`candidate_file_conflict`、`resume_parser_failed`、`object_storage_unavailable`。
+
+升级已有数据库后，部署前必须检查旧候选人的原文件元数据；非零结果需要先回填或隔离，不能宣称历史文件已完成持久化：
+
+```sql
+SELECT count(*) AS legacy_raw_file_rows
+FROM candidates
+WHERE raw_file_key IS NULL
+   OR raw_file_sha256 IS NULL
+   OR raw_file_size_bytes IS NULL
+   OR raw_file_content_type IS NULL
+   OR raw_file_original_name_cipher IS NULL;
 ```
 
 ### MinerU 解析器三种模式
@@ -155,5 +186,5 @@ curl -X POST http://localhost:8000/api/v1/candidates/<id>/score \
 - 钉钉招聘文档 API 同步任务（设计 §8.2）
 - 评分卡 Web UI 与所有前端页面（设计 §10）
 - HR 复核反馈回流（设计 §7）
-- **API 暂未挂 JWT/RBAC**（设计 §11.3）—— 切勿直接公网部署，P3 接入 DingTalk OAuth 后启用
-- Prompt injection 清洗仅覆盖 3 个经典 pattern；P3 单独做 `docs/specs/research/prompt-injection.md` 调研扩展
+- 真实 MinerU 提交/轮询/产物契约与 AI 输出强校验尚未完成（WP2）
+- Prompt injection 清洗仅覆盖 3 个经典 pattern；WP2 继续扩展并验证 AI 输出边界
