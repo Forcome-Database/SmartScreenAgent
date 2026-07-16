@@ -21,6 +21,7 @@ async def test_full_p2_flow(
 
     from backend.app.models import JD, RuleVersion
     from backend.app.rules.excel_importer import import_workbook
+    from backend.app.scoring.llm_judge import JudgeResult
     from backend.app.services.parser.extractor import Experience, ExtractedResume
     from backend.app.services.parser.mineru_client import ParseResult
 
@@ -29,7 +30,7 @@ async def test_full_p2_flow(
     parser_stub = SimpleNamespace(
         parse=AsyncMock(
             return_value=ParseResult(
-                markdown="# r\n张三 北美 五金", layout={}, source="stub"
+                markdown="# r\n张三 北美 五金", source="stub"
             )
         )
     )
@@ -57,7 +58,14 @@ async def test_full_p2_flow(
     monkeypatch.setattr("backend.app.tasks.ingest.ResumeExtractor", lambda: extractor_stub)
     monkeypatch.setattr(
         "backend.app.scoring.pipeline.LLMJudge.score",
-        AsyncMock(return_value={"dimensions": [], "model": "mock", "tokens": 0}),
+        AsyncMock(
+            return_value=JudgeResult(
+                dimensions=[],
+                model="mock",
+                tokens=0,
+                prompt_version="resume_judge_v1",
+            )
+        ),
     )
 
     # 1. Import Excel → direct DB insert (bypass CLI)
@@ -127,7 +135,7 @@ async def test_p2_hard_filter_rejection(
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(
             parse=AsyncMock(
-                return_value=ParseResult(markdown="x", layout={}, source="stub")
+                return_value=ParseResult(markdown="x", source="stub")
             )
         ),
     )

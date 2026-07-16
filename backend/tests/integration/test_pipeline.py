@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
+from backend.app.scoring.llm_judge import JudgeDimensionResult, JudgeResult
 from backend.app.scoring.pipeline import ScoringPipeline
 from backend.app.services.parser.pii import compute_pii_hash, encrypt_pii
 
@@ -57,20 +58,21 @@ async def test_pipeline_happy_path(db_session):
     await db_session.commit()
 
     fake_judge = AsyncMock()
-    fake_judge.score.return_value = {
-        "dimensions": [
-            {
-                "id": "independence",
-                "tier": "high",
-                "score": 10,
-                "evidence_quotes": [],
-                "reasoning": "ok",
-                "confidence": 0.9,
-            }
+    fake_judge.score.return_value = JudgeResult(
+        dimensions=[
+            JudgeDimensionResult(
+                id="independence",
+                tier="high",
+                score=10,
+                evidence_quotes=[],
+                reasoning="ok",
+                confidence=0.9,
+            )
         ],
-        "model": "gpt-5.5",
-        "tokens": 100,
-    }
+        model="gpt-5.5",
+        tokens=100,
+        prompt_version="resume_judge_v1",
+    )
     pipeline = ScoringPipeline(db=db_session, judge=fake_judge)
     result = await pipeline.run(candidate_id=cand.id, jd_id=jd.id)
 

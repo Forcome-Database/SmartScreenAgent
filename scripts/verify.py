@@ -193,7 +193,14 @@ def main(
         command_runner([*COMPOSE, "up", "-d", "--wait"], env=env)
         command_runner([sys.executable, "-m", "alembic", "upgrade", "head"], env=env)
         command_runner(
-            [sys.executable, "-m", "pytest", "-m", "not integration", "-q"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-m",
+                "not integration and not external_contract",
+                "-q",
+            ],
             env=env,
         )
         command_runner(

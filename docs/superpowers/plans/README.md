@@ -18,7 +18,7 @@ Historical plans may contain unchecked boxes even when their work was committed.
 |---:|---|---|---|---|
 | 0 | WP0 Reproducible integration baseline | Complete | Current repository | [`2026-07-13-wp0-integration-baseline.md`](2026-07-13-wp0-integration-baseline.md) |
 | 1 | WP1 Security and raw-file integrity | Complete | WP0 | Approved [specification](../specs/2026-07-16-wp1-security-and-raw-file-integrity-design.md) and [completion evidence](2026-07-16-wp1-security-and-raw-file-integrity.md#completion-evidence) |
-| 2 | WP2 Production parser contract and validated AI output | Ready for planning | WP1 | Create the specification and implementation plan next |
+| 2 | WP2 Production parser contract and validated AI output | In progress | WP1 | Approved [specification](../specs/2026-07-16-wp2-production-parser-and-validated-ai-output-design.md) and active [implementation plan](2026-07-16-wp2-production-parser-and-validated-ai-output.md) |
 | 3 | WP3 Durable asynchronous ingestion and batch processing | Blocked | WP2 | Written after WP2 exit review |
 | 4 | WP4 Read APIs and rule lifecycle | Blocked | WP1 and WP3 | Written after WP3 API-state review |
 | 5 | WP5 HR web workspace | Blocked | WP4 | Written after WP4 OpenAPI approval |

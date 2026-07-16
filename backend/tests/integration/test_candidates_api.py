@@ -6,9 +6,11 @@ import pytest
 from sqlalchemy import select
 
 from backend.app.models import JD, AuditLog, Candidate, RuleVersion
+from backend.app.scoring.llm_judge import JudgeResult
 from backend.app.security.crypto import encrypt_pii
+from backend.app.services.parser.errors import MinerUResultError, MinerUUnavailableError
 from backend.app.services.parser.extractor import Experience, ExtractedResume
-from backend.app.services.parser.mineru_client import MinerUParseError, ParseResult
+from backend.app.services.parser.mineru_client import ParseResult
 from backend.app.services.parser.pii import compute_pii_hash
 from backend.app.services.storage import StorageError
 
@@ -18,7 +20,7 @@ def _mock_resume_pipeline(monkeypatch, *, name: str = "张三", phone: str = "13
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(
             parse=AsyncMock(
-                return_value=ParseResult(markdown=f"# r\n{name}", layout={}, source="stub")
+                return_value=ParseResult(markdown=f"# r\n{name}", source="stub")
             )
         ),
     )
@@ -63,7 +65,7 @@ async def test_upload_returns_candidate_id(
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(
             parse=AsyncMock(
-                return_value=ParseResult(markdown="# r\n张三", layout={}, source="stub")
+                return_value=ParseResult(markdown="# r\n张三", source="stub")
             )
         ),
     )
@@ -123,12 +125,10 @@ async def test_upload_parser_failure_returns_502(
     valid_pdf_bytes,
     monkeypatch,
 ):
-    from backend.app.services.parser.mineru_client import MinerUParseError
-
     monkeypatch.setattr(
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(
-            parse=AsyncMock(side_effect=MinerUParseError("missing markdown"))
+            parse=AsyncMock(side_effect=MinerUResultError("missing markdown"))
         ),
     )
     resp = await client.post(
@@ -196,7 +196,14 @@ async def test_score_endpoint_returns_total(client, db_session, auth_headers, mo
 
     monkeypatch.setattr(
         "backend.app.scoring.pipeline.LLMJudge.score",
-        AsyncMock(return_value={"dimensions": [], "model": "mock", "tokens": 0}),
+        AsyncMock(
+            return_value=JudgeResult(
+                dimensions=[],
+                model="mock",
+                tokens=0,
+                prompt_version="resume_judge_v1",
+            )
+        ),
     )
 
     resp = await client.post(
@@ -452,7 +459,7 @@ async def test_extractor_failure_rolls_back_candidate_and_object(
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(
             parse=AsyncMock(
-                return_value=ParseResult(markdown="# resume", layout={}, source="stub")
+                return_value=ParseResult(markdown="# resume", source="stub")
             )
         ),
     )
@@ -570,7 +577,7 @@ async def test_cleanup_failure_returns_503_and_logs_trace(
 
     from backend.app.services.storage import StoredResume
 
-    parser_error = MinerUParseError("parser unavailable")
+    parser_error = MinerUUnavailableError("parser unavailable")
     monkeypatch.setattr(
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(parse=AsyncMock(side_effect=parser_error)),

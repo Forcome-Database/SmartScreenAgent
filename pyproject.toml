@@ -55,6 +55,7 @@ addopts = "-v --tb=short"
 pythonpath = ["."]
 markers = [
     "integration: requires external services (PG/Redis/MinIO/network)",
+    "external_contract: requires explicitly configured MinerU and new-api endpoints",
 ]
 
 [tool.ruff]

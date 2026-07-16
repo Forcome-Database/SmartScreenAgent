@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     LLM_MODEL_JUDGE: str
     LLM_MODEL_JUDGE_FALLBACK: str
     LLM_MODEL_LIGHT: str
+    LLM_STRUCTURED_OUTPUT_MODE: str = "json_schema"
 
     # DingTalk
     DINGTALK_APP_KEY: str = ""
@@ -48,6 +49,18 @@ class Settings(BaseSettings):
     MINERU_MODE: str = "http"  # http | stub
     MINERU_BASE_URL: str = ""
     MINERU_API_KEY: str = ""
+    MINERU_EXPECTED_PROTOCOL_VERSION: int = 2
+    MINERU_BACKEND: str = "hybrid-engine"
+    MINERU_EFFORT: str = "medium"
+    MINERU_LANGUAGE: str = "ch"
+    MINERU_PARSE_METHOD: str = "auto"
+    MINERU_POLL_INTERVAL_SECONDS: float = 1.0
+    MINERU_TASK_TIMEOUT_SECONDS: float = 3600.0
+    MINERU_HTTP_TIMEOUT_SECONDS: float = 120.0
+    MINERU_RESULT_MAX_BYTES: int = 64 * 1024 * 1024
+    MINERU_RESULT_MAX_UNCOMPRESSED_BYTES: int = 256 * 1024 * 1024
+    MINERU_RESULT_MAX_MEMBERS: int = 512
+    MINERU_RESULT_MAX_COMPRESSION_RATIO: float = 100.0
 
     # Resume upload boundary
     MAX_RESUME_FILE_BYTES: int = 20 * 1024 * 1024

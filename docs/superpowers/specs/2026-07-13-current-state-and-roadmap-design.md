@@ -387,7 +387,7 @@ The following remain later extensions:
 
 ### WP2: Production parser contract and validated AI output
 
-**Status:** Ready for planning.
+**Status:** In progress - the [WP2 design](2026-07-16-wp2-production-parser-and-validated-ai-output-design.md) was approved on 2026-07-16 and the [implementation plan](../plans/2026-07-16-wp2-production-parser-and-validated-ai-output.md) is active. Runtime MinerU and new-api endpoints remain required for the final external-contract gate.
 
 **Goal:** replace assumed external contracts with verified adapters and typed results.
 

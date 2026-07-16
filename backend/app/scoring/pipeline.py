@@ -58,6 +58,13 @@ class ScoringPipeline:
         ).scalar_one()
         schema = RuleSchema.model_validate(rv.schema_json)
         extracted: dict[str, Any] = candidate.extracted_json or {}
+        extraction_meta = extracted.get("_meta")
+        extraction_model = (
+            extraction_meta.get("model")
+            if isinstance(extraction_meta, dict)
+            and isinstance(extraction_meta.get("model"), str)
+            else None
+        )
 
         # Stage A — hard filter
         hf = run_hard_filters(candidate=extracted, filters=schema.hard_filters)
@@ -91,6 +98,7 @@ class ScoringPipeline:
                 rule_dimensions={},
                 judge_dimensions=None,
                 is_suspicious=False,
+                llm_model_extract=extraction_model,
             )
             self.db.add(score_row)
             await self.db.flush()
@@ -107,13 +115,12 @@ class ScoringPipeline:
         rule_total = sum((r.get("score") or 0) for r in rule_results)
 
         # Stage C — LLM judge
-        judge_payload = await self.judge.score(
+        judge_result = await self.judge.score(
             resume_text=candidate.parsed_markdown or "",
             dims=schema.judge_dimensions,
         )
-        judge_total = sum(
-            (d.get("score") or 0) for d in judge_payload.get("dimensions", [])
-        )
+        judge_total = sum((dimension.score or 0) for dimension in judge_result.dimensions)
+        judge_payload = judge_result.model_dump()
 
         total = rule_total + judge_total
         grade = _grade_from(total, schema)
@@ -132,8 +139,9 @@ class ScoringPipeline:
             judge_dimensions=judge_payload,
             cross_engine_diff=None,
             is_suspicious=False,
-            llm_model_main=judge_payload.get("model"),
-            cost_tokens=judge_payload.get("tokens", 0) or 0,
+            llm_model_main=judge_result.model or None,
+            llm_model_extract=extraction_model,
+            cost_tokens=judge_result.tokens,
         )
         self.db.add(score_row)
         self.db.add(

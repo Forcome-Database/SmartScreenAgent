@@ -11,7 +11,17 @@ from backend.app.deps import require_roles
 from backend.app.models import JD, User
 from backend.app.scoring.pipeline import ScoringPipeline
 from backend.app.security.crypto import encrypt_pii
-from backend.app.services.parser.mineru_client import MinerUParseError
+from backend.app.services.llm.errors import (
+    LLMConfigurationError,
+    LLMInvalidOutputError,
+    LLMInvalidResponseError,
+    LLMUnavailableError,
+)
+from backend.app.services.parser.errors import (
+    MinerUContractError,
+    MinerUTaskError,
+    MinerUUnavailableError,
+)
 from backend.app.services.storage import ResumeStorageService, StorageError
 from backend.app.services.upload import UploadValidationError, UploadValidator, get_malware_scanner
 from backend.app.tasks.ingest import (
@@ -34,6 +44,30 @@ def _upload_error(status_code: int, code: str, message: str) -> HTTPException:
         status_code=status_code,
         detail={"code": code, "message": message},
     )
+
+
+def _external_service_error(exc: Exception) -> HTTPException | None:
+    if isinstance(exc, MinerUUnavailableError):
+        return _upload_error(
+            503, "resume_parser_unavailable", "Resume parser is unavailable"
+        )
+    if isinstance(exc, MinerUContractError):
+        return _upload_error(
+            502, "resume_parser_contract_invalid", "Resume parser response is invalid"
+        )
+    if isinstance(exc, MinerUTaskError):
+        return _upload_error(502, "resume_parser_failed", "Resume parser failed")
+    if isinstance(exc, LLMUnavailableError):
+        return _upload_error(503, "ai_service_unavailable", "AI service is unavailable")
+    if isinstance(exc, LLMConfigurationError):
+        return _upload_error(
+            502,
+            "ai_service_configuration_invalid",
+            "AI service configuration is invalid",
+        )
+    if isinstance(exc, (LLMInvalidResponseError, LLMInvalidOutputError)):
+        return _upload_error(502, "ai_invalid_output", "AI service output is invalid")
+    return None
 
 
 @router.post("/upload", response_model=UploadResponse, status_code=200)
@@ -77,8 +111,18 @@ async def upload_resume(
             "candidate_file_conflict",
             "Existing candidate raw file is unavailable",
         ) from exc
-    except MinerUParseError as exc:
-        raise _upload_error(502, "resume_parser_failed", "Resume parser failed") from exc
+    except (
+        MinerUUnavailableError,
+        MinerUContractError,
+        MinerUTaskError,
+        LLMUnavailableError,
+        LLMConfigurationError,
+        LLMInvalidResponseError,
+        LLMInvalidOutputError,
+    ) as exc:
+        mapped = _external_service_error(exc)
+        assert mapped is not None
+        raise mapped from exc
     except StorageError as exc:
         raise _upload_error(
             503,
@@ -118,8 +162,11 @@ async def score_candidate(
     try:
         result = await ScoringPipeline(db=db).run(candidate_id=candidate_id, jd_id=jd.id)
         await db.commit()
-    except Exception:
+    except Exception as exc:
         await db.rollback()
+        mapped = _external_service_error(exc)
+        if mapped is not None:
+            raise mapped from exc
         raise
     return ScoreResponse(
         score_id=result.score_id,

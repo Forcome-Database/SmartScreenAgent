@@ -1,3 +1,6 @@
+import io
+import zipfile
+from pathlib import Path
 
 import httpx
 import pytest
@@ -5,180 +8,198 @@ import respx
 from httpx import Response
 
 from backend.app.config import get_settings
-from backend.app.services.parser.mineru_client import MinerUClient, MinerUParseError, ParseResult
+from backend.app.services.parser.errors import (
+    MinerUContractError,
+    MinerUResultError,
+    MinerUTaskError,
+    MinerUUnavailableError,
+)
+from backend.app.services.parser.mineru_client import MinerUClient, ParseResult
+
+
+def _zip_result(markdown: str = "# 张三\n外贸经历") -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("resume/auto/resume.md", markdown.encode())
+    return output.getvalue()
+
+
+def _health(protocol: int = 2) -> dict:
+    return {
+        "status": "healthy",
+        "version": "3.4.4",
+        "protocol_version": protocol,
+        "queued_tasks": 0,
+        "processing_tasks": 0,
+        "completed_tasks": 0,
+        "failed_tasks": 0,
+        "max_concurrent_requests": 2,
+    }
+
+
+def _task(status: str) -> dict:
+    return {
+        "task_id": "task-123",
+        "status": status,
+        "backend": "hybrid-engine",
+        "file_names": ["resume.pdf"],
+        "created_at": "2026-07-16T00:00:00Z",
+        "started_at": None,
+        "completed_at": None,
+        "error": None,
+        "status_url": "https://mineru.example/tasks/task-123",
+        "result_url": "https://mineru.example/tasks/task-123/result",
+        "queued_ahead": 0,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings():
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
-async def test_stub_mode_returns_dummy_markdown(monkeypatch, tmp_path):
+async def test_stub_mode_returns_dummy_markdown(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MINERU_MODE", "stub")
-    get_settings.cache_clear()
     pdf = tmp_path / "fake.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
-    client = MinerUClient()
-    result = await client.parse(pdf)
+
+    result = await MinerUClient().parse(pdf)
+
     assert isinstance(result, ParseResult)
-    assert result.markdown
-    assert result.source == "stub"
-    get_settings.cache_clear()
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_http_mode_posts_to_configured_endpoint(monkeypatch, tmp_path):
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example.com")
-    monkeypatch.setenv("MINERU_API_KEY", "k")
-    get_settings.cache_clear()
-    pdf = tmp_path / "fake.pdf"
-    pdf.write_bytes(b"%PDF-1.4 fake")
-    route = respx.post("https://mineru.example.com/file_parse").mock(
-        return_value=Response(200, json={"markdown": "# Resume\n张三", "layout": {}})
-    )
-    client = MinerUClient()
-    result = await client.parse(pdf)
-    assert route.called
     assert "张三" in result.markdown
-    get_settings.cache_clear()
+    assert result.source == "stub"
 
 
 @pytest.mark.asyncio
 @respx.mock
-@pytest.mark.parametrize(
-    ("body", "expected_markdown", "expected_layout"),
-    [
-        ({"markdown": "# Resume", "layout": {"pages": 1}}, "# Resume", {"pages": 1}),
-        ({"markdown": "# Primary", "md_content": "# Alias", "layout": {}}, "# Primary", {}),
-        (
-            {"data": {"markdown": "# Data", "layout": {"source": "data"}}},
-            "# Data",
-            {"source": "data"},
-        ),
-        ({"result": {"markdown": "# Result", "layout": {}}}, "# Result", {}),
-        ({"md_content": "# Alias", "layout": {}}, "# Alias", {}),
-        ({"data": {"md_content": "# Wrapped Alias", "layout": {}}}, "# Wrapped Alias", {}),
-    ],
-)
-async def test_http_mode_accepts_supported_response_shapes(
-    monkeypatch, tmp_path, body, expected_markdown, expected_layout
-):
+async def test_http_mode_uses_protocol_two_task_flow(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example.com")
-    get_settings.cache_clear()
-    try:
-        pdf = tmp_path / "fake.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        respx.post("https://mineru.example.com/file_parse").mock(
-            return_value=Response(200, json=body)
+    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
+    monkeypatch.setenv("MINERU_API_KEY", "secret")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    respx.get("https://mineru.example/health").mock(return_value=Response(200, json=_health()))
+    submit = respx.post("https://mineru.example/tasks").mock(
+        return_value=Response(
+            202,
+            json={
+                **_task("pending"),
+                "status_url": "https://evil.example/redirect",
+                "result_url": "https://evil.example/result",
+                "message": "Task submitted successfully",
+            },
         )
-        result = await MinerUClient().parse(pdf)
-        assert result.markdown == expected_markdown
-        assert result.layout == expected_layout
-        assert result.source == "http"
-    finally:
-        get_settings.cache_clear()
-
-
-@pytest.mark.asyncio
-@respx.mock
-@pytest.mark.parametrize(
-    ("body", "message"),
-    [
-        ({}, "missing markdown"),
-        ({"markdown": "   "}, "missing markdown"),
-        ({"markdown": "# ok", "layout": []}, "invalid layout"),
-    ],
-)
-async def test_http_mode_rejects_invalid_response(monkeypatch, tmp_path, body, message):
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example.com")
-    get_settings.cache_clear()
-    try:
-        pdf = tmp_path / "fake.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        respx.post("https://mineru.example.com/file_parse").mock(
-            return_value=Response(200, json=body)
+    )
+    status = respx.get("https://mineru.example/tasks/task-123").mock(
+        side_effect=[
+            Response(200, json=_task("processing")),
+            Response(200, json=_task("completed")),
+        ]
+    )
+    result_route = respx.get("https://mineru.example/tasks/task-123/result").mock(
+        return_value=Response(
+            200,
+            content=_zip_result(),
+            headers={"content-type": "application/zip"},
         )
-        with pytest.raises(MinerUParseError, match=message):
-            await MinerUClient().parse(pdf)
-    finally:
-        get_settings.cache_clear()
+    )
+
+    result = await MinerUClient().parse(pdf)
+
+    assert result.markdown.startswith("# 张三")
+    assert result.task_id == "task-123"
+    assert result.backend == "hybrid-engine"
+    assert result.service_version == "3.4.4"
+    assert result.protocol_version == 2
+    assert result.compressed_bytes > 0
+    assert submit.called and status.call_count == 2 and result_route.called
+    request = submit.calls[0].request
+    assert request.headers["authorization"] == "Bearer secret"
+    assert b'name="files"' in request.content
+    assert b'name="response_format_zip"' in request.content
+    assert b"true" in request.content
+    assert not respx.calls[-1].request.url.host == "evil.example"
 
 
 @pytest.mark.asyncio
 @respx.mock
-@pytest.mark.parametrize(
-    ("response", "message"),
-    [
-        (Response(200, content=b"not-json"), "invalid json response"),
-        (Response(200, json=[]), "invalid json response"),
-    ],
-)
-async def test_http_mode_rejects_unparseable_json(monkeypatch, tmp_path, response, message):
+async def test_rejects_protocol_mismatch(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example.com")
-    get_settings.cache_clear()
-    try:
-        pdf = tmp_path / "fake.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        respx.post("https://mineru.example.com/file_parse").mock(return_value=response)
-        with pytest.raises(MinerUParseError) as exc_info:
-            await MinerUClient().parse(pdf)
-        error = str(exc_info.value)
-        assert message in error
-        assert "mode=http" in error
-        assert "https://mineru.example.com/file_parse" in error
-        assert "not-json" not in error
-        assert "fake.pdf" not in error
-    finally:
-        get_settings.cache_clear()
+    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"x")
+    respx.get("https://mineru.example/health").mock(
+        return_value=Response(200, json=_health(protocol=3))
+    )
+
+    with pytest.raises(MinerUContractError, match="protocol"):
+        await MinerUClient().parse(pdf)
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_http_mode_wraps_non_2xx(monkeypatch, tmp_path):
+async def test_wraps_network_failure_as_unavailable(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example.com")
-    get_settings.cache_clear()
-    try:
-        pdf = tmp_path / "fake.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        respx.post("https://mineru.example.com/file_parse").mock(
-            return_value=Response(500, json={"error": "boom"})
+    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"x")
+    respx.get("https://mineru.example/health").mock(
+        side_effect=httpx.ConnectError("connection failed")
+    )
+
+    with pytest.raises(MinerUUnavailableError):
+        await MinerUClient().parse(pdf)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_terminal_task_failure_is_typed(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"x")
+    respx.get("https://mineru.example/health").mock(return_value=Response(200, json=_health()))
+    respx.post("https://mineru.example/tasks").mock(
+        return_value=Response(202, json={**_task("pending"), "message": "submitted"})
+    )
+    respx.get("https://mineru.example/tasks/task-123").mock(
+        return_value=Response(200, json={**_task("failed"), "error": "private provider text"})
+    )
+
+    with pytest.raises(MinerUTaskError) as exc_info:
+        await MinerUClient().parse(pdf)
+    assert "private provider text" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_rejects_oversized_result_before_writing(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
+    monkeypatch.setenv("MINERU_POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MINERU_RESULT_MAX_BYTES", "4")
+    pdf = tmp_path / "resume.pdf"
+    pdf.write_bytes(b"x")
+    respx.get("https://mineru.example/health").mock(return_value=Response(200, json=_health()))
+    respx.post("https://mineru.example/tasks").mock(
+        return_value=Response(202, json={**_task("pending"), "message": "submitted"})
+    )
+    respx.get("https://mineru.example/tasks/task-123").mock(
+        return_value=Response(200, json=_task("completed"))
+    )
+    respx.get("https://mineru.example/tasks/task-123/result").mock(
+        return_value=Response(
+            200,
+            content=_zip_result(),
+            headers={"content-type": "application/zip", "content-length": "999"},
         )
-        with pytest.raises(MinerUParseError) as exc_info:
-            await MinerUClient().parse(pdf)
-        message = str(exc_info.value)
-        assert "mode=http" in message
-        assert "https://mineru.example.com/file_parse" in message
-        assert "status_code=500" in message
-        assert "fake.pdf" not in message
-    finally:
-        get_settings.cache_clear()
+    )
 
-
-@pytest.mark.asyncio
-@respx.mock
-@pytest.mark.parametrize(
-    ("side_effect", "expected_error"),
-    [
-        (httpx.ConnectError("connect failed"), "ConnectError"),
-        (httpx.TimeoutException("timed out"), "TimeoutException"),
-    ],
-)
-async def test_http_mode_wraps_http_error(monkeypatch, tmp_path, side_effect, expected_error):
-    monkeypatch.setenv("MINERU_MODE", "http")
-    monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example.com")
-    get_settings.cache_clear()
-    try:
-        pdf = tmp_path / "fake.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        respx.post("https://mineru.example.com/file_parse").mock(side_effect=side_effect)
-        with pytest.raises(MinerUParseError) as exc_info:
-            await MinerUClient().parse(pdf)
-        message = str(exc_info.value)
-        assert "mode=http" in message
-        assert "https://mineru.example.com/file_parse" in message
-        assert expected_error in message
-        assert "fake.pdf" not in message
-    finally:
-        get_settings.cache_clear()
+    with pytest.raises(MinerUResultError, match="compressed size"):
+        await MinerUClient().parse(pdf)

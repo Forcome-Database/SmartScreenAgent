@@ -35,7 +35,7 @@ async def test_run_parse_and_score_persists_candidate(
     parser_stub = SimpleNamespace(
         parse=AsyncMock(
             return_value=ParseResult(
-                markdown="# resume\n张三 13800001234", layout={}, source="stub"
+                markdown="# resume\n张三 13800001234", source="stub"
             )
         )
     )
@@ -118,7 +118,7 @@ async def test_celery_task_downloads_verified_object(
         lambda: SimpleNamespace(
             parse=AsyncMock(
                 return_value=ParseResult(
-                    markdown="# worker resume", layout={}, source="stub"
+                    markdown="# worker resume", source="stub"
                 )
             )
         ),

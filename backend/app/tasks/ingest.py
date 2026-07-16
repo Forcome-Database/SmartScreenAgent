@@ -90,7 +90,15 @@ async def run_parse_and_score(
                 extracted_json={
                     "age": extracted.age,
                     "education": extracted.education,
-                    "experiences": [e.__dict__ for e in extracted.experiences],
+                    "experiences": [
+                        experience.model_dump() for experience in extracted.experiences
+                    ],
+                    "_meta": {
+                        "schema_version": extracted.schema_version,
+                        "prompt_version": extracted.prompt_version,
+                        "model": extracted.model,
+                        "tokens": extracted.raw_tokens,
+                    },
                 },
                 pii_hash=pii_hash,
             )
