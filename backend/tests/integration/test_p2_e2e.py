@@ -7,7 +7,15 @@ import pytest
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_full_p2_flow(client, db_session, monkeypatch, rules_workbook: Path):
+async def test_full_p2_flow(
+    client,
+    db_session,
+    auth_headers,
+    minio_storage,
+    valid_pdf_bytes,
+    monkeypatch,
+    rules_workbook: Path,
+):
     """E2E happy path: import rules → upload resume → score → expect positive total + grade."""
     from datetime import datetime, timezone
 
@@ -70,16 +78,20 @@ async def test_full_p2_flow(client, db_session, monkeypatch, rules_workbook: Pat
     await db_session.commit()
 
     # 2. Upload resume (synchronous 200 "parsed")
+    headers = await auth_headers()
     resp = await client.post(
         "/api/v1/candidates/upload",
-        files={"file": ("r.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        files={"file": ("r.pdf", valid_pdf_bytes, "application/pdf")},
+        headers=headers,
     )
     assert resp.status_code == 200, resp.text
     cid = resp.json()["candidate_id"]
 
     # 3. Score
     resp = await client.post(
-        f"/api/v1/candidates/{cid}/score", json={"jd_code": "FOREIGN_TRADE"}
+        f"/api/v1/candidates/{cid}/score",
+        json={"jd_code": "FOREIGN_TRADE"},
+        headers=headers,
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -92,7 +104,13 @@ async def test_full_p2_flow(client, db_session, monkeypatch, rules_workbook: Pat
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_p2_hard_filter_rejection(
-    client, db_session, monkeypatch, rules_workbook: Path
+    client,
+    db_session,
+    auth_headers,
+    minio_storage,
+    valid_pdf_bytes,
+    monkeypatch,
+    rules_workbook: Path,
 ):
     """Same happy path but candidate age=60, should trigger AGE hard filter rejection."""
     from datetime import datetime, timezone
@@ -147,8 +165,9 @@ async def test_p2_hard_filter_rejection(
 
     resp = await client.post(
         "/api/v1/candidates/upload",
-        files={"file": ("r.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        files={"file": ("r.pdf", valid_pdf_bytes, "application/pdf")},
         params={"jd_code": "FOREIGN_TRADE"},
+        headers=await auth_headers(),
     )
     assert resp.status_code == 200, resp.text
 

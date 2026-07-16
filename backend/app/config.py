@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     MINERU_BASE_URL: str = ""
     MINERU_API_KEY: str = ""
 
+    # Resume upload boundary
+    MAX_RESUME_FILE_BYTES: int = 20 * 1024 * 1024
+    UPLOAD_CHUNK_BYTES: int = 1024 * 1024
+    MALWARE_SCAN_MODE: str = "disabled"
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 

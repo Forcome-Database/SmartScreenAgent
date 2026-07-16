@@ -36,7 +36,8 @@ class ScoringPipeline:
     Stage B: deterministic rule engine over `rule_dimensions`.
     Stage C: LLM judge over `judge_dimensions`.
 
-    All stages persist a single `Score` row plus audit entries in one COMMIT.
+    All stages flush one `Score` row plus audit entries. The application-service
+    caller owns commit/rollback so candidate ingestion can be atomic.
     """
 
     def __init__(self, db: AsyncSession, judge: LLMJudge | None = None) -> None:
@@ -92,7 +93,7 @@ class ScoringPipeline:
                 is_suspicious=False,
             )
             self.db.add(score_row)
-            await self.db.commit()
+            await self.db.flush()
             await self.db.refresh(score_row)
             return PipelineResult(
                 score_id=score_row.id,
@@ -150,7 +151,7 @@ class ScoringPipeline:
                 rule_version_id=rv.id,
             )
         )
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(score_row)
         return PipelineResult(
             score_id=score_row.id,

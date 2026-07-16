@@ -78,6 +78,22 @@ async def test_pipeline_happy_path(db_session):
     assert result.score_id is not None
     assert not result.rejected
 
+    from backend.app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as other_session:
+        not_committed = (
+            await other_session.execute(select(Score).where(Score.id == result.score_id))
+        ).scalar_one_or_none()
+        assert not_committed is None
+
+    await db_session.commit()
+
+    async with AsyncSessionLocal() as other_session:
+        committed = (
+            await other_session.execute(select(Score).where(Score.id == result.score_id))
+        ).scalar_one()
+        assert committed.id == result.score_id
+
     stored = (
         await db_session.execute(select(Score).where(Score.id == result.score_id))
     ).scalar_one()
