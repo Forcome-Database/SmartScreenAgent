@@ -74,7 +74,7 @@
   uv run mypy --explicit-package-bases backend/app --ignore-missing-imports
   ```
 
-- [ ] Commit the migration and model change.
+- [x] Commit the migration and model change (`218079e`).
 
 ## Task 2: Normalize authentication and add reusable RBAC
 
@@ -88,7 +88,7 @@
 - [x] Introduce a typed DingTalk OAuth boundary and change the route to return stable `400 DingTalk OAuth failed` without exception details.
 - [x] Add integration helpers that insert a user and issue a real JWT; do not override `get_current_user` in authorization integration tests.
 - [x] Run focused unit and strict integration tests.
-- [ ] Commit authentication/RBAC independently of storage work.
+- [x] Commit authentication/RBAC independently of storage work (`58ab496`).
 
 ## Task 3: Implement bounded upload validation
 
@@ -149,7 +149,7 @@
 - [x] Map typed upload/storage/parser failures to the stable response shape without leaking paths or provider text.
 - [x] Add upload and duplicate audit rows with `actor=user:<id>` and trace ID when available.
 - [x] Confirm unauthorized requests produce no object, candidate, score, or audit row.
-- [x] Run candidate API and full P2 E2E integration tests; commit pending final user authorization.
+- [x] Run candidate API and full P2 E2E integration tests and commit the storage/ingestion work (`991fe5d`).
 
 ## Task 7: Verify compensation and clean-state gates
 
@@ -160,7 +160,7 @@
 - [x] Test delete failure behavior: the API must not return success, and the structured critical log must include trace ID, object key, and checksum without PII.
 - [x] Confirm repeated compensation calls are idempotent when the object is already absent.
 - [x] Run `uv run python scripts/verify.py` with Docker services and record zero skips and clean-state results.
-- [ ] Commit verification changes.
+- [x] Commit verification changes (`b1e0fb4`).
 
 ## Task 8: Documentation, rollout, and WP1 exit review
 
@@ -183,7 +183,7 @@
 - [ ] Confirm hosted GitHub Actions passes Python 3.10, Python 3.14, and strict integration jobs.
 - [x] Record exact local test counts, migration revisions, cleanup evidence, and measured coverage below; hosted run URL remains pending.
 - [ ] Update WP1 to Complete and WP2 to Ready for planning in the plan index and authoritative roadmap only after every exit criterion passes.
-- [ ] Commit documentation and completion evidence.
+- [x] Commit documentation and completion evidence (`d52aac2`).
 
 ## Required Exit Evidence
 
@@ -202,6 +202,8 @@
 
 Local implementation gate passed on 2026-07-16:
 
+- Scoped implementation commit range: `218079e^..d52aac2` on `codex/wp1-security-raw-file-integrity`.
+- Commit series: migration/model `218079e`, JWT/RBAC `58ab496`, verified raw-resume ingestion `991fe5d`, strict verification `b1e0fb4`, and rollout documentation `d52aac2`.
 - `uv run pytest -m "not integration" -q`: 142 passed, 36 deselected.
 - Strict `uv run pytest -m integration -q -rs`: 36 passed, 142 deselected, zero skips.
 - Alembic upgraded from base through `3884ec28fea9` to head `b57c2f9e1a6d`; the previous-revision legacy-row upgrade/downgrade test passed.
@@ -214,6 +216,5 @@ Local implementation gate passed on 2026-07-16:
 
 Still required before WP1 can be marked Complete:
 
-- Create scoped commit(s) for the approved implementation.
 - Push and record a hosted GitHub Actions run passing Python 3.10, Python 3.14, and strict integration.
 - Record the legacy metadata count/disposition for the actual target deployment (the disposable test database count is zero).
