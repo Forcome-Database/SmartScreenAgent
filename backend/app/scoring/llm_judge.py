@@ -25,7 +25,7 @@ class JudgeDimensionResult(_JudgeModel):
     evidence_quotes: list[str] = Field(max_length=10)
     reasoning: str = Field(min_length=1, max_length=4000)
     confidence: int | float = Field(ge=0, le=1)
-    suggested_interview_questions: list[str] = Field(default_factory=list, max_length=10)
+    suggested_interview_questions: list[str] = Field(max_length=10)
 
     @field_validator("score", "confidence", mode="before")
     @classmethod

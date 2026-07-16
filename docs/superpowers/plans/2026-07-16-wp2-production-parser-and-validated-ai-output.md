@@ -167,8 +167,14 @@
 
 Local strict verification on 2026-07-16 passed 179 offline tests and 42 integration
 tests with zero skips, followed by Ruff, mypy, migration, PostgreSQL, Redis,
-MinIO, Celery, and temporary-file clean-state checks. The external-contract gate
-remains blocked on real MinerU and new-api configuration; WP2 is still In progress.
+MinIO, Celery, and temporary-file clean-state checks. The combined external-contract
+gate remains blocked on the MinerU protocol mismatch; WP2 is still In progress.
+
+The configured new-api deployment was verified separately on 2026-07-16 using
+`json_schema`: model listing plus primary/fallback extraction and judge probes passed
+5/5 with zero skips for `gpt-5.6-sol`. MinerU runtime evidence remains outstanding
+because the supplied official cloud token uses MinerU API v4, while the approved WP2
+adapter targets the self-hosted protocol-2 `/health` and `/tasks` contract.
 
 ## Task 9: Add external runtime contract gates
 
@@ -178,8 +184,8 @@ remains blocked on real MinerU and new-api configuration; WP2 is still In progre
 - [ ] Add a command that requires external endpoints/credentials and fails on missing configuration or skipped `external_contract` tests.
 - [ ] Capture deployed MinerU health, OpenAPI, task/result responses, sanitized artifacts, service version, and protocol version.
 - [ ] Verify all four supported input formats produce non-empty validated Markdown/extraction.
-- [ ] Capture the deployed new-api model list reduced to configured model IDs.
-- [ ] Probe configured primary/fallback extraction and judge models for the selected structured-output mode.
+- [x] Capture the deployed new-api model list reduced to configured model IDs.
+- [x] Probe configured primary/fallback extraction and judge models for the selected structured-output mode.
 - [ ] Record exact runtime test counts, endpoint environment name, service/model versions, artifact inventory, and run location without secrets.
 - [ ] Commit sanitized runtime evidence only after review.
 

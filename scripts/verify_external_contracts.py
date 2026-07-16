@@ -44,6 +44,7 @@ def configuration_errors(environ: Mapping[str, str]) -> list[str]:
 
 def main() -> int:
     load_dotenv(REPO_ROOT / ".env", override=False)
+    load_dotenv(REPO_ROOT / ".env.local", override=True)
     errors = configuration_errors(os.environ)
     if errors:
         print("external contract configuration is incomplete:", file=sys.stderr)

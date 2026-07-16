@@ -1,0 +1,22 @@
+{
+  "capture_type": "sanitized_runtime_evidence",
+  "captured_at": "2026-07-16T15:31:35+08:00",
+  "endpoint_environment": "coder.forcome.com/v1",
+  "structured_output_mode": "json_schema",
+  "configured_model_ids": [
+    "gpt-5.6-sol"
+  ],
+  "probes": {
+    "model_list": "passed",
+    "extract_primary": "passed",
+    "extract_fallback": "passed",
+    "judge_primary": "passed",
+    "judge_fallback": "passed"
+  },
+  "pytest": {
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0
+  },
+  "secrets_captured": false
+}

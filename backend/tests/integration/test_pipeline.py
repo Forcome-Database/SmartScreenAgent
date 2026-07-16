@@ -67,6 +67,7 @@ async def test_pipeline_happy_path(db_session):
                 evidence_quotes=[],
                 reasoning="ok",
                 confidence=0.9,
+                suggested_interview_questions=[],
             )
         ],
         model="gpt-5.5",
