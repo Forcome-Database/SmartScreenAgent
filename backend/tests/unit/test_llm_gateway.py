@@ -1,8 +1,14 @@
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from openai import APIResponseValidationError
 
-from backend.app.services.llm.errors import LLMConfigurationError, LLMUnavailableError
+from backend.app.services.llm.errors import (
+    LLMConfigurationError,
+    LLMInvalidResponseError,
+    LLMUnavailableError,
+)
 from backend.app.services.llm.gateway import LLMGateway
 from backend.app.services.llm.schemas import LLMResponse
 
@@ -104,3 +110,30 @@ async def test_fallback_only_does_not_retry_primary(monkeypatch) -> None:
     assert call.await_count == 1
     assert call.await_args.args[0] == gateway.settings.LLM_MODEL_EXTRACT_FALLBACK
     assert result.used_fallback is True
+
+
+@pytest.mark.asyncio
+async def test_provider_response_validation_error_is_typed_and_sanitized() -> None:
+    gateway = LLMGateway()
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://secret@provider.internal/chat"),
+    )
+    provider_error = APIResponseValidationError(
+        response,
+        {"completion": "private resume text"},
+        message="provider leaked private resume text",
+    )
+    gateway._client.chat.completions.create = AsyncMock(side_effect=provider_error)
+
+    with pytest.raises(LLMInvalidResponseError) as exc_info:
+        await gateway._call_once(
+            "model",
+            messages=[{"role": "user", "content": "private prompt"}],
+            response_schema={"type": "object"},
+            schema_name="test_schema",
+            prompt_version="test_prompt",
+        )
+
+    assert "secret" not in str(exc_info.value)
+    assert "private resume text" not in str(exc_info.value)

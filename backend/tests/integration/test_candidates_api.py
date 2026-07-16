@@ -5,10 +5,15 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
-from backend.app.models import JD, AuditLog, Candidate, RuleVersion
+from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
 from backend.app.scoring.llm_judge import JudgeResult
 from backend.app.security.crypto import encrypt_pii
-from backend.app.services.parser.errors import MinerUResultError, MinerUUnavailableError
+from backend.app.services.llm.errors import LLMInvalidOutputError, LLMUnavailableError
+from backend.app.services.parser.errors import (
+    MinerUContractError,
+    MinerUResultError,
+    MinerUUnavailableError,
+)
 from backend.app.services.parser.extractor import Experience, ExtractedResume
 from backend.app.services.parser.mineru_client import ParseResult
 from backend.app.services.parser.pii import compute_pii_hash
@@ -149,6 +154,114 @@ async def test_upload_parser_failure_returns_502(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status_code", "detail"),
+    [
+        (
+            MinerUUnavailableError("https://secret@mineru.internal/tasks/42"),
+            503,
+            {
+                "code": "resume_parser_unavailable",
+                "message": "Resume parser is unavailable",
+            },
+        ),
+        (
+            MinerUContractError("provider body contains candidate PII"),
+            502,
+            {
+                "code": "resume_parser_contract_invalid",
+                "message": "Resume parser response is invalid",
+            },
+        ),
+    ],
+)
+async def test_upload_maps_parser_boundary_errors_and_rolls_back(
+    client,
+    db_session,
+    auth_headers,
+    minio_storage,
+    valid_pdf_bytes,
+    monkeypatch,
+    error,
+    status_code,
+    detail,
+):
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(parse=AsyncMock(side_effect=error)),
+    )
+
+    response = await client.post(
+        "/api/v1/candidates/upload",
+        files={"file": ("private-resume.pdf", valid_pdf_bytes, "application/pdf")},
+        headers=await auth_headers(),
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == detail
+    assert "secret" not in response.text
+    assert "candidate PII" not in response.text
+    assert "private-resume.pdf" not in response.text
+    assert (await db_session.execute(select(Candidate))).scalars().all() == []
+    assert minio_storage.list_object_keys(prefix="resumes/") == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status_code", "detail"),
+    [
+        (
+            LLMUnavailableError("provider timeout with prompt body"),
+            503,
+            {"code": "ai_service_unavailable", "message": "AI service is unavailable"},
+        ),
+        (
+            LLMInvalidOutputError("completion contains fabricated evidence"),
+            502,
+            {"code": "ai_invalid_output", "message": "AI service output is invalid"},
+        ),
+    ],
+)
+async def test_upload_maps_ai_boundary_errors_and_rolls_back(
+    client,
+    db_session,
+    auth_headers,
+    minio_storage,
+    valid_pdf_bytes,
+    monkeypatch,
+    error,
+    status_code,
+    detail,
+):
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(return_value=ParseResult(markdown="# private", source="stub"))
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.ResumeExtractor",
+        lambda: SimpleNamespace(extract=AsyncMock(side_effect=error)),
+    )
+
+    response = await client.post(
+        "/api/v1/candidates/upload",
+        files={"file": ("private-resume.pdf", valid_pdf_bytes, "application/pdf")},
+        headers=await auth_headers(),
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == detail
+    assert "prompt body" not in response.text
+    assert "fabricated evidence" not in response.text
+    assert "private-resume.pdf" not in response.text
+    assert (await db_session.execute(select(Candidate))).scalars().all() == []
+    assert minio_storage.list_object_keys(prefix="resumes/") == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_score_endpoint_returns_total(client, db_session, auth_headers, monkeypatch):
     """Score endpoint: given existing candidate + JD with active rule, returns total + grade."""
     import json
@@ -226,6 +339,115 @@ async def test_score_endpoint_unknown_jd_returns_404(client, db_session, auth_he
         headers=await auth_headers(),
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status_code", "detail"),
+    [
+        (
+            LLMUnavailableError("provider URL contains secret-token"),
+            503,
+            {"code": "ai_service_unavailable", "message": "AI service is unavailable"},
+        ),
+        (
+            LLMInvalidOutputError("completion contains private resume text"),
+            502,
+            {"code": "ai_invalid_output", "message": "AI service output is invalid"},
+        ),
+    ],
+)
+async def test_rescore_ai_failure_preserves_existing_score_and_rolls_back_partial_rows(
+    client,
+    db_session,
+    auth_headers,
+    monkeypatch,
+    error,
+    status_code,
+    detail,
+):
+    from datetime import datetime, timezone
+
+    jd = JD(code="ROLLBACK", name="Rollback", description="", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    rule_version = RuleVersion(
+        jd_id=jd.id,
+        version="v1",
+        schema_json={},
+        published_at=datetime.now(timezone.utc),
+    )
+    db_session.add(rule_version)
+    await db_session.flush()
+    jd.active_rule_version_id = rule_version.id
+    candidate = Candidate(
+        source="upload",
+        name_cipher=encrypt_pii("Existing Candidate"),
+        pii_hash=compute_pii_hash(name="Existing Candidate", phone="13900000000"),
+        parsed_markdown="private resume text",
+        extracted_json={"age": 30, "education": "bachelor", "experiences": []},
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+    existing_score = Score(
+        candidate_id=candidate.id,
+        jd_id=jd.id,
+        rule_version_id=rule_version.id,
+        total_score=60,
+        grade="B",
+        hard_filter_result={"passed": True},
+        rule_dimensions={},
+        is_suspicious=False,
+    )
+    db_session.add(existing_score)
+    await db_session.commit()
+    existing_score_id = existing_score.id
+
+    async def fail_after_partial_write(pipeline, *, candidate_id: int, jd_id: int):
+        pipeline.db.add(
+            Score(
+                candidate_id=candidate_id,
+                jd_id=jd_id,
+                rule_version_id=rule_version.id,
+                total_score=99,
+                grade="A",
+                hard_filter_result={"passed": True},
+                rule_dimensions={},
+                is_suspicious=False,
+            )
+        )
+        pipeline.db.add(
+            AuditLog(
+                event_type="score",
+                actor="system",
+                target_type="candidate",
+                target_id=candidate_id,
+                payload={"private": "must roll back"},
+                rule_version_id=rule_version.id,
+            )
+        )
+        await pipeline.db.flush()
+        raise error
+
+    monkeypatch.setattr(
+        "backend.app.routers.candidates.ScoringPipeline.run",
+        fail_after_partial_write,
+    )
+
+    response = await client.post(
+        f"/api/v1/candidates/{candidate.id}/score",
+        json={"jd_code": jd.code},
+        headers=await auth_headers(),
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["detail"] == detail
+    assert "secret-token" not in response.text
+    assert "private resume text" not in response.text
+    scores = (await db_session.execute(select(Score))).scalars().all()
+    assert [score.id for score in scores] == [existing_score_id]
+    assert (await db_session.execute(select(AuditLog))).scalars().all() == []
 
 
 @pytest.mark.integration
@@ -507,18 +729,23 @@ async def test_optional_scoring_failure_rolls_back_candidate_and_object(
     await db_session.commit()
     monkeypatch.setattr(
         "backend.app.tasks.ingest.ScoringPipeline.run",
-        AsyncMock(side_effect=RuntimeError("score failed")),
+        AsyncMock(side_effect=LLMInvalidOutputError("completion leaked private resume")),
     )
 
-    with pytest.raises(RuntimeError, match="score failed"):
-        await client.post(
-            "/api/v1/candidates/upload",
-            params={"jd_code": "FAIL_SCORE"},
-            files={"file": ("resume.pdf", valid_pdf_bytes, "application/pdf")},
-            headers=await auth_headers(),
-        )
+    response = await client.post(
+        "/api/v1/candidates/upload",
+        params={"jd_code": "FAIL_SCORE"},
+        files={"file": ("private-resume.pdf", valid_pdf_bytes, "application/pdf")},
+        headers=await auth_headers(),
+    )
 
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "ai_invalid_output"
+    assert "completion leaked private resume" not in response.text
+    assert "private-resume.pdf" not in response.text
     assert (await db_session.execute(select(Candidate))).scalars().all() == []
+    assert (await db_session.execute(select(Score))).scalars().all() == []
+    assert (await db_session.execute(select(AuditLog))).scalars().all() == []
     assert minio_storage.list_object_keys(prefix="resumes/") == []
 
 

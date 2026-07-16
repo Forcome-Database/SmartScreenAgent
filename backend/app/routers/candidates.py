@@ -162,11 +162,18 @@ async def score_candidate(
     try:
         result = await ScoringPipeline(db=db).run(candidate_id=candidate_id, jd_id=jd.id)
         await db.commit()
-    except Exception as exc:
+    except (
+        LLMUnavailableError,
+        LLMConfigurationError,
+        LLMInvalidResponseError,
+        LLMInvalidOutputError,
+    ) as exc:
         await db.rollback()
         mapped = _external_service_error(exc)
-        if mapped is not None:
-            raise mapped from exc
+        assert mapped is not None
+        raise mapped from exc
+    except Exception:
+        await db.rollback()
         raise
     return ScoreResponse(
         score_id=result.score_id,

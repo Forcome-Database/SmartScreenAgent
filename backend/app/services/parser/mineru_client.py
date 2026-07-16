@@ -88,7 +88,7 @@ class MinerUClient:
             raise
         except MinerUError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+        except (httpx.TransportError, OSError) as exc:
             raise MinerUUnavailableError("MinerU request failed") from exc
 
         try:
@@ -252,7 +252,7 @@ class MinerUClient:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
             raise
-        except (httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+        except (httpx.TransportError, OSError) as exc:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
             raise MinerUUnavailableError("MinerU result download failed") from exc
@@ -268,7 +268,7 @@ class MinerUClient:
             return await client.request(method, url, **kwargs)
         except asyncio.CancelledError:
             raise
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.TransportError as exc:
             raise MinerUUnavailableError("MinerU request failed") from exc
 
     @staticmethod

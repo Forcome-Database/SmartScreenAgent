@@ -8,6 +8,7 @@ from typing import Any
 
 from openai import (
     APIConnectionError,
+    APIResponseValidationError,
     APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
@@ -67,6 +68,8 @@ class LLMGateway:
             response = await self._client.chat.completions.create(**request)
         except (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError) as exc:
             raise LLMUnavailableError("LLM provider is unavailable") from exc
+        except APIResponseValidationError as exc:
+            raise LLMInvalidResponseError("LLM provider response is invalid") from exc
         except (AuthenticationError, PermissionDeniedError, BadRequestError) as exc:
             raise LLMConfigurationError("LLM request configuration was rejected") from exc
         except APIStatusError as exc:

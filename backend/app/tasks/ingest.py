@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -153,12 +154,19 @@ async def run_parse_and_score(
         await db.commit()
         owns_new_object = False
         return IngestionResult(candidate_id=cand.id, status=status)
-    except Exception as exc:
-        await db.rollback()
+    except (Exception, asyncio.CancelledError) as exc:
+        rollback_error: BaseException | None = None
+        try:
+            await asyncio.shield(db.rollback())
+        except BaseException as cleanup_exc:  # includes repeated cancellation
+            rollback_error = cleanup_exc
+
+        object_cleanup_error: BaseException | None = None
         if owns_new_object:
             try:
-                await storage.delete(raw_file.object_key)
-            except Exception as cleanup_exc:
+                await asyncio.shield(storage.delete(raw_file.object_key))
+            except BaseException as cleanup_exc:  # includes repeated cancellation
+                object_cleanup_error = cleanup_exc
                 logger.critical(
                     "raw_file_cleanup_failed",
                     trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
@@ -166,7 +174,10 @@ async def run_parse_and_score(
                     sha256=raw_file.sha256,
                     error_type=type(cleanup_exc).__name__,
                 )
-                raise cleanup_exc from exc
+        if object_cleanup_error is not None:
+            raise object_cleanup_error from exc
+        if rollback_error is not None:
+            raise rollback_error from exc
         raise
 
 
@@ -194,8 +205,6 @@ def parse_and_score_task(
     source_external_id: str | None,
     jd_code: str | None,
 ) -> int:
-    import asyncio
-
     async def _runner() -> int:
         try:
             reference = RawFileReference(**raw_file)

@@ -143,17 +143,27 @@ async def test_rejects_protocol_mismatch(monkeypatch, tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_wraps_network_failure_as_unavailable(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ConnectError("connection failed"),
+        httpx.RemoteProtocolError("provider leaked protocol details"),
+    ],
+)
+async def test_wraps_transport_failure_as_unavailable(
+    monkeypatch, tmp_path: Path, transport_error: httpx.TransportError
+) -> None:
     monkeypatch.setenv("MINERU_MODE", "http")
     monkeypatch.setenv("MINERU_BASE_URL", "https://mineru.example")
     pdf = tmp_path / "resume.pdf"
     pdf.write_bytes(b"x")
     respx.get("https://mineru.example/health").mock(
-        side_effect=httpx.ConnectError("connection failed")
+        side_effect=transport_error
     )
 
-    with pytest.raises(MinerUUnavailableError):
+    with pytest.raises(MinerUUnavailableError) as exc_info:
         await MinerUClient().parse(pdf)
+    assert "protocol details" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio
