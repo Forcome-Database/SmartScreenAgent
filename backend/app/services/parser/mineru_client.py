@@ -238,7 +238,11 @@ class MinerUClient:
         deadline = monotonic() + self.settings.MINERU_TASK_TIMEOUT_SECONDS
         status_url = f"{base_url}/api/v4/extract-results/batch/{batch_id}"
         while monotonic() < deadline:
-            response = await self._request_api(client, "GET", status_url)
+            try:
+                response = await self._request_api(client, "GET", status_url)
+            except MinerUUnavailableError:
+                await asyncio.sleep(self.settings.MINERU_POLL_INTERVAL_SECONDS)
+                continue
             payload = self._success_payload(response, "batch result response")
             try:
                 status = MinerUOfficialBatchResponse.model_validate(payload)
@@ -275,6 +279,15 @@ class MinerUClient:
         try:
             async with client.stream("GET", result_url) as response:
                 self._check_blob_response(response, "MinerU result download")
+                content_type = response.headers.get("content-type")
+                if content_type:
+                    media_type = content_type.partition(";")[0].strip().lower()
+                    if media_type not in {
+                        "application/zip",
+                        "application/octet-stream",
+                        "binary/octet-stream",
+                    }:
+                        raise MinerUResultError("invalid MinerU result content type")
                 content_length = response.headers.get("content-length")
                 if content_length:
                     try:

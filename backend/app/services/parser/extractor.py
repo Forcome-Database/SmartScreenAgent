@@ -9,6 +9,7 @@ from pydantic import (
     StrictInt,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from backend.app.services.llm.errors import LLMInvalidOutputError
@@ -47,6 +48,22 @@ class ExtractedResumePayload(_StrictModel):
     education: str | None = Field(max_length=300)
     age: StrictInt | None = Field(ge=0, le=120)
     experiences: list[Experience] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def _reject_duplicate_experiences(self) -> ExtractedResumePayload:
+        identities = {
+            (
+                item.company.casefold(),
+                item.title.casefold(),
+                item.start,
+                item.end,
+                item.description.casefold(),
+            )
+            for item in self.experiences
+        }
+        if len(identities) != len(self.experiences):
+            raise ValueError("duplicate experience entries are not allowed")
+        return self
 
     @field_validator("name", "phone", "email", "education")
     @classmethod

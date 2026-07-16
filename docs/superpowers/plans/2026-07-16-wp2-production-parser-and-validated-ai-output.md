@@ -102,54 +102,54 @@
 
 **Files:** result archive service, MinerU client, archive tests.
 
-- [ ] Add failing tests for streaming compressed-size limit and ZIP signature/content-type validation.
-- [ ] Add malicious fixtures for absolute paths, drive paths, `..`, backslash traversal, symlinks, encrypted members, duplicate names, member count, decompression ratio, and total uncompressed size.
-- [ ] Add result-shape tests for missing, empty, and duplicate Markdown plus malformed content-list JSON.
-- [ ] Implement member-by-member validation without wholesale extraction.
-- [ ] Require one non-empty Markdown result for a one-file task and parse optional content-list data.
-- [ ] Prove temporary result files are deleted on success, failure, timeout, and cancellation.
-- [ ] Run focused archive/client tests, Ruff, and mypy.
-- [ ] Commit result artifact handling.
+- [x] Add tests for streaming compressed-size limit and ZIP signature/content-type validation.
+- [x] Add malicious fixtures for absolute paths, drive paths, `..`, backslash traversal, symlinks, encrypted members, duplicate names, member count, decompression ratio, and total uncompressed size.
+- [x] Add result-shape tests for missing, empty, and duplicate Markdown plus malformed content-list JSON.
+- [x] Implement member-by-member validation without wholesale extraction.
+- [x] Require one non-empty Markdown result for a one-file task and parse optional content-list data.
+- [x] Prove temporary result files are deleted on success, failure, timeout, and cancellation.
+- [x] Run focused archive/client tests, Ruff, and mypy.
+- [x] Commit the initial archive boundary in `2145b74`; include final edge coverage in the WP2 exit commit.
 
 ## Task 5: Make the LLM gateway typed and capability-explicit
 
 **Files:** gateway, LLM errors/schemas, config, gateway tests.
 
-- [ ] Add failing tests for system/user message separation and JSON-encoded untrusted resume payloads.
-- [ ] Add failing tests for named strict `json_schema` and configured `json_object` modes.
-- [ ] Add typed tests for connection, timeout, rate limit, 5xx, authentication, authorization, invalid request, empty choice, and missing usage.
-- [ ] Replace broad `except Exception` fallback with explicit retryable classifications.
-- [ ] Enforce at most primary plus fallback attempt; never fall back for auth/configuration errors.
-- [ ] Record trusted model, prompt version, token counts, latency, attempt, and outcome without prompt/completion bodies.
-- [ ] Run gateway tests, Ruff, and mypy.
-- [ ] Commit the gateway boundary.
+- [x] Add tests for system/user message separation and JSON-encoded untrusted resume payloads.
+- [x] Add tests for named strict `json_schema` and configured `json_object` modes.
+- [x] Add typed tests for connection, timeout, rate limit, 5xx, authentication, authorization, invalid request, empty choice, and missing usage.
+- [x] Replace broad `except Exception` fallback with explicit retryable classifications.
+- [x] Enforce at most primary plus fallback attempt; never fall back for auth/configuration errors.
+- [x] Record trusted model, prompt version, token counts, latency, attempt, outcome, and local trace ID without prompt/completion bodies.
+- [x] Run gateway tests, Ruff, and mypy.
+- [x] Commit the initial gateway boundary in `2145b74`; include the completed exception/log matrix in the WP2 exit commit.
 
 ## Task 6: Validate extracted resumes with Pydantic
 
 **Files:** extractor, structured-output helpers, extraction tests, ingest tests.
 
-- [ ] Add failing tests for valid Chinese resume extraction and correct UTF-8 prompt text.
-- [ ] Add failing tests for invalid JSON, wrong top-level type, missing/extra keys, booleans as age, out-of-range age, empty required experience fields, invalid dates, and excessive lists/strings.
-- [ ] Convert extraction dataclasses to strict Pydantic models while keeping current attribute access compatible.
-- [ ] Normalize optional empty strings to null and preserve canonical dates.
-- [ ] Put trusted schema/prompt/model/token metadata under `extracted_json._meta`.
-- [ ] Prove two invalid model attempts raise a typed invalid-output error and persist nothing.
-- [ ] Run extractor, ingest, candidate API, Ruff, and mypy checks.
-- [ ] Commit typed extraction.
+- [x] Add tests for valid Chinese resume extraction and correct UTF-8 prompt text.
+- [x] Add tests for invalid JSON, wrong top-level type, missing/extra keys, booleans as age, out-of-range age, empty required experience fields, invalid dates, duplicate experiences, and excessive lists/strings.
+- [x] Convert extraction dataclasses to strict Pydantic models while keeping current attribute access compatible.
+- [x] Normalize optional empty strings to null and preserve canonical dates.
+- [x] Put trusted schema/prompt/model/token metadata under `extracted_json._meta`.
+- [x] Prove two invalid model attempts raise a typed invalid-output error and persist nothing.
+- [x] Run extractor, ingest, candidate API, Ruff, and mypy checks.
+- [x] Commit the initial typed extraction in `2145b74`; include the completed boundary matrix in the WP2 exit commit.
 
 ## Task 7: Validate judge output against rules and evidence
 
 **Files:** judge, structured-output helpers, pipeline, rule/judge/pipeline tests.
 
-- [ ] Add failing tests for unknown, duplicate, and missing dimension IDs.
-- [ ] Add failing tests for invalid tier, tier/score mismatch, boolean/NaN/infinity scores, invalid confidence, empty reasoning, excessive questions, and extra keys.
-- [ ] Add failing tests for non-unknown results without evidence, fabricated evidence, Unicode/whitespace-normalized valid evidence, and invalid evidence for unknown tiers.
-- [ ] Implement strict raw models plus contextual validation against active `JudgeDimension` objects.
-- [ ] Reorder validated output to rule-definition order and recompute subtotal/total only from validated scores.
-- [ ] Persist prompt/model/token metadata from the gateway, never from the model body.
-- [ ] Prove invalid judge output cannot insert a score or score audit row.
-- [ ] Run judge, pipeline, P2 E2E, Ruff, and mypy checks.
-- [ ] Commit judge/evidence validation.
+- [x] Add tests for unknown, duplicate, and missing dimension IDs.
+- [x] Add tests for invalid tier, tier/score mismatch, boolean/NaN/infinity scores, invalid confidence, empty reasoning, excessive questions, and extra keys.
+- [x] Add tests for non-unknown results without evidence, fabricated evidence, Unicode/whitespace-normalized valid evidence, and invalid evidence for unknown tiers.
+- [x] Implement strict raw models plus contextual validation against active `JudgeDimension` objects.
+- [x] Reorder validated output to rule-definition order and recompute subtotal/total only from validated scores.
+- [x] Persist prompt/model/token metadata from the gateway, never from the model body.
+- [x] Prove invalid judge output cannot insert a score or score audit row.
+- [x] Run judge, pipeline, P2 E2E, Ruff, and mypy checks.
+- [x] Commit the initial judge/evidence validation in `2145b74`; include the completed edge matrix in the WP2 exit commit.
 
 ## Task 8: Stabilize application errors and transaction outcomes
 
@@ -164,10 +164,9 @@
 - [x] Run strict candidate API, pipeline, task-ingest, and P2 E2E integration tests.
 - [x] Commit application error and transaction behavior.
 
-Local strict verification on 2026-07-16 passed 179 offline tests and 42 integration
-tests with zero skips, followed by Ruff, mypy, migration, PostgreSQL, Redis,
-MinIO, Celery, and temporary-file clean-state checks. A later full count is recorded
-after the official-v4 replacement gate below; WP2 remains In progress pending hosted CI.
+An earlier strict checkpoint on 2026-07-16 passed 179 offline tests and 42 integration
+tests. The final expanded count after official-v4 and exit-edge coverage is recorded
+below; WP2 remains In progress pending hosted CI.
 
 The configured new-api deployment was verified separately on 2026-07-16 using
 `json_schema`: model listing plus primary/fallback extraction and judge probes passed
@@ -185,15 +184,15 @@ official cloud API v4 and verified with all four synthetic input formats.
 - [x] Capture the deployed new-api model list reduced to configured model IDs.
 - [x] Probe configured primary/fallback extraction and judge models for the selected structured-output mode.
 - [x] Record the four-format runtime count, endpoint environment, API/model versions, artifact inventory, and secret-free evidence policy.
-- [x] Record the final combined MinerU/new-api count after the last external gate: 9 passed, 0 failed, 0 skipped in 386.38 seconds on Windows/Python 3.14.
+- [x] Record the final combined MinerU/new-api count after the last external gate: 9 passed, 0 failed, 0 skipped in 77.32 seconds on Windows/Python 3.14.
 - [x] Review and stage only sanitized runtime evidence; no batch IDs, signed URLs, credentials, provider bodies, prompts, completions, or PII are retained.
 
 ## Task 10: Full verification, rollout documentation, and WP2 exit review
 
 **Files:** README, plan index, roadmap, research docs, this plan.
 
-- [ ] Update quick start and environment documentation for MinerU protocol/configuration and structured-output modes.
-- [ ] Document stable parser/AI error codes, runtime verification, rollback, and synthetic fixture policy.
+- [x] Update quick start and environment documentation for MinerU protocol/configuration and structured-output modes.
+- [x] Document stable parser/AI error codes, runtime verification, rollback, and synthetic fixture policy.
 - [x] Run the complete local matrix:
 
   ```bash
@@ -205,9 +204,9 @@ official cloud API v4 and verified with all four synthetic input formats.
   uv run python scripts/verify_external_contracts.py
   ```
 
-  Final local evidence on Windows/Python 3.14: 192 offline tests and 42 strict
-  integration tests passed with zero failures; the external gate passed 9/9 with
-  zero skips in 386.38 seconds. Ruff, mypy, Alembic, PostgreSQL, Redis, MinIO,
+  Final local evidence on Windows/Python 3.14: 233 offline tests and 42 strict
+  integration tests passed with zero failures; the final external gate passed 9/9
+  with zero skips in 77.32 seconds. Ruff, mypy, Alembic, PostgreSQL, Redis, MinIO,
   temporary-file cleanup, and clean-state assertions passed.
 
 - [ ] Push scoped commits and confirm hosted Python 3.10, Python 3.14, and strict integration jobs.

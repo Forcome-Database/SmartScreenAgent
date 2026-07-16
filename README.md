@@ -155,7 +155,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/candidates/<id>/score \
 - 默认最大 20 MiB，可用 `MAX_RESUME_FILE_BYTES` 调整。
 - 原文件使用不含 PII 的不可变键写入私有 MinIO，并校验大小和 SHA-256。
 - 重复身份返回 `status: duplicate`，本次重复对象会被清理。
-- 稳定错误码包括 `invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`candidate_file_conflict`、`resume_parser_failed`、`object_storage_unavailable`。
+- 稳定错误码包括 `invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`candidate_file_conflict`、`object_storage_unavailable`、`resume_parser_unavailable`、`resume_parser_contract_invalid`、`resume_parser_failed`、`ai_service_unavailable`、`ai_service_configuration_invalid` 和 `ai_invalid_output`。
 
 升级已有数据库后，部署前必须检查旧候选人的原文件元数据；非零结果需要先回填或隔离，不能宣称历史文件已完成持久化：
 
@@ -178,12 +178,35 @@ WHERE raw_file_key IS NULL
 
 详见 `docs/specs/research/mineru.md`。
 
-### P2 未覆盖范围（→ P3）
+### new-api 结构化输出
+
+生产环境配置 `NEWAPI_BASE_URL`、`NEWAPI_API_KEY`、抽取/评分主模型和回退模型，
+并使用 `LLM_STRUCTURED_OUTPUT_MODE=json_schema`。`json_object` 仅用于兼容不支持
+严格 JSON Schema 的网关；两种模式都会经过相同的本地 Pydantic 和证据校验。
+
+密钥只放在未跟踪的 `.env.local` 或生产密钥服务中，不得写入仓库、日志或运行证据。
+
+### 外部契约验证与回滚
+
+默认测试完全离线。使用合成、无个人信息的 PDF、DOCX、PNG 和 JPEG 调用真实
+MinerU/new-api 时，显式运行：
+
+```powershell
+uv run python scripts/verify_external_contracts.py
+```
+
+该命令缺少凭据、使用 `MINERU_MODE=stub`、发生测试跳过或端点不符合契约时都会
+失败。提交的运行证据只记录端点环境、API/模型版本和测试计数，不保留批次 ID、
+签名 URL、请求/响应正文、Prompt、Completion 或候选人信息。
+
+解析或 AI 校验失败会回滚候选人/评分事务并清理对象和临时文件。生产回滚使用上一
+应用镜像；不会自动回退到未经验证的旧 `/file_parse`，`MINERU_MODE=stub` 也不能
+作为生产回滚模式。
+
+### 后续工作范围
 
 - 段 D 双引擎交叉打分（cross_engine_diff / is_suspicious 字段已存模型，本期始终 None/False）
 - What-If 规则模拟、规则版本 diff、黄金集回归（设计 §6）
 - 钉钉招聘文档 API 同步任务（设计 §8.2）
 - 评分卡 Web UI 与所有前端页面（设计 §10）
 - HR 复核反馈回流（设计 §7）
-- 真实 MinerU 提交/轮询/产物契约与 AI 输出强校验尚未完成（WP2）
-- Prompt injection 清洗仅覆盖 3 个经典 pattern；WP2 继续扩展并验证 AI 输出边界

@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import httpx
@@ -19,11 +20,34 @@ class _ProbeJudgeOutput(BaseModel):
     dimensions: list[JudgeDimensionResult]
 
 
+async def _get_with_transport_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    attempts: int = 3,
+) -> httpx.Response:
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await client.get(url, headers=headers)
+        except httpx.TransportError:
+            if attempt == attempts:
+                raise
+        else:
+            if response.status_code not in {408, 425, 429} and response.status_code < 500:
+                return response
+            if attempt == attempts:
+                return response
+        await asyncio.sleep(attempt)
+    raise AssertionError("unreachable")
+
+
 @pytest.mark.asyncio
 async def test_deployed_newapi_lists_every_configured_model() -> None:
     settings = get_settings()
     async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.get(
+        response = await _get_with_transport_retries(
+            client,
             f"{settings.NEWAPI_BASE_URL.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {settings.NEWAPI_API_KEY}"},
         )

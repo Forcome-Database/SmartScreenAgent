@@ -34,9 +34,7 @@ async def test_run_parse_and_score_persists_candidate(
 
     parser_stub = SimpleNamespace(
         parse=AsyncMock(
-            return_value=ParseResult(
-                markdown="# resume\n张三 13800001234", source="stub"
-            )
+            return_value=ParseResult(markdown="# resume\n张三 13800001234", source="stub")
         )
     )
     extractor_stub = SimpleNamespace(
@@ -47,6 +45,9 @@ async def test_run_parse_and_score_persists_candidate(
                 email=None,
                 education="本科",
                 age=30,
+                raw_tokens=321,
+                model="extract-model",
+                prompt_version="resume_extract_v1",
                 experiences=[
                     Experience(
                         company="X",
@@ -78,13 +79,17 @@ async def test_run_parse_and_score_persists_candidate(
         jd_code=None,
     )
     c = (
-        await db_session.execute(
-            select(Candidate).where(Candidate.id == result.candidate_id)
-        )
+        await db_session.execute(select(Candidate).where(Candidate.id == result.candidate_id))
     ).scalar_one()
     assert result.status == "parsed"
     assert c.parsed_markdown.startswith("# resume")
     assert c.extracted_json["age"] == 30
+    assert c.extracted_json["_meta"] == {
+        "schema_version": 1,
+        "prompt_version": "resume_extract_v1",
+        "model": "extract-model",
+        "tokens": 321,
+    }
     assert c.name_cipher  # encrypted, non-empty
     assert c.pii_hash and len(c.pii_hash) == 64
     assert c.raw_file_key == object_key
@@ -116,11 +121,7 @@ async def test_celery_task_downloads_verified_object(
     monkeypatch.setattr(
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(
-            parse=AsyncMock(
-                return_value=ParseResult(
-                    markdown="# worker resume", source="stub"
-                )
-            )
+            parse=AsyncMock(return_value=ParseResult(markdown="# worker resume", source="stub"))
         ),
     )
     monkeypatch.setattr(
@@ -146,18 +147,14 @@ async def test_celery_task_downloads_verified_object(
         original_name_cipher=encrypt_pii("worker.pdf"),
     )
 
-    task_result = parse_and_score_task.delay(
-        serialize_raw_file(reference), "upload", None, None
-    )
+    task_result = parse_and_score_task.delay(serialize_raw_file(reference), "upload", None, None)
     try:
         candidate_id = task_result.get(timeout=15)
     finally:
         task_result.forget()
 
     candidate = (
-        await db_session.execute(
-            select(Candidate).where(Candidate.id == candidate_id)
-        )
+        await db_session.execute(select(Candidate).where(Candidate.id == candidate_id))
     ).scalar_one()
     assert candidate.raw_file_key == object_key
     assert candidate.parsed_markdown == "# worker resume"

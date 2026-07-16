@@ -20,6 +20,15 @@ def _write_zip(path: Path, members: dict[str, bytes], *, symlink: str | None = N
             archive.writestr(info, b"target")
 
 
+def _mark_first_member_encrypted(path: Path) -> None:
+    payload = bytearray(path.read_bytes())
+    central_offset = payload.index(b"PK\x01\x02")
+    for flag_offset in (6, central_offset + 8):
+        flags = int.from_bytes(payload[flag_offset : flag_offset + 2], "little") | 0x1
+        payload[flag_offset : flag_offset + 2] = flags.to_bytes(2, "little")
+    path.write_bytes(payload)
+
+
 def test_reads_one_markdown_and_content_list(tmp_path: Path) -> None:
     archive_path = tmp_path / "result.zip"
     content_list = [{"type": "text", "text": "张三"}]
@@ -98,6 +107,20 @@ def test_rejects_symlink_member(tmp_path: Path) -> None:
         )
 
 
+def test_rejects_encrypted_member(tmp_path: Path) -> None:
+    archive_path = tmp_path / "encrypted.zip"
+    _write_zip(archive_path, {"resume.md": b"# ok"})
+    _mark_first_member_encrypted(archive_path)
+
+    with pytest.raises(MinerUResultError, match="encrypted ZIP member"):
+        read_mineru_result_archive(
+            archive_path,
+            max_members=10,
+            max_uncompressed_bytes=1024,
+            max_compression_ratio=100,
+        )
+
+
 def test_rejects_duplicate_or_missing_markdown(tmp_path: Path) -> None:
     two = tmp_path / "two.zip"
     _write_zip(two, {"one.md": b"one", "two.md": b"two"})
@@ -111,6 +134,16 @@ def test_rejects_duplicate_or_missing_markdown(tmp_path: Path) -> None:
     with pytest.raises(MinerUResultError, match="exactly one Markdown"):
         read_mineru_result_archive(
             none, max_members=10, max_uncompressed_bytes=1024, max_compression_ratio=100
+        )
+
+    empty = tmp_path / "empty.zip"
+    _write_zip(empty, {"resume.md": b"  \n"})
+    with pytest.raises(MinerUResultError, match="Markdown is empty"):
+        read_mineru_result_archive(
+            empty,
+            max_members=10,
+            max_uncompressed_bytes=1024,
+            max_compression_ratio=100,
         )
 
 

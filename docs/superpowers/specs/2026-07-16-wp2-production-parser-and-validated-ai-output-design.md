@@ -268,16 +268,20 @@ Only validated dimension objects are summed. The scoring pipeline recomputes the
 New or clarified settings:
 
 - `MINERU_BASE_URL`
-- `MINERU_EXPECTED_PROTOCOL_VERSION=2`
-- `MINERU_BACKEND`
-- `MINERU_EFFORT`
+- `MINERU_MODE=official|stub`
+- `MINERU_API_KEY`
+- `MINERU_EXPECTED_PROTOCOL_VERSION=4`
+- `MINERU_MODEL_VERSION=pipeline|vlm`
 - `MINERU_LANGUAGE=ch`
-- `MINERU_PARSE_METHOD=auto`
+- `MINERU_UPLOAD_HOSTS`
+- `MINERU_RESULT_HOSTS`
 - `MINERU_POLL_INTERVAL_SECONDS`
 - `MINERU_TASK_TIMEOUT_SECONDS`
+- `MINERU_HTTP_TIMEOUT_SECONDS`
 - `MINERU_RESULT_MAX_BYTES`
 - `MINERU_RESULT_MAX_UNCOMPRESSED_BYTES`
 - `MINERU_RESULT_MAX_MEMBERS`
+- `MINERU_RESULT_MAX_COMPRESSION_RATIO`
 - `LLM_STRUCTURED_OUTPUT_MODE=json_schema|json_object`
 - existing extraction/judge primary and fallback model IDs, verified against the deployed gateway.
 
@@ -287,8 +291,8 @@ Production startup or a dedicated readiness command must reject placeholder URLs
 
 ### 12.1 Offline deterministic tests
 
-- Official-source-derived health, submit, poll, failed-task, and result fixtures.
-- Multipart field and URL construction assertions.
+- Official-v4 upload-request, poll, failed-task, and result fixtures.
+- Signed upload, exact-host allowlist, identity, and URL construction assertions.
 - Poll deadline, cancellation, retryable transport, and unknown-state cases.
 - ZIP path traversal, symlink, encryption, size, ratio, duplicate member, missing/duplicate Markdown, and malformed JSON cases.
 - Pydantic extraction rejection for wrong types, booleans-as-integers, extra keys, empty required strings, invalid dates, and excessive lists.
@@ -300,8 +304,7 @@ Production startup or a dedicated readiness command must reject placeholder URLs
 
 Before completion, use the configured services to capture sanitized, versioned fixtures:
 
-- MinerU `/health` and `/openapi.json`;
-- task submission, pending, completed, failed, and result responses;
+- MinerU official-v4 upload request plus pending, completed, failed, and result shapes;
 - bounded result artifacts for synthetic PDF, DOCX, PNG, and JPEG resumes;
 - new-api model list with only relevant model IDs retained;
 - one valid strict structured-output response per configured primary/fallback model;

@@ -5,6 +5,7 @@ import logging
 from dataclasses import replace
 from time import monotonic
 from typing import Any
+from uuid import uuid4
 
 from openai import (
     APIConnectionError,
@@ -51,6 +52,7 @@ class LLMGateway:
         response_schema: dict[str, Any],
         schema_name: str,
         prompt_version: str,
+        attempt: int = 1,
     ) -> LLMResponse:
         response_format = build_response_format(
             schema=response_schema,
@@ -58,6 +60,7 @@ class LLMGateway:
             mode=self.settings.LLM_STRUCTURED_OUTPUT_MODE,
         )
         started = monotonic()
+        trace_id = uuid4().hex
         try:
             request: dict[str, Any] = {
                 "model": model,
@@ -67,29 +70,115 @@ class LLMGateway:
             }
             response = await self._client.chat.completions.create(**request)
         except (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError) as exc:
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "operation": prompt_version,
+                    "attempt": attempt,
+                    "model": model,
+                    "outcome": "unavailable",
+                    "trace_id": trace_id,
+                },
+            )
             raise LLMUnavailableError("LLM provider is unavailable") from exc
         except APIResponseValidationError as exc:
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "operation": prompt_version,
+                    "attempt": attempt,
+                    "model": model,
+                    "outcome": "invalid_response",
+                    "trace_id": trace_id,
+                },
+            )
             raise LLMInvalidResponseError("LLM provider response is invalid") from exc
         except (AuthenticationError, PermissionDeniedError, BadRequestError) as exc:
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "operation": prompt_version,
+                    "attempt": attempt,
+                    "model": model,
+                    "outcome": "configuration_error",
+                    "trace_id": trace_id,
+                },
+            )
             raise LLMConfigurationError("LLM request configuration was rejected") from exc
         except APIStatusError as exc:
             if exc.status_code >= 500:
+                logger.warning(
+                    "llm_request_failed",
+                    extra={
+                        "operation": prompt_version,
+                        "attempt": attempt,
+                        "model": model,
+                        "outcome": "unavailable",
+                        "trace_id": trace_id,
+                    },
+                )
                 raise LLMUnavailableError("LLM provider is unavailable") from exc
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "operation": prompt_version,
+                    "attempt": attempt,
+                    "model": model,
+                    "outcome": "configuration_error",
+                    "trace_id": trace_id,
+                },
+            )
             raise LLMConfigurationError("LLM request was rejected") from exc
 
         if not response.choices:
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "operation": prompt_version,
+                    "attempt": attempt,
+                    "model": response.model or model,
+                    "outcome": "invalid_response",
+                    "trace_id": trace_id,
+                },
+            )
             raise LLMInvalidResponseError("LLM response has no choices")
         content = response.choices[0].message.content
         if not isinstance(content, str) or not content.strip():
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "operation": prompt_version,
+                    "attempt": attempt,
+                    "model": response.model or model,
+                    "outcome": "invalid_response",
+                    "trace_id": trace_id,
+                },
+            )
             raise LLMInvalidResponseError("LLM response content is empty")
         usage = response.usage
+        latency_ms = max(0, round((monotonic() - started) * 1000))
+        input_tokens = usage.prompt_tokens if usage else 0
+        output_tokens = usage.completion_tokens if usage else 0
+        logger.info(
+            "llm_request_complete",
+            extra={
+                "operation": prompt_version,
+                "attempt": attempt,
+                "model": response.model or model,
+                "outcome": "success",
+                "latency_ms": latency_ms,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "trace_id": trace_id,
+            },
+        )
         return LLMResponse(
             content=content,
             model=response.model or model,
-            input_tokens=usage.prompt_tokens if usage else 0,
-            output_tokens=usage.completion_tokens if usage else 0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             prompt_version=prompt_version,
-            latency_ms=max(0, round((monotonic() - started) * 1000)),
+            latency_ms=latency_ms,
         )
 
     async def _call_with_fallback(
@@ -123,6 +212,7 @@ class LLMGateway:
                 response_schema=response_schema,
                 schema_name=schema_name,
                 prompt_version=prompt_version,
+                attempt=2,
             )
             return replace(response, used_fallback=True)
 
@@ -156,6 +246,7 @@ class LLMGateway:
                 response_schema=schema,
                 schema_name=EXTRACT_PROMPT_VERSION,
                 prompt_version=EXTRACT_PROMPT_VERSION,
+                attempt=2,
             )
             return replace(response, used_fallback=True)
         return await self._call_with_fallback(
@@ -194,6 +285,7 @@ class LLMGateway:
                 response_schema=schema,
                 schema_name=JUDGE_PROMPT_VERSION,
                 prompt_version=JUDGE_PROMPT_VERSION,
+                attempt=2,
             )
             return replace(response, used_fallback=True)
         return await self._call_with_fallback(
