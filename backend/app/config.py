@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
     LLM_MODEL_JUDGE: str
     LLM_MODEL_JUDGE_FALLBACK: str
     LLM_MODEL_LIGHT: str
-    LLM_STRUCTURED_OUTPUT_MODE: str = "json_schema"
+    LLM_STRUCTURED_OUTPUT_MODE: Literal["json_schema", "json_object"] = "json_schema"
 
     # DingTalk
     DINGTALK_APP_KEY: str = ""
@@ -46,7 +47,7 @@ class Settings(BaseSettings):
     MONTHLY_LLM_BUDGET_CNY: float = 1500.0
 
     # Resume parser (MinerU)
-    MINERU_MODE: str = "http"  # http | stub
+    MINERU_MODE: Literal["http", "stub"] = "http"
     MINERU_BASE_URL: str = ""
     MINERU_API_KEY: str = ""
     MINERU_EXPECTED_PROTOCOL_VERSION: int = 2
