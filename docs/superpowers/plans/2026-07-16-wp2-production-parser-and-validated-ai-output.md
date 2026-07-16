@@ -158,7 +158,7 @@
 
 - [x] Add upload tests for parser unavailable 503, parser contract invalid 502, parser failure 502, AI unavailable 503, and AI invalid output 502.
 - [x] Add re-score tests for the same AI errors with stable bodies and rollback.
-- [ ] Prove provider bodies, URLs containing credentials, paths, prompt text, completion text, and PII never appear in responses or structured logs.
+- [x] Prove provider bodies, URLs containing credentials, paths, prompt text, completion text, and PII never appear in responses or structured logs.
 - [x] Prove upload-with-JD failures leave no candidate, score, audit, object, or temporary file.
 - [x] Prove re-score failures preserve the candidate and prior scores while creating no partial new score/audit.
 - [x] Map only typed boundary exceptions; remove broad route exception translation.

@@ -166,7 +166,9 @@ async def test_upload_parser_failure_returns_502(
             },
         ),
         (
-            MinerUContractError("provider body contains candidate PII"),
+            MinerUContractError(
+                "provider body contains candidate PII 13800000000 at C:/private/resume.pdf"
+            ),
             502,
             {
                 "code": "resume_parser_contract_invalid",
@@ -182,6 +184,7 @@ async def test_upload_maps_parser_boundary_errors_and_rolls_back(
     minio_storage,
     valid_pdf_bytes,
     monkeypatch,
+    caplog,
     error,
     status_code,
     detail,
@@ -199,9 +202,15 @@ async def test_upload_maps_parser_boundary_errors_and_rolls_back(
 
     assert response.status_code == status_code
     assert response.json()["detail"] == detail
-    assert "secret" not in response.text
-    assert "candidate PII" not in response.text
-    assert "private-resume.pdf" not in response.text
+    public_output = f"{response.text}\n{caplog.text}"
+    for sentinel in (
+        "secret@mineru.internal",
+        "candidate PII",
+        "13800000000",
+        "C:/private/resume.pdf",
+        "private-resume.pdf",
+    ):
+        assert sentinel not in public_output
     assert (await db_session.execute(select(Candidate))).scalars().all() == []
     assert minio_storage.list_object_keys(prefix="resumes/") == []
 
@@ -230,6 +239,7 @@ async def test_upload_maps_ai_boundary_errors_and_rolls_back(
     minio_storage,
     valid_pdf_bytes,
     monkeypatch,
+    caplog,
     error,
     status_code,
     detail,
@@ -253,9 +263,9 @@ async def test_upload_maps_ai_boundary_errors_and_rolls_back(
 
     assert response.status_code == status_code
     assert response.json()["detail"] == detail
-    assert "prompt body" not in response.text
-    assert "fabricated evidence" not in response.text
-    assert "private-resume.pdf" not in response.text
+    public_output = f"{response.text}\n{caplog.text}"
+    for sentinel in ("prompt body", "fabricated evidence", "private-resume.pdf"):
+        assert sentinel not in public_output
     assert (await db_session.execute(select(Candidate))).scalars().all() == []
     assert minio_storage.list_object_keys(prefix="resumes/") == []
 
@@ -363,6 +373,7 @@ async def test_rescore_ai_failure_preserves_existing_score_and_rolls_back_partia
     db_session,
     auth_headers,
     monkeypatch,
+    caplog,
     error,
     status_code,
     detail,
@@ -443,8 +454,9 @@ async def test_rescore_ai_failure_preserves_existing_score_and_rolls_back_partia
 
     assert response.status_code == status_code
     assert response.json()["detail"] == detail
-    assert "secret-token" not in response.text
-    assert "private resume text" not in response.text
+    public_output = f"{response.text}\n{caplog.text}"
+    assert "secret-token" not in public_output
+    assert "private resume text" not in public_output
     candidate_ids = (await db_session.execute(select(Candidate.id))).scalars().all()
     assert candidate_ids == [candidate.id]
     scores = (await db_session.execute(select(Score))).scalars().all()
