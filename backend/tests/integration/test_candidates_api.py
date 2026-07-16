@@ -445,6 +445,8 @@ async def test_rescore_ai_failure_preserves_existing_score_and_rolls_back_partia
     assert response.json()["detail"] == detail
     assert "secret-token" not in response.text
     assert "private resume text" not in response.text
+    candidate_ids = (await db_session.execute(select(Candidate.id))).scalars().all()
+    assert candidate_ids == [candidate.id]
     scores = (await db_session.execute(select(Score))).scalars().all()
     assert [score.id for score in scores] == [existing_score_id]
     assert (await db_session.execute(select(AuditLog))).scalars().all() == []

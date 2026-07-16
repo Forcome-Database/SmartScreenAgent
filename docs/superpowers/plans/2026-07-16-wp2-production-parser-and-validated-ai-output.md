@@ -156,14 +156,19 @@
 
 **Files:** candidate router, ingest/pipeline services, API/integration tests.
 
-- [ ] Add upload tests for parser unavailable 503, parser contract invalid 502, parser failure 502, AI unavailable 503, and AI invalid output 502.
-- [ ] Add re-score tests for the same AI errors with stable bodies and rollback.
+- [x] Add upload tests for parser unavailable 503, parser contract invalid 502, parser failure 502, AI unavailable 503, and AI invalid output 502.
+- [x] Add re-score tests for the same AI errors with stable bodies and rollback.
 - [ ] Prove provider bodies, URLs containing credentials, paths, prompt text, completion text, and PII never appear in responses or structured logs.
-- [ ] Prove upload-with-JD failures leave no candidate, score, audit, object, or temporary file.
-- [ ] Prove re-score failures preserve the candidate and prior scores while creating no partial new score/audit.
-- [ ] Map only typed boundary exceptions; remove broad route exception translation.
-- [ ] Run strict candidate API, pipeline, task-ingest, and P2 E2E integration tests.
-- [ ] Commit application error and transaction behavior.
+- [x] Prove upload-with-JD failures leave no candidate, score, audit, object, or temporary file.
+- [x] Prove re-score failures preserve the candidate and prior scores while creating no partial new score/audit.
+- [x] Map only typed boundary exceptions; remove broad route exception translation.
+- [x] Run strict candidate API, pipeline, task-ingest, and P2 E2E integration tests.
+- [x] Commit application error and transaction behavior.
+
+Local strict verification on 2026-07-16 passed 179 offline tests and 42 integration
+tests with zero skips, followed by Ruff, mypy, migration, PostgreSQL, Redis,
+MinIO, Celery, and temporary-file clean-state checks. The external-contract gate
+remains blocked on real MinerU and new-api configuration; WP2 is still In progress.
 
 ## Task 9: Add external runtime contract gates
 
