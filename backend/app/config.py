@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     UPLOAD_CHUNK_BYTES: int = 1024 * 1024
     MALWARE_SCAN_MODE: str = "disabled"
 
+    # Ingestion jobs (WP3)
+    INGESTION_MAX_ATTEMPTS: int = 3
+    INGESTION_LEASE_SECONDS: int = 900
+    INGESTION_SWEEP_INTERVAL_SECONDS: int = 60
+    INGESTION_BATCH_MAX_FILES: int = 50
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 
