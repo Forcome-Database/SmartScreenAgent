@@ -25,6 +25,7 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "openpyxl>=3.1,<4",
     "python-dateutil>=2.9,<3",
+    "pypdf>=5,<7",
     "typer>=0.12,<1",
 ]
 
@@ -54,6 +55,7 @@ addopts = "-v --tb=short"
 pythonpath = ["."]
 markers = [
     "integration: requires external services (PG/Redis/MinIO/network)",
+    "external_contract: requires explicitly configured MinerU and new-api endpoints",
 ]
 
 [tool.ruff]

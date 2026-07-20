@@ -1,0 +1,17 @@
+{
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "resume_extract_v1",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": ["string", "null"]}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

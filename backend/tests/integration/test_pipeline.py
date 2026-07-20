@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
+from backend.app.scoring.llm_judge import JudgeDimensionResult, JudgeResult
 from backend.app.scoring.pipeline import ScoringPipeline
 from backend.app.services.parser.pii import compute_pii_hash, encrypt_pii
 
@@ -57,26 +58,44 @@ async def test_pipeline_happy_path(db_session):
     await db_session.commit()
 
     fake_judge = AsyncMock()
-    fake_judge.score.return_value = {
-        "dimensions": [
-            {
-                "id": "independence",
-                "tier": "high",
-                "score": 10,
-                "evidence_quotes": [],
-                "reasoning": "ok",
-                "confidence": 0.9,
-            }
+    fake_judge.score.return_value = JudgeResult(
+        dimensions=[
+            JudgeDimensionResult(
+                id="independence",
+                tier="high",
+                score=10,
+                evidence_quotes=[],
+                reasoning="ok",
+                confidence=0.9,
+                suggested_interview_questions=[],
+            )
         ],
-        "model": "gpt-5.5",
-        "tokens": 100,
-    }
+        model="gpt-5.5",
+        tokens=100,
+        prompt_version="resume_judge_v1",
+    )
     pipeline = ScoringPipeline(db=db_session, judge=fake_judge)
     result = await pipeline.run(candidate_id=cand.id, jd_id=jd.id)
 
     assert result.total_score > 0
     assert result.score_id is not None
     assert not result.rejected
+
+    from backend.app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as other_session:
+        not_committed = (
+            await other_session.execute(select(Score).where(Score.id == result.score_id))
+        ).scalar_one_or_none()
+        assert not_committed is None
+
+    await db_session.commit()
+
+    async with AsyncSessionLocal() as other_session:
+        committed = (
+            await other_session.execute(select(Score).where(Score.id == result.score_id))
+        ).scalar_one()
+        assert committed.id == result.score_id
 
     stored = (
         await db_session.execute(select(Score).where(Score.id == result.score_id))

@@ -1,77 +1,84 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
-from typing import Any
+import re
 
-from backend.app.services.llm.gateway import LLMGateway
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-EXTRACT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "name": {"type": ["string", "null"]},
-        "phone": {"type": ["string", "null"]},
-        "email": {"type": ["string", "null"]},
-        "education": {"type": ["string", "null"]},
-        "age": {"type": ["integer", "null"]},
-        "experiences": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "company": {"type": "string"},
-                    "title": {"type": "string"},
-                    "start": {"type": ["string", "null"]},
-                    "end": {"type": ["string", "null"]},
-                    "description": {"type": "string"},
-                },
-                "required": ["company", "title", "description"],
-            },
-        },
-    },
-    "required": ["name", "experiences"],
-}
+from backend.app.services.llm.errors import LLMInvalidOutputError
+from backend.app.services.llm.gateway import EXTRACT_PROMPT_VERSION, LLMGateway
+from backend.app.services.llm.schemas import LLMResponse
+from backend.app.services.llm.structured_output import decode_json_object
+
+_DATE_PATTERN = re.compile(r"^\d{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?)?$")
 
 
-@dataclass
-class Experience:
-    company: str
-    title: str
-    description: str
-    start: str | None = None
-    end: str | None = None
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 
 
-@dataclass
-class ExtractedResume:
-    name: str | None
-    phone: str | None
-    email: str | None
-    education: str | None
-    age: int | None
-    experiences: list[Experience] = field(default_factory=list)
-    raw_tokens: int = 0
-    model: str = ""
+class Experience(_StrictModel):
+    company: str = Field(min_length=1, max_length=300)
+    title: str = Field(min_length=1, max_length=300)
+    description: str = Field(min_length=1, max_length=5000)
+    start: str | None = Field(max_length=10)
+    end: str | None = Field(max_length=10)
 
+    @field_validator("start", "end")
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> ExtractedResume:
-        return cls(
-            name=d.get("name"),
-            phone=d.get("phone"),
-            email=d.get("email"),
-            education=d.get("education"),
-            age=d.get("age"),
-            experiences=[
-                Experience(
-                    company=e["company"],
-                    title=e["title"],
-                    description=e["description"],
-                    start=e.get("start"),
-                    end=e.get("end"),
-                )
-                for e in d.get("experiences", [])
-            ],
-        )
+    def _canonical_date(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not _DATE_PATTERN.fullmatch(value):
+            raise ValueError("experience date must be canonical")
+        return value
+
+
+class ExtractedResumePayload(_StrictModel):
+    name: str | None = Field(max_length=200)
+    phone: str | None = Field(max_length=100)
+    email: str | None = Field(max_length=320)
+    education: str | None = Field(max_length=300)
+    age: StrictInt | None = Field(ge=0, le=120)
+    experiences: list[Experience] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def _reject_duplicate_experiences(self) -> ExtractedResumePayload:
+        identities = {
+            (
+                item.company.casefold(),
+                item.title.casefold(),
+                item.start,
+                item.end,
+                item.description.casefold(),
+            )
+            for item in self.experiences
+        }
+        if len(identities) != len(self.experiences):
+            raise ValueError("duplicate experience entries are not allowed")
+        return self
+
+    @field_validator("name", "phone", "email", "education")
+    @classmethod
+    def _empty_to_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class ExtractedResume(ExtractedResumePayload):
+    raw_tokens: int = Field(default=0, ge=0)
+    model: str = ""
+    prompt_version: str = EXTRACT_PROMPT_VERSION
+    schema_version: int = 1
 
 
 class ResumeExtractor:
@@ -79,15 +86,34 @@ class ResumeExtractor:
         self._gateway = gateway or LLMGateway()
 
     async def extract(self, markdown: str) -> ExtractedResume:
-        last_err: Exception | None = None
-        for _ in range(2):
-            resp = await self._gateway.extract(markdown, schema=EXTRACT_SCHEMA)
+        response = await self._gateway.extract(
+            markdown, schema=ExtractedResumePayload.model_json_schema()
+        )
+        try:
+            return self._validate(response)
+        except LLMInvalidOutputError as primary_error:
+            if response.used_fallback:
+                raise
+            fallback = await self._gateway.extract(
+                markdown,
+                schema=ExtractedResumePayload.model_json_schema(),
+                fallback_only=True,
+            )
             try:
-                data = json.loads(resp.content)
-                result = ExtractedResume.from_dict(data)
-                result.raw_tokens = resp.input_tokens + resp.output_tokens
-                result.model = resp.model
-                return result
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                last_err = e
-        raise ValueError(f"Resume extraction failed: {last_err}")
+                return self._validate(fallback)
+            except LLMInvalidOutputError as fallback_error:
+                raise fallback_error from primary_error
+
+    @staticmethod
+    def _validate(response: LLMResponse) -> ExtractedResume:
+        payload = decode_json_object(response.content)
+        try:
+            extracted = ExtractedResumePayload.model_validate(payload)
+        except ValidationError as exc:
+            raise LLMInvalidOutputError("resume extraction output is invalid") from exc
+        return ExtractedResume(
+            **extracted.model_dump(),
+            raw_tokens=response.input_tokens + response.output_tokens,
+            model=response.model,
+            prompt_version=response.prompt_version or EXTRACT_PROMPT_VERSION,
+        )

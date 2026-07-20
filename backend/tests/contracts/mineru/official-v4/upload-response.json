@@ -1,0 +1,11 @@
+{
+  "code": 0,
+  "data": {
+    "batch_id": "2bb2f0ec-a336-4a0a-b61a-241afaf9cc87",
+    "file_urls": [
+      "https://mineru.oss-cn-shanghai.aliyuncs.com/api-upload/sanitized"
+    ]
+  },
+  "msg": "ok",
+  "trace_id": "sanitized-trace-id"
+}

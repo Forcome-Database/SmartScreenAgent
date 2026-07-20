@@ -74,6 +74,7 @@ _CLEAN_TABLES = [
     "rule_versions",
     "jds",
     "golden_set",
+    "users",
 ]
 
 
@@ -110,6 +111,70 @@ async def client():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
+
+
+@pytest_asyncio.fixture
+async def auth_headers(db_session):
+    """Create a real database user and JWT for route-level authorization tests."""
+    from uuid import uuid4
+
+    from backend.app.models import User
+    from backend.app.security.jwt import create_access_token
+
+    async def _make(role: str = "hr", *, token_role: str | None = None) -> dict[str, str]:
+        user = User(
+            dingtalk_userid=f"test-{uuid4().hex}",
+            display_name=f"Test {role}",
+            role=role,
+        )
+        db_session.add(user)
+        await db_session.commit()
+        token = create_access_token(
+            {"sub": str(user.id), "role": token_role if token_role is not None else role}
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    return _make
+
+
+@pytest.fixture
+def minio_storage():
+    """Real isolated MinIO client with post-test resume-object cleanup."""
+    import socket
+
+    from backend.app.config import get_settings
+    from backend.app.services.storage.minio_client import MinIOStorage
+
+    settings = get_settings()
+    host, port_text = settings.MINIO_ENDPOINT.rsplit(":", 1)
+    try:
+        with socket.create_connection((host, int(port_text)), timeout=1.5):
+            pass
+        reachable = True
+    except OSError:
+        reachable = False
+    require_service("MinIO", reachable=reachable)
+
+    storage = MinIOStorage()
+    storage.ensure_bucket()
+    try:
+        yield storage
+    finally:
+        for key in storage.list_object_keys(prefix="resumes/"):
+            storage.delete_object(key)
+
+
+@pytest.fixture
+def valid_pdf_bytes() -> bytes:
+    import io
+
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    stream = io.BytesIO()
+    writer.write(stream)
+    return stream.getvalue()
 
 
 @pytest.fixture(scope="session")

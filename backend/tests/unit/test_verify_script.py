@@ -34,7 +34,7 @@ class RecordingRunner:
         self.calls.append((command, env.copy(), capture_output))
         if self.fail_when(command):
             raise subprocess.CalledProcessError(1, command)
-        stdout = "3884ec28fea9 (head)\n" if command[-2:] == ["alembic", "current"] else ""
+        stdout = "b57c2f9e1a6d (head)\n" if command[-2:] == ["alembic", "current"] else ""
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
 
@@ -104,7 +104,14 @@ def test_success_runs_all_gates_then_down() -> None:
         [*verify.COMPOSE, "down", "-v", "--remove-orphans"],
         [*verify.COMPOSE, "up", "-d", "--wait"],
         [sys.executable, "-m", "alembic", "upgrade", "head"],
-        [sys.executable, "-m", "pytest", "-m", "not integration", "-q"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-m",
+            "not integration and not external_contract",
+            "-q",
+        ],
         [sys.executable, "-m", "pytest", "-m", "integration", "-q", "-rs"],
         [sys.executable, "-m", "alembic", "current"],
         [sys.executable, "-m", "ruff", "check", "backend"],
@@ -118,7 +125,7 @@ def test_success_runs_all_gates_then_down() -> None:
         ],
         [*verify.COMPOSE, "down", "-v", "--remove-orphans"],
     ]
-    assert clean_state_calls[0][0] == "3884ec28fea9 (head)\n"
+    assert clean_state_calls[0][0] == "b57c2f9e1a6d (head)\n"
 
 
 def test_clean_state_assertions_run_after_static_checks() -> None:

@@ -1,0 +1,10 @@
+{
+  "status": "healthy",
+  "version": "3.4.4",
+  "protocol_version": 2,
+  "queued_tasks": 0,
+  "processing_tasks": 1,
+  "completed_tasks": 2,
+  "failed_tasks": 0,
+  "max_concurrent_requests": 4
+}

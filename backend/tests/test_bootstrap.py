@@ -4,7 +4,7 @@ TEST_ENV_DEFAULTS = {
     "DATABASE_URL": "postgresql+asyncpg://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
     "DATABASE_URL_SYNC": "postgresql://smartscreen:smartscreen@127.0.0.1:55433/smartscreen_test",
     "REDIS_URL": "redis://127.0.0.1:56379/15",
-    "MINIO_ENDPOINT": "127.0.0.1:59000",
+    "MINIO_ENDPOINT": "127.0.0.1:61000",
     "MINIO_ACCESS_KEY": "smartscreen-test",
     "MINIO_SECRET_KEY": "smartscreen-test-secret",
     "MINIO_BUCKET": "resumes-test",
@@ -16,6 +16,7 @@ TEST_ENV_DEFAULTS = {
     "LLM_MODEL_JUDGE": "test-judge",
     "LLM_MODEL_JUDGE_FALLBACK": "test-judge-fallback",
     "LLM_MODEL_LIGHT": "test-light",
+    "LLM_STRUCTURED_OUTPUT_MODE": "json_schema",
     "DINGTALK_APP_KEY": "",
     "DINGTALK_APP_SECRET": "",
     "DINGTALK_CORP_ID": "",
@@ -28,6 +29,21 @@ TEST_ENV_DEFAULTS = {
     "MINERU_MODE": "stub",
     "MINERU_BASE_URL": "",
     "MINERU_API_KEY": "",
+    "MINERU_EXPECTED_PROTOCOL_VERSION": "4",
+    "MINERU_MODEL_VERSION": "vlm",
+    "MINERU_LANGUAGE": "ch",
+    "MINERU_UPLOAD_HOSTS": "mineru.oss-cn-shanghai.aliyuncs.com",
+    "MINERU_RESULT_HOSTS": "cdn-mineru.openxlab.org.cn",
+    "MINERU_POLL_INTERVAL_SECONDS": "0.01",
+    "MINERU_TASK_TIMEOUT_SECONDS": "1",
+    "MINERU_HTTP_TIMEOUT_SECONDS": "1",
+    "MINERU_RESULT_MAX_BYTES": "67108864",
+    "MINERU_RESULT_MAX_UNCOMPRESSED_BYTES": "268435456",
+    "MINERU_RESULT_MAX_MEMBERS": "512",
+    "MINERU_RESULT_MAX_COMPRESSION_RATIO": "100",
+    "MAX_RESUME_FILE_BYTES": "20971520",
+    "UPLOAD_CHUNK_BYTES": "1048576",
+    "MALWARE_SCAN_MODE": "disabled",
     "CORS_ORIGINS": "http://localhost:3000",
 }
 
@@ -46,8 +62,9 @@ TEST_INFRA_OVERRIDE_KEYS = frozenset(
 
 
 def apply_test_environment(environ: MutableMapping[str, str]) -> None:
+    external_contract = environ.get("SMARTSCREEN_EXTERNAL_CONTRACT") == "1"
     for key, value in TEST_ENV_DEFAULTS.items():
-        if key in TEST_INFRA_OVERRIDE_KEYS:
+        if external_contract or key in TEST_INFRA_OVERRIDE_KEYS:
             environ.setdefault(key, value)
         else:
             environ[key] = value

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.database import get_db
 from backend.app.models import User
 from backend.app.security.jwt import create_access_token
-from backend.app.services.dingtalk.oauth import DingTalkOAuthClient
+from backend.app.services.dingtalk.oauth import DingTalkOAuthClient, DingTalkOAuthError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -28,8 +28,8 @@ async def dingtalk_login(req: LoginRequest, db: AsyncSession = Depends(get_db)) 
     client = DingTalkOAuthClient()
     try:
         info = await client.exchange_auth_code(req.auth_code)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"DingTalk OAuth failed: {e}") from e
+    except DingTalkOAuthError as exc:
+        raise HTTPException(status_code=400, detail="DingTalk OAuth failed") from exc
 
     # union_id 是跨钉钉应用稳定的；用它做我们 users.dingtalk_userid 主标识
     # Try to insert; if another concurrent login already created the row, ignore and re-select.

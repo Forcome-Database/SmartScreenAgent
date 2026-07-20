@@ -1,6 +1,6 @@
 # P2 API JWT/RBAC 设计
 
-> **状态：已批准、尚未实现。** 本设计归入当前路线图 WP1；实施前置条件是 WP0 集成基线完成。权威依赖顺序见 [`2026-07-13-current-state-and-roadmap-design.md`](2026-07-13-current-state-and-roadmap-design.md)。
+> **状态：已并入 WP1 并完成本地实现验证。** 最终实现契约由 [`2026-07-16-wp1-security-and-raw-file-integrity-design.md`](2026-07-16-wp1-security-and-raw-file-integrity-design.md) 接管；WP1 托管 CI 验收尚待提交后执行。
 
 ## 背景
 

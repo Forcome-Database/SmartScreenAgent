@@ -6,9 +6,9 @@ AI-driven resume screening agent for HR.
 
 当前处于“后端评分原型已完成、生产化加固进行中”阶段。
 
-**WP0 可重复集成基线已完成**；本地严格验证与托管 GitHub Actions 均已通过。下一步进入 WP1 规划，处理鉴权、上传校验和原文件持久化。
+**WP0 可重复集成基线、WP1 安全与原文件完整性、WP2 生产解析器契约与校验 AI 输出均已完成并通过托管 CI**：候选人写接口已强制 JWT/RBAC，上传经流式大小/类型/文件签名校验并持久化到私有 MinIO；MinerU 已切换到官方 API v4，简历抽取与 LLM judge 输出经严格 Pydantic 与证据溯源校验后才能落库。WP2 托管验收见 [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)。
 
-当前候选人写接口尚未强制 JWT/RBAC，上传原文件也未接入 MinIO 持久化，不能直接公网部署。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+项目仍不能直接公网部署：**WP3 尚需把同步处理切换为可恢复的异步任务**（当前上传接口仍同步调用两个外部 AI 服务），读 API（WP4）与前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 
@@ -60,17 +60,19 @@ uv run python scripts/verify.py
 
 托管工作流 [`.github/workflows/verify.yml`](.github/workflows/verify.yml) 在 Python 3.10 和 3.14 上运行验证矩阵；WP0 验收运行见 [GitHub Actions run 29237545679](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29237545679)。
 
-`MINERU_MODE=stub` 用于本地离线开发；`MINERU_MODE=http` 用于对接独立 `mineru-api` 服务。`library` 模式仍未实现。
+`MINERU_MODE=stub` 仅用于离线开发和测试；生产使用 `MINERU_MODE=official`，通过官方 MinerU API v4 申请签名上传地址、轮询批次并下载结果 ZIP。
 
-P2 的候选人上传和评分 API 尚未强制 JWT/RBAC，不能直接公网部署。
+候选人上传和评分 API 已要求 Bearer JWT，允许角色为 `hr`、`hr_lead`、`admin`。MinerU 官方 API v4 四格式与 new-api 严格结构化输出已通过本地真实端点契约门禁；公网部署前仍需完成托管 CI、生产密钥托管和运行环境验收。
 
 ## 设计文档
 
 - 当前状态与交付路线图（权威）：`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`
+- WP1 安全与原文件完整性规格：`docs/superpowers/specs/2026-07-16-wp1-security-and-raw-file-integrity-design.md`
+- WP1 实施与验证记录：`docs/superpowers/plans/2026-07-16-wp1-security-and-raw-file-integrity.md`
 - 后续工作包计划索引：`docs/superpowers/plans/README.md`
 - 原始产品设计（历史愿景）：`docs/specs/2026-05-12-resume-screening-agent-design.md`
 - P1/P2 历史实施计划：`docs/specs/plans/`
-- 已批准、尚未实现的 JWT/RBAC 设计：`docs/superpowers/specs/2026-07-08-jwt-rbac-p2-api-design.md`
+- 已并入 WP1 的 JWT/RBAC 历史设计：`docs/superpowers/specs/2026-07-08-jwt-rbac-p2-api-design.md`
 - 调研笔记：`docs/specs/research/`
   - `newapi.md` — LLM 网关接入
   - `dingtalk-oauth.md` — 钉钉 OAuth 流程（基于 OAS 实读）
@@ -95,7 +97,8 @@ backend/
 │   ├── services/
 │   │   ├── llm/             # LLMGateway (newapi + fallback)
 │   │   ├── dingtalk/        # OAuth client
-│   │   └── storage/         # MinIO client
+│   │   ├── storage/         # MinIO client + verified resume objects
+│   │   └── upload/          # streamed validation + malware seam
 │   ├── security/            # JWT + PII (Fernet) crypto
 │   └── tasks/               # Celery app
 └── tests/
@@ -129,31 +132,81 @@ uv run python -m backend.app.cli.import_rules import-rules 招聘JD整理-智能
 ### 上传简历 + 评分（同步）
 
 ```bash
-# 上传简历（PDF/Word/图片），返回 candidate_id
-curl -F "file=@resume.pdf" http://localhost:8000/api/v1/candidates/upload
+# 用钉钉授权码换取 JWT（示例需要 jq）
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/dingtalk/login \
+  -H "Content-Type: application/json" \
+  -d '{"auth_code":"<dingtalk-auth-code>"}' | jq -r .token)
+
+# 上传简历，返回 candidate_id 和 parsed/duplicate 状态
+curl -F "file=@resume.pdf" \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/api/v1/candidates/upload
 
 # 对指定岗位评分
-curl -X POST http://localhost:8000/api/v1/candidates/<id>/score \
+curl -X POST http://127.0.0.1:8000/api/v1/candidates/<id>/score \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"jd_code": "FOREIGN_TRADE"}'
 ```
 
-### MinerU 解析器三种模式
+上传边界：
+
+- 支持 PDF、DOCX、PNG、JPEG；旧版 DOC 暂不支持。
+- 默认最大 20 MiB，可用 `MAX_RESUME_FILE_BYTES` 调整。
+- 原文件使用不含 PII 的不可变键写入私有 MinIO，并校验大小和 SHA-256。
+- 重复身份返回 `status: duplicate`，本次重复对象会被清理。
+- 稳定错误码包括 `invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`candidate_file_conflict`、`object_storage_unavailable`、`resume_parser_unavailable`、`resume_parser_contract_invalid`、`resume_parser_failed`、`ai_service_unavailable`、`ai_service_configuration_invalid` 和 `ai_invalid_output`。
+
+升级已有数据库后，部署前必须检查旧候选人的原文件元数据；非零结果需要先回填或隔离，不能宣称历史文件已完成持久化：
+
+```sql
+SELECT count(*) AS legacy_raw_file_rows
+FROM candidates
+WHERE raw_file_key IS NULL
+   OR raw_file_sha256 IS NULL
+   OR raw_file_size_bytes IS NULL
+   OR raw_file_content_type IS NULL
+   OR raw_file_original_name_cipher IS NULL;
+```
+
+### MinerU 解析器模式
 
 `MINERU_MODE` 环境变量：
 
 - `stub` — 本地开发/测试，返回固定 markdown
-- `http` — 调远端 mineru-api 服务（推荐生产）；需要 `MINERU_BASE_URL`、`MINERU_API_KEY`
-- `library` — 直接 import mineru 库（暂未实现，留 P3）
+- `official` — 调用官方 MinerU API v4；需要 `MINERU_BASE_URL=https://mineru.net`、`MINERU_API_KEY`，默认模型为 `vlm`
 
 详见 `docs/specs/research/mineru.md`。
 
-### P2 未覆盖范围（→ P3）
+### new-api 结构化输出
+
+生产环境配置 `NEWAPI_BASE_URL`、`NEWAPI_API_KEY`、抽取/评分主模型和回退模型，
+并使用 `LLM_STRUCTURED_OUTPUT_MODE=json_schema`。`json_object` 仅用于兼容不支持
+严格 JSON Schema 的网关；两种模式都会经过相同的本地 Pydantic 和证据校验。
+
+密钥只放在未跟踪的 `.env.local` 或生产密钥服务中，不得写入仓库、日志或运行证据。
+
+### 外部契约验证与回滚
+
+默认测试完全离线。使用合成、无个人信息的 PDF、DOCX、PNG 和 JPEG 调用真实
+MinerU/new-api 时，显式运行：
+
+```powershell
+uv run python scripts/verify_external_contracts.py
+```
+
+该命令缺少凭据、使用 `MINERU_MODE=stub`、发生测试跳过或端点不符合契约时都会
+失败。提交的运行证据只记录端点环境、API/模型版本和测试计数，不保留批次 ID、
+签名 URL、请求/响应正文、Prompt、Completion 或候选人信息。
+
+解析或 AI 校验失败会回滚候选人/评分事务并清理对象和临时文件。生产回滚使用上一
+应用镜像；不会自动回退到未经验证的旧 `/file_parse`，`MINERU_MODE=stub` 也不能
+作为生产回滚模式。
+
+### 后续工作范围
 
 - 段 D 双引擎交叉打分（cross_engine_diff / is_suspicious 字段已存模型，本期始终 None/False）
 - What-If 规则模拟、规则版本 diff、黄金集回归（设计 §6）
 - 钉钉招聘文档 API 同步任务（设计 §8.2）
 - 评分卡 Web UI 与所有前端页面（设计 §10）
 - HR 复核反馈回流（设计 §7）
-- **API 暂未挂 JWT/RBAC**（设计 §11.3）—— 切勿直接公网部署，P3 接入 DingTalk OAuth 后启用
-- Prompt injection 清洗仅覆盖 3 个经典 pattern；P3 单独做 `docs/specs/research/prompt-injection.md` 调研扩展

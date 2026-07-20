@@ -30,6 +30,7 @@ uploads/
 *.log
 backend/instance/
 docs/specs/research/*.draft.md
+.firecrawl/
 
 # HR business data (do not commit)
 *.xlsx
