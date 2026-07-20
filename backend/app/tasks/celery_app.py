@@ -8,7 +8,7 @@ celery_app = Celery(
     "smartscreen",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["backend.app.tasks.ingest"],
+    include=["backend.app.tasks.ingest", "backend.app.tasks.sweep"],
 )
 
 celery_app.conf.update(
@@ -21,6 +21,13 @@ celery_app.conf.update(
     task_time_limit=600,
     worker_max_tasks_per_child=100,
 )
+
+celery_app.conf.beat_schedule = {
+    "ingestion-sweep": {
+        "task": "ingest.sweep",
+        "schedule": float(settings.INGESTION_SWEEP_INTERVAL_SECONDS),
+    }
+}
 
 
 @celery_app.task(name="smartscreen.ping")

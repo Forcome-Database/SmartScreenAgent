@@ -115,6 +115,48 @@ async def client():
 
 
 @pytest_asyncio.fixture
+async def stored_job_factory(db_session):
+    """Insert an `IngestionJob` row with dummy-but-valid raw_file_* columns.
+
+    Each call gets a fresh, unique sha256 (64 hex chars) so repeated
+    invocations within a test never collide with the partial unique index
+    on `raw_file_sha256` (`uq_ingestion_jobs_sha256_active`).
+    """
+    import hashlib
+    from uuid import uuid4
+
+    from backend.app.models import IngestionJob
+    from backend.app.services.ingestion.states import IngestionState
+
+    async def _make(
+        *,
+        state: IngestionState,
+        attempts: int = 0,
+        lease_expires_at=None,
+    ) -> IngestionJob:
+        sha256 = hashlib.sha256(uuid4().bytes).hexdigest()
+        job = IngestionJob(
+            state=state.value,
+            source="upload",
+            source_external_id=None,
+            jd_code=None,
+            raw_file_key=f"resumes/test/sweeper-{sha256[:16]}",
+            raw_file_sha256=sha256,
+            raw_file_size_bytes=1234,
+            raw_file_content_type="application/pdf",
+            raw_file_original_name_cipher="cipher",
+            attempts=attempts,
+            lease_expires_at=lease_expires_at,
+            actor="test",
+        )
+        db_session.add(job)
+        await db_session.flush()
+        return job
+
+    return _make
+
+
+@pytest_asyncio.fixture
 async def auth_headers(db_session):
     """Create a real database user and JWT for route-level authorization tests."""
     from uuid import uuid4
