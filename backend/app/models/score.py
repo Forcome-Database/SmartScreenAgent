@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Numeric, String
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -7,6 +7,12 @@ from backend.app.models.base import Base, TimestampMixin
 
 class Score(Base, TimestampMixin):
     __tablename__ = "scores"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id", "jd_id", "rule_version_id", name="uq_scores_candidate_jd_rule"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     candidate_id: Mapped[int] = mapped_column(
