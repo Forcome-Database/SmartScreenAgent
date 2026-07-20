@@ -6,9 +6,9 @@ AI-driven resume screening agent for HR.
 
 当前处于“后端评分原型已完成、生产化加固进行中”阶段。
 
-**WP0 可重复集成基线已完成**。**WP1 安全与原文件完整性已经完成本地实现和严格验证，等待托管 CI 验收**：候选人写接口已强制 JWT/RBAC，上传会经过流式大小/类型/文件签名校验并持久化到私有 MinIO。
+**WP0 可重复集成基线、WP1 安全与原文件完整性、WP2 生产解析器契约与校验 AI 输出均已完成并通过托管 CI**：候选人写接口已强制 JWT/RBAC，上传经流式大小/类型/文件签名校验并持久化到私有 MinIO；MinerU 已切换到官方 API v4，简历抽取与 LLM judge 输出经严格 Pydantic 与证据溯源校验后才能落库。WP2 托管验收见 [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)。
 
-项目仍不能直接公网部署：WP2 尚需验证真实 MinerU 契约和 AI 输出，WP3 尚需把同步处理切换为可恢复的异步任务。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+项目仍不能直接公网部署：**WP3 尚需把同步处理切换为可恢复的异步任务**（当前上传接口仍同步调用两个外部 AI 服务），读 API（WP4）与前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 

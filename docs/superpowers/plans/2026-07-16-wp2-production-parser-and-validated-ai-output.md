@@ -1,6 +1,6 @@
 # WP2 Production Parser Contract and Validated AI Output Implementation Plan
 
-**Status:** In progress; specification approved on 2026-07-16.
+**Status:** Complete on 2026-07-20; specification approved on 2026-07-16. Hosted [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508) passed Python 3.10, Python 3.14, and strict integration at commit `57f9afe`.
 
 **Specification:** [`../specs/2026-07-16-wp2-production-parser-and-validated-ai-output-design.md`](../specs/2026-07-16-wp2-production-parser-and-validated-ai-output-design.md)
 
@@ -209,10 +209,36 @@ official cloud API v4 and verified with all four synthetic input formats.
   with zero skips in 77.32 seconds. Ruff, mypy, Alembic, PostgreSQL, Redis, MinIO,
   temporary-file cleanup, and clean-state assertions passed.
 
-- [ ] Push scoped commits and confirm hosted Python 3.10, Python 3.14, and strict integration jobs.
-- [ ] Record exact commits, test counts, service/model versions, contract artifacts, cleanup evidence, and run URLs.
-- [ ] Mark WP2 Complete and WP3 Ready for planning only after every offline and external exit criterion passes.
-- [ ] Commit documentation and completion evidence.
+- [x] Push scoped commits and confirm hosted Python 3.10, Python 3.14, and strict integration jobs.
+- [x] Record exact commits, test counts, service/model versions, contract artifacts, cleanup evidence, and run URLs.
+- [x] Mark WP2 Complete and WP3 Ready for planning only after every offline and external exit criterion passes.
+- [x] Commit documentation and completion evidence.
+
+### Completion evidence (2026-07-20)
+
+- **Scoped commits:** WP2 range `2145b74..57f9afe` (9 commits) on branch
+  `codex/wp2-parser-ai-contract`, PR [#2](https://github.com/Forcome-Database/SmartScreenAgent/pull/2)
+  into `main` (the same PR also carries the already-accepted WP1 range
+  `218079e..94dfc6b`).
+- **Hosted CI:** [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)
+  passed at commit `57f9afe`: `unit-and-static (3.10)`, `unit-and-static (3.14)`,
+  and strict `integration` all succeeded.
+- **Hosted regression cause:** the offline `unit-and-static` job ran
+  `pytest -m "not integration"`, which still collected the 9 `external_contract`
+  runtime tests; without MinerU/new-api credentials they failed (stub
+  `protocol_version` 0 != 4; new-api connection errors). Commit `57f9afe`
+  aligned the job filter with `scripts/verify.py` (`not integration and not
+  external_contract`), keeping default CI offline and deterministic.
+- **Offline counts:** 233 offline tests passed, 51 deselected; Ruff and mypy
+  (64 source files) clean on hosted 3.10 and 3.14.
+- **Integration:** hosted `integration` job ran `scripts/verify.py` (Alembic,
+  PostgreSQL, Redis/Celery, MinIO, temporary-file cleanup, clean-state
+  assertions) green.
+- **External contract:** local Windows/Python 3.14 external gate 9/9 passed with
+  zero skips in 77.32 seconds (external endpoints are intentionally not exercised
+  by hosted CI; the offline suite stays credential-free).
+- **Service/model versions:** MinerU official cloud API v4 (`service_version=
+  official-api-v4`); new-api structured output verified with `gpt-5.6-sol`.
 
 ## Required Exit Evidence
 

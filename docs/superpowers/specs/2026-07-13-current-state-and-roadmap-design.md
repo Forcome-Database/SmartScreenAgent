@@ -143,11 +143,11 @@ Status values:
 | DingTalk login | P1 foundation | OAuth exchange, user upsert, JWT issue | OAuth/JWT unit tests | Partial |
 | JWT/RBAC on write APIs | Product design section 11.3 and WP1 design | Candidate routes require database-authoritative `hr`, `hr_lead`, or `admin` | Unit and real HTTP/PostgreSQL authorization matrix passes | Implemented |
 | Excel rule import | P2 scoring plan | Six sheets, two layouts, CLI persistence | Unit and integration tests | Implemented |
-| MinerU integration | WP2 scoring plan | Stub plus official API v4 signed-upload/batch-poll/result-ZIP contract | Unit fixtures plus four-format external runtime probe | Locally verified |
-| Resume extraction | P2 scoring plan | LLM JSON extraction with one retry | Unit tests with mock gateway | Partial |
+| MinerU integration | WP2 scoring plan | Official API v4 signed-upload/batch-poll/bounded-result-ZIP adapter with typed errors | Unit fixtures, archive edge cases, and four-format external runtime probe; hosted CI green | Implemented |
+| Resume extraction | P2 scoring plan | Strict Pydantic extraction models (`extra=forbid`) with `_meta` gateway metadata and primary+fallback attempts | Unit tests for valid Chinese resumes and typed rejection of wrong types, bad ages, invalid dates, and excessive lists | Implemented |
 | Three-stage scoring | P2 scoring plan | Hard filter, deterministic rules, LLM judge | Unit and DB integration tests | Implemented |
-| Evidence-backed scoring | Product design core value | Evidence fields are requested but not validated against source text | Mocked judge tests | Partial |
-| Candidate upload API | P2 scoring plan | Authenticated synchronous endpoint with validation, private storage, compensation, and explicit duplicates | Strict DB/MinIO-backed integration passes; production parser and AI contracts remain incomplete | Partial |
+| Evidence-backed scoring | Product design core value | Judge output validated against active rule dimensions/tiers/scores; every evidence quote must be a normalized substring of parsed Markdown or the score is rejected | Judge/evidence unit tests for fabricated, missing, and normalized-valid evidence | Implemented |
+| Candidate upload API | P2 scoring plan | Authenticated synchronous endpoint with validation, private storage, compensation, explicit duplicates, and now validated parser/AI contracts with stable error codes | Strict DB/MinIO-backed integration and boundary error tests pass; durable async ingestion is deferred to WP3 | Partial |
 | Candidate query API | P2 Task 14 title promised upload, score, and query | No query route | None | Absent |
 | Batch upload and async status | Original W5 | Celery entry point only | Task orchestration test exists | Partial |
 | Candidate list and scorecard | Original W3-W5 | No API or UI | None | Absent |
@@ -387,7 +387,7 @@ The following remain later extensions:
 
 ### WP2: Production parser contract and validated AI output
 
-**Status:** In progress - the [WP2 design](2026-07-16-wp2-production-parser-and-validated-ai-output-design.md) was approved on 2026-07-16 and the [implementation plan](../plans/2026-07-16-wp2-production-parser-and-validated-ai-output.md) is active. MinerU official-v4 four-format and new-api runtime probes pass locally; hosted CI remains required for the final exit review.
+**Status:** Complete - the [WP2 design](2026-07-16-wp2-production-parser-and-validated-ai-output-design.md) was approved on 2026-07-16 and the [implementation plan](../plans/2026-07-16-wp2-production-parser-and-validated-ai-output.md) finished on 2026-07-20. Hosted [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508) passed Python 3.10, Python 3.14, and strict integration at commit `57f9afe` (WP2 range `2145b74..57f9afe`, PR #2). Offline suite 233 passed; MinerU official-v4 four-format and new-api structured-output probes passed 9/9 locally on Windows/Python 3.14.
 
 **Goal:** replace assumed external contracts with verified adapters and typed results.
 
@@ -398,6 +398,8 @@ The following remain later extensions:
 **Exit gate:** representative PDF, DOCX, and image fixtures produce validated Markdown and extraction results through the deployed parser contract; malformed AI output cannot create a score.
 
 ### WP3: Durable asynchronous ingestion and batch processing
+
+**Status:** Ready for planning - unblocked on 2026-07-20 once WP2 stabilized the MinerU and AI contracts and passed hosted CI.
 
 **Goal:** move long-running work out of HTTP requests and support retries and progress.
 
