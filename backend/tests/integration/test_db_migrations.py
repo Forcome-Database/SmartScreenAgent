@@ -17,6 +17,7 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BASELINE_REVISION = "3884ec28fea9"
 WP1_REVISION = "b57c2f9e1a6d"
+WP3_HEAD_REVISION = "2f27938b430b"
 
 
 def _alembic(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -74,7 +75,7 @@ async def test_alembic_round_trip_from_base() -> None:
         assert upgrade.returncode == 0, upgrade.stderr
         current = _alembic("current", env=env)
         assert current.returncode == 0, current.stderr
-        assert WP1_REVISION in current.stdout
+        assert WP3_HEAD_REVISION in current.stdout
     finally:
         await _drop_database(urls.admin_dsn, database_name)
 

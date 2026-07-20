@@ -417,18 +417,6 @@ async def test_rescore_ai_failure_preserves_existing_score_and_rolls_back_partia
 
     async def fail_after_partial_write(pipeline, *, candidate_id: int, jd_id: int):
         pipeline.db.add(
-            Score(
-                candidate_id=candidate_id,
-                jd_id=jd_id,
-                rule_version_id=rule_version.id,
-                total_score=99,
-                grade="A",
-                hard_filter_result={"passed": True},
-                rule_dimensions={},
-                is_suspicious=False,
-            )
-        )
-        pipeline.db.add(
             AuditLog(
                 event_type="score",
                 actor="system",

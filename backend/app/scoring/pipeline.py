@@ -87,6 +87,24 @@ class ScoringPipeline:
                 select(RuleVersion).where(RuleVersion.id == jd.active_rule_version_id)
             )
         ).scalar_one()
+
+        existing = (
+            await self.db.execute(
+                select(Score).where(
+                    Score.candidate_id == candidate.id,
+                    Score.jd_id == jd.id,
+                    Score.rule_version_id == rv.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return PipelineResult(
+                score_id=existing.id,
+                total_score=float(existing.total_score),
+                grade=existing.grade,
+                rejected=existing.grade == "rejected",
+            )
+
         schema = RuleSchema.model_validate(rv.schema_json)
         extracted: dict[str, Any] = candidate.extracted_json or {}
         extraction_meta = extracted.get("_meta")
