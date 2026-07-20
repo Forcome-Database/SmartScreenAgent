@@ -1,7 +1,16 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,14 +21,14 @@ class IngestionJob(Base, TimestampMixin):
     __tablename__ = "ingestion_jobs"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    batch_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), index=True)
-    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    batch_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     source_external_id: Mapped[str | None] = mapped_column(String(128))
     jd_code: Mapped[str | None] = mapped_column(String(64))
 
     raw_file_key: Mapped[str] = mapped_column(String(256), nullable=False)
-    raw_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    raw_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     raw_file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     raw_file_content_type: Mapped[str] = mapped_column(String(128), nullable=False)
     raw_file_original_name_cipher: Mapped[str] = mapped_column(Text, nullable=False)
@@ -32,3 +41,10 @@ class IngestionJob(Base, TimestampMixin):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     trace_id: Mapped[str | None] = mapped_column(String(64))
     actor: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+
+    __table_args__ = (
+        Index("ix_ingestion_jobs_sha256", "raw_file_sha256"),
+        Index("ix_ingestion_jobs_state_lease", "state", "lease_expires_at"),
+        Index("ix_ingestion_jobs_batch", "batch_id"),
+        CheckConstraint("attempts >= 0", name="ck_ingestion_jobs_attempts_nonnegative"),
+    )

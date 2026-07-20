@@ -58,4 +58,7 @@ def downgrade() -> None:
     op.drop_index("ix_ingestion_jobs_batch", table_name="ingestion_jobs")
     op.drop_index("ix_ingestion_jobs_state_lease", table_name="ingestion_jobs")
     op.drop_index("ix_ingestion_jobs_sha256", table_name="ingestion_jobs")
+    op.drop_constraint(
+        "ck_ingestion_jobs_attempts_nonnegative", "ingestion_jobs", type_="check"
+    )
     op.drop_table("ingestion_jobs")
