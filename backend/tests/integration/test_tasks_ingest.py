@@ -1,5 +1,6 @@
 import hashlib
 import io
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,6 +10,24 @@ from sqlalchemy import select
 from backend.app.models import Candidate, IngestionJob
 from backend.app.services.parser.extractor import Experience, ExtractedResume
 from backend.app.services.parser.mineru_client import ParseResult
+
+
+async def _drive_job_to_failure(*, db_session, claimed_job, storage) -> BaseException:
+    """Run a claimed job, expect `run_job` to raise, and classify/persist the
+    failure via `_fail_job` — the same sequence `parse_and_score_task`'s
+    in-process runner performs, without needing a real Celery worker.
+
+    `_fail_job` opens its own session (the caller's `db_session` was just
+    rolled back and may not be reusable for further writes), so callers must
+    read the resulting state back via a fresh `AsyncSessionLocal()`.
+    """
+    from backend.app.tasks.ingest import _fail_job, run_job
+
+    with pytest.raises(BaseException) as exc_info:
+        await run_job(db=db_session, job=claimed_job, storage=storage)
+    await db_session.rollback()
+    await _fail_job(claimed_job.id, exc_info.value)
+    return exc_info.value
 
 
 @pytest.mark.integration
@@ -483,3 +502,224 @@ async def test_run_job_resumes_from_existing_candidate_without_download(db_sessi
     assert refreshed.state == IngestionState.READY.value
     assert refreshed.candidate_id == candidate.id
     assert refreshed.score_id is None
+
+
+async def _stored_and_claimed_job(db_session, minio_storage, *, body: bytes, object_key: str):
+    """Store a raw object in MinIO and create+claim an `IngestionJob` for it.
+
+    Shared setup for the worker-path failure tests below — mirrors the
+    happy-path tests earlier in this file (`test_run_job_completes_with_stub_parser`
+    et al.), factored out because every failure test needs the same claimed,
+    `parsing`-state job to hand to `run_job`.
+    """
+    from backend.app.security.crypto import encrypt_pii
+    from backend.app.services.ingestion.jobs import IngestionJobService
+    from backend.app.tasks.ingest import RawFileReference
+
+    sha256 = hashlib.sha256(body).hexdigest()
+    minio_storage.put_object(
+        object_key,
+        io.BytesIO(body),
+        len(body),
+        content_type="application/pdf",
+        metadata={"sha256": sha256},
+    )
+    reference = RawFileReference(
+        object_key=object_key,
+        sha256=sha256,
+        size_bytes=len(body),
+        content_type="application/pdf",
+        original_name_cipher=encrypt_pii("failure-case.pdf"),
+    )
+    svc = IngestionJobService(db_session)
+    job, _ = await svc.create_or_reuse(
+        raw_file=reference,
+        source="upload",
+        source_external_id=None,
+        jd_code=None,
+        actor="user:1",
+    )
+    await db_session.commit()
+    claimed = await svc.claim(job.id, lease_seconds=900)
+    await db_session.commit()
+    return claimed
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_job_retryable_parser_error_leaves_job_retryable_failed(
+    db_session, minio_storage, monkeypatch, caplog
+):
+    """A `MinerUUnavailableError` from the parser is a retryable failure:
+    the job lands in `retryable_failed` with the stable
+    `resume_parser_unavailable` code, and the raw exception message (which
+    may echo upstream/provider details) never reaches logs or the persisted
+    error code."""
+    from backend.app.database import AsyncSessionLocal
+    from backend.app.services.ingestion.states import IngestionState
+    from backend.app.services.parser.errors import MinerUUnavailableError
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+
+    secret = "upstream-token-should-never-leak-93f7"
+    claimed = await _stored_and_claimed_job(
+        db_session,
+        minio_storage,
+        body=b"%PDF-retryable-parser",
+        object_key="resumes/2026/07/retryable-parser",
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(
+                side_effect=MinerUUnavailableError(f"provider outage, token={secret}")
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        exc = await _drive_job_to_failure(
+            db_session=db_session,
+            claimed_job=claimed,
+            storage=ResumeStorageService(storage=minio_storage),
+        )
+
+    assert isinstance(exc, MinerUUnavailableError)
+    assert secret not in caplog.text
+
+    async with AsyncSessionLocal() as verify_db:
+        refreshed = await verify_db.get(IngestionJob, claimed.id)
+        assert refreshed.state == IngestionState.RETRYABLE_FAILED.value
+        assert refreshed.last_error_code == "resume_parser_unavailable"
+        assert secret not in refreshed.last_error_code
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_job_terminal_parser_contract_error_leaves_job_terminal_failed(
+    db_session, minio_storage, monkeypatch
+):
+    """A `MinerUContractError` (the parser returned a response violating the
+    supported protocol) is terminal, not retryable: retrying an invalid
+    contract will not help."""
+    from backend.app.database import AsyncSessionLocal
+    from backend.app.services.ingestion.states import IngestionState
+    from backend.app.services.parser.errors import MinerUContractError
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+
+    claimed = await _stored_and_claimed_job(
+        db_session,
+        minio_storage,
+        body=b"%PDF-terminal-contract",
+        object_key="resumes/2026/07/terminal-contract",
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(side_effect=MinerUContractError("unsupported response shape"))
+        ),
+    )
+
+    exc = await _drive_job_to_failure(
+        db_session=db_session,
+        claimed_job=claimed,
+        storage=ResumeStorageService(storage=minio_storage),
+    )
+    assert isinstance(exc, MinerUContractError)
+
+    async with AsyncSessionLocal() as verify_db:
+        refreshed = await verify_db.get(IngestionJob, claimed.id)
+        assert refreshed.state == IngestionState.TERMINAL_FAILED.value
+        assert refreshed.last_error_code == "resume_parser_contract_invalid"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_job_terminal_llm_invalid_output_leaves_job_terminal_failed(
+    db_session, minio_storage, monkeypatch, caplog
+):
+    """A terminal LLM error (`LLMInvalidOutputError`) raised by the
+    extractor — after the parser has already succeeded — must also be
+    classified terminal, and the parsed resume text embedded in the
+    exception message must not leak into logs or the persisted error
+    code."""
+    from backend.app.database import AsyncSessionLocal
+    from backend.app.services.ingestion.states import IngestionState
+    from backend.app.services.llm.errors import LLMInvalidOutputError
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+
+    pii_secret = "张三 13800001234 私密简历内容"
+    claimed = await _stored_and_claimed_job(
+        db_session,
+        minio_storage,
+        body=b"%PDF-terminal-llm",
+        object_key="resumes/2026/07/terminal-llm",
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(return_value=ParseResult(markdown="# resume", source="stub"))
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.ResumeExtractor",
+        lambda: SimpleNamespace(
+            extract=AsyncMock(
+                side_effect=LLMInvalidOutputError(f"model echoed private text: {pii_secret}")
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        exc = await _drive_job_to_failure(
+            db_session=db_session,
+            claimed_job=claimed,
+            storage=ResumeStorageService(storage=minio_storage),
+        )
+
+    assert isinstance(exc, LLMInvalidOutputError)
+    assert pii_secret not in caplog.text
+
+    async with AsyncSessionLocal() as verify_db:
+        refreshed = await verify_db.get(IngestionJob, claimed.id)
+        assert refreshed.state == IngestionState.TERMINAL_FAILED.value
+        assert refreshed.last_error_code == "ai_invalid_output"
+        assert pii_secret not in refreshed.last_error_code
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_job_unknown_error_defaults_to_retryable_failed(
+    db_session, minio_storage, monkeypatch
+):
+    """An error class `_fail_job` doesn't recognize (neither in
+    `TERMINAL_ERRORS` nor `RETRYABLE_ERRORS`) must default to
+    `retryable_failed` with the generic stable code — fail safe toward
+    "try again" rather than silently discarding an unclassified job."""
+    from backend.app.database import AsyncSessionLocal
+    from backend.app.services.ingestion.states import IngestionState
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+
+    claimed = await _stored_and_claimed_job(
+        db_session,
+        minio_storage,
+        body=b"%PDF-unknown-error",
+        object_key="resumes/2026/07/unknown-error",
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(side_effect=RuntimeError("totally unexpected failure"))
+        ),
+    )
+
+    exc = await _drive_job_to_failure(
+        db_session=db_session,
+        claimed_job=claimed,
+        storage=ResumeStorageService(storage=minio_storage),
+    )
+    assert isinstance(exc, RuntimeError)
+
+    async with AsyncSessionLocal() as verify_db:
+        refreshed = await verify_db.get(IngestionJob, claimed.id)
+        assert refreshed.state == IngestionState.RETRYABLE_FAILED.value
+        assert refreshed.last_error_code == "ingestion_worker_error"

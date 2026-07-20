@@ -142,3 +142,35 @@ async def test_upload_does_not_enqueue_when_job_already_existed(monkeypatch, fak
     assert enqueued == []
     fake_upload_env.fake_storage.delete.assert_awaited_once_with("resumes/fake/object")
     fake_upload_env.fake_db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upload_deletes_object_on_post_store_failure(monkeypatch, fake_upload_env):
+    """A failure after the object was stored (here: `create_or_reuse` itself
+    raising) must trigger the compensating delete of that stored object, and
+    the original error must surface — not a 202."""
+    enqueued: list[int] = []
+    monkeypatch.setattr(
+        "backend.app.routers.candidates.enqueue_job", lambda job_id: enqueued.append(job_id)
+    )
+
+    async def _fake_create_or_reuse(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "backend.app.routers.candidates.IngestionJobService",
+        lambda db: SimpleNamespace(create_or_reuse=_fake_create_or_reuse),
+    )
+
+    transport = ASGITransport(app=app)
+    with pytest.raises(RuntimeError, match="boom"):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post(
+                "/api/v1/candidates/upload",
+                files={"file": ("r.pdf", fake_upload_env.pdf_bytes, "application/pdf")},
+                headers=fake_upload_env.auth_headers,
+            )
+
+    fake_upload_env.fake_storage.delete.assert_awaited_once_with("resumes/fake/object")
+    fake_upload_env.fake_db.rollback.assert_awaited_once()
+    assert enqueued == []

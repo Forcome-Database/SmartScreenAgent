@@ -10,7 +10,7 @@ from backend.app.scoring.llm_judge import JudgeResult
 from backend.app.security.crypto import encrypt_pii
 from backend.app.services.llm.errors import LLMInvalidOutputError, LLMUnavailableError
 from backend.app.services.parser.pii import compute_pii_hash
-from backend.app.services.storage import StorageError
+from backend.app.services.storage import ResumeStorageService, StorageError
 
 
 @pytest.mark.integration
@@ -472,6 +472,77 @@ async def test_upload_batch_records_per_file_outcomes(
     assert jobs[0].id == queued[0]["job_id"]
     assert str(jobs[0].batch_id) == body["batch_id"]
     assert minio_storage.list_object_keys(prefix="resumes/") == [jobs[0].raw_file_key]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_upload_batch_isolates_storage_failure_and_continues(
+    client,
+    db_session,
+    auth_headers,
+    minio_storage,
+    monkeypatch,
+):
+    """A `StorageError` for one file in a batch must not abort the whole
+    request (unmapped 500) or orphan MinIO objects already stored for
+    earlier files — it should record `terminal_failed` for that file only
+    and let the rest of the batch continue."""
+    import io
+
+    from pypdf import PdfWriter
+
+    def _pdf_bytes(width: int) -> bytes:
+        writer = PdfWriter()
+        writer.add_blank_page(width=width, height=72)
+        stream = io.BytesIO()
+        writer.write(stream)
+        return stream.getvalue()
+
+    call_count = {"n": 0}
+
+    class FlakyStorage:
+        """Wraps a real `ResumeStorageService`, failing only the 2nd call."""
+
+        def __init__(self) -> None:
+            self._real = ResumeStorageService()
+
+        async def store(self, artifact):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise StorageError(operation="put", key="opaque")
+            return await self._real.store(artifact)
+
+        async def delete(self, key: str) -> None:
+            await self._real.delete(key)
+
+    monkeypatch.setattr(
+        "backend.app.routers.candidates.ResumeStorageService", FlakyStorage
+    )
+    enqueued: list[int] = []
+    monkeypatch.setattr(
+        "backend.app.routers.candidates.enqueue_job", lambda job_id: enqueued.append(job_id)
+    )
+
+    files = [
+        ("files", ("a.pdf", _pdf_bytes(72), "application/pdf")),
+        ("files", ("b.pdf", _pdf_bytes(73), "application/pdf")),
+        ("files", ("c.pdf", _pdf_bytes(74), "application/pdf")),
+    ]
+    resp = await client.post(
+        "/api/v1/candidates/batch", files=files, headers=await auth_headers()
+    )
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    states = [result["state"] for result in body["jobs"]]
+    assert states == ["queued", "terminal_failed", "queued"]
+    assert body["jobs"][1]["job_id"] is None
+    assert body["jobs"][1]["error_code"] == "object_storage_unavailable"
+
+    jobs = (await db_session.execute(select(IngestionJob))).scalars().all()
+    assert len(jobs) == 2
+    assert enqueued == [body["jobs"][0]["job_id"], body["jobs"][2]["job_id"]]
+    stored_keys = {job.raw_file_key for job in jobs}
+    assert set(minio_storage.list_object_keys(prefix="resumes/")) == stored_keys
 
 
 @pytest.mark.integration
