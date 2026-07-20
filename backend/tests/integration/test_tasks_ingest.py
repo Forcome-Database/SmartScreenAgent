@@ -391,3 +391,95 @@ async def test_run_job_completes_scoring_when_jd_has_active_rule_version(
     assert refreshed.state == IngestionState.COMPLETED.value
     assert refreshed.candidate_id is not None
     assert refreshed.score_id is not None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_job_resumes_from_existing_candidate_without_download(db_session):
+    """A retry where `candidate_id` is already set must not re-download the
+    raw file object.
+
+    Reproduces the durability gap: the duplicate-candidate branch in
+    `_insert_or_reuse_candidate` deletes the just-uploaded MinIO object
+    once an existing candidate is confirmed to own the canonical copy. If a
+    *later* stage then fails transiently and the sweeper re-queues the job,
+    `run_job` re-running from the top would call `download_verified` against
+    that now-deleted object and raise `ObjectNotFoundError`, looping the job
+    to `terminal_failed` even though the candidate row already exists. The
+    fix branches on `job.candidate_id` at the start of `run_job` and skips
+    storage/MinerU/extractor entirely on resume — this test proves that by
+    never storing a MinIO object for the job's `raw_file_key` at all and
+    handing `run_job` a storage stub whose `download_verified` raises if
+    called.
+    """
+    from backend.app.security.crypto import encrypt_pii as encrypt_raw_name
+    from backend.app.services.ingestion.jobs import IngestionJobService
+    from backend.app.services.ingestion.states import IngestionState
+    from backend.app.services.parser.pii import compute_pii_hash, encrypt_pii
+    from backend.app.tasks.ingest import RawFileReference, run_job
+
+    # An existing candidate created by a prior (successful) attempt.
+    candidate = Candidate(
+        source="upload",
+        source_external_id=None,
+        name_cipher=encrypt_pii("已存在候选人"),
+        phone_cipher=encrypt_pii("13800002222"),
+        email_cipher=None,
+        raw_file_key="resumes/2026/07/resume-already-owned",
+        raw_file_sha256=hashlib.sha256(b"already-owned").hexdigest(),
+        raw_file_size_bytes=17,
+        raw_file_content_type="application/pdf",
+        raw_file_original_name_cipher=encrypt_raw_name("already-owned.pdf"),
+        parsed_markdown="# already parsed",
+        extracted_json={"age": 30, "education": "本科", "experiences": [], "_meta": {}},
+        pii_hash=compute_pii_hash(name="已存在候选人", phone="13800002222"),
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+
+    body = b"%PDF-retry-input"
+    sha256 = hashlib.sha256(body).hexdigest()
+    object_key = "resumes/2026/07/run-job-resume-retry"
+    reference = RawFileReference(
+        object_key=object_key,
+        sha256=sha256,
+        size_bytes=len(body),
+        content_type="application/pdf",
+        original_name_cipher=encrypt_raw_name("retry.pdf"),
+    )
+
+    # No MinIO object is ever stored for `object_key` (unlike the other
+    # tests in this file) — if `run_job` attempted a download here, it
+    # would hit the real `ObjectNotFoundError` path, proving the point on
+    # its own. The stub below makes the assertion explicit and immediate.
+    svc = IngestionJobService(db_session)
+    job, _ = await svc.create_or_reuse(
+        raw_file=reference,
+        source="upload",
+        source_external_id=None,
+        jd_code=None,
+        actor="user:1",
+    )
+    job.candidate_id = candidate.id
+    await db_session.commit()
+
+    claimed = await svc.claim(job.id, lease_seconds=900)
+    await db_session.commit()
+    assert claimed.state == IngestionState.PARSING.value
+
+    storage_stub = SimpleNamespace(
+        download_verified=AsyncMock(
+            side_effect=AssertionError(
+                "run_job must not download when job.candidate_id is already set"
+            )
+        )
+    )
+
+    await run_job(db=db_session, job=claimed, storage=storage_stub)
+
+    storage_stub.download_verified.assert_not_called()
+
+    refreshed = await db_session.get(IngestionJob, job.id)
+    assert refreshed.state == IngestionState.READY.value
+    assert refreshed.candidate_id == candidate.id
+    assert refreshed.score_id is None

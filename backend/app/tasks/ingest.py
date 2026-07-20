@@ -299,53 +299,75 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
     `_insert_or_reuse_candidate`'s duplicate branch, because that object is
     genuinely redundant (an existing candidate already owns the canonical
     copy), not because the job failed.
+
+    If `job.candidate_id` is already set — a retry after a prior attempt
+    got as far as creating (or reusing) the candidate row, including the
+    duplicate-candidate branch, which deletes the just-uploaded raw file
+    object as redundant — this function does NOT touch storage, MinerU, or
+    the extractor at all. Re-downloading in that case would raise
+    `ObjectNotFoundError` for an object that was deliberately deleted, even
+    though there is nothing left to redo for parsing/extraction. Instead it
+    loads the existing candidate and advances the state machine straight to
+    `extracting`, then falls into the same scoring/ready tail used by a
+    first attempt.
     """
     from backend.app.services.ingestion.jobs import IngestionJobService
 
     svc = IngestionJobService(db)
-    reference = _reference_from_job(job)
-    local_path = _temp_local_path(reference.content_type)
-    try:
-        await storage.download_verified(reference.stored_resume, local_path)
-        parsed = await MinerUClient().parse(local_path)
+    candidate: Candidate
 
-        await svc.transition(job, IngestionState.EXTRACTING)
-        await db.commit()
+    if job.candidate_id is None:
+        reference = _reference_from_job(job)
+        local_path = _temp_local_path(reference.content_type)
+        try:
+            await storage.download_verified(reference.stored_resume, local_path)
+            parsed = await MinerUClient().parse(local_path)
 
-        extracted = await ResumeExtractor().extract(parsed.markdown)
-
-        candidate, _status, _object_deleted = await _insert_or_reuse_candidate(
-            db,
-            reference,
-            parsed.markdown,
-            extracted,
-            storage,
-            source=job.source,
-            source_external_id=job.source_external_id,
-        )
-        job.candidate_id = candidate.id
-
-        jd = None
-        if job.jd_code:
-            jd = (
-                await db.execute(select(JD).where(JD.code == job.jd_code))
-            ).scalar_one_or_none()
-
-        if jd is not None and jd.active_rule_version_id:
-            await svc.transition(job, IngestionState.SCORING)
+            await svc.transition(job, IngestionState.EXTRACTING)
             await db.commit()
 
-            result = await ScoringPipeline(db=db).run(candidate_id=candidate.id, jd_id=jd.id)
-            job.score_id = result.score_id
+            extracted = await ResumeExtractor().extract(parsed.markdown)
 
-            await svc.transition(job, IngestionState.COMPLETED)
+            candidate, _status, _object_deleted = await _insert_or_reuse_candidate(
+                db,
+                reference,
+                parsed.markdown,
+                extracted,
+                storage,
+                source=job.source,
+                source_external_id=job.source_external_id,
+            )
+            job.candidate_id = candidate.id
+        finally:
+            local_path.unlink(missing_ok=True)
+    else:
+        loaded_candidate = await db.get(Candidate, job.candidate_id)
+        if loaded_candidate is None:
+            raise RuntimeError(
+                f"ingestion job {job.id} references missing candidate_id={job.candidate_id}"
+            )
+        candidate = loaded_candidate
+        if job.state == IngestionState.PARSING.value:
+            await svc.transition(job, IngestionState.EXTRACTING)
             await db.commit()
-            return
 
-        await svc.transition(job, IngestionState.READY)
+    jd = None
+    if job.jd_code:
+        jd = (await db.execute(select(JD).where(JD.code == job.jd_code))).scalar_one_or_none()
+
+    if jd is not None and jd.active_rule_version_id:
+        await svc.transition(job, IngestionState.SCORING)
         await db.commit()
-    finally:
-        local_path.unlink(missing_ok=True)
+
+        result = await ScoringPipeline(db=db).run(candidate_id=candidate.id, jd_id=jd.id)
+        job.score_id = result.score_id
+
+        await svc.transition(job, IngestionState.COMPLETED)
+        await db.commit()
+        return
+
+    await svc.transition(job, IngestionState.READY)
+    await db.commit()
 
 
 async def _fail_job(job_id: int, exc: BaseException) -> None:
@@ -421,7 +443,16 @@ def parse_and_score_task(job_id: int) -> None:
                     await run_job(db=db, job=job, storage=ResumeStorageService())
                 except BaseException as exc:  # noqa: BLE001 - classified below, re-raised
                     await db.rollback()
-                    await _fail_job(job_id, exc)
+                    try:
+                        await _fail_job(job_id, exc)
+                    except BaseException as fail_job_exc:  # noqa: BLE001 - must not mask exc
+                        logger.error(
+                            "ingestion_job_fail_job_raised",
+                            job_id=job_id,
+                            error_class=type(exc).__name__,
+                            fail_job_error_class=type(fail_job_exc).__name__,
+                            trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
+                        )
                     raise
         finally:
             await engine.dispose()
