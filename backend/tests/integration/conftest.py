@@ -66,6 +66,7 @@ def _apply_migrations():
 
 # Children before parents — FK-safe TRUNCATE order.
 _CLEAN_TABLES = [
+    "ingestion_jobs",
     "audit_logs",
     "feedback",
     "scores",
