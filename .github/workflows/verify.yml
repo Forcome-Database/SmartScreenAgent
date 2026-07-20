@@ -30,7 +30,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --extra dev --locked
-      - run: uv run pytest -m "not integration" -q
+      - run: uv run pytest -m "not integration and not external_contract" -q
       - run: uv run ruff check backend
       - run: uv run mypy --explicit-package-bases backend/app --ignore-missing-imports
 
