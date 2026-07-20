@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -46,5 +47,13 @@ class IngestionJob(Base, TimestampMixin):
         Index("ix_ingestion_jobs_sha256", "raw_file_sha256"),
         Index("ix_ingestion_jobs_state_lease", "state", "lease_expires_at"),
         Index("ix_ingestion_jobs_batch", "batch_id"),
+        Index(
+            "uq_ingestion_jobs_sha256_active",
+            "raw_file_sha256",
+            unique=True,
+            postgresql_where=text(
+                "state NOT IN ('ready', 'completed', 'terminal_failed', 'deleted')"
+            ),
+        ),
         CheckConstraint("attempts >= 0", name="ck_ingestion_jobs_attempts_nonnegative"),
     )

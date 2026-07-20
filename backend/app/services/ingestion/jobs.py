@@ -5,10 +5,12 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models import IngestionJob
 from backend.app.services.ingestion.states import (
+    PROCESSING_STATES,
     TERMINAL_STATES,
     IngestionState,
     assert_transition,
@@ -34,34 +36,64 @@ class IngestionJobService:
         batch_id: UUID | None = None,
         trace_id: str | None = None,
     ) -> tuple[IngestionJob, bool]:
-        existing = (
+        existing = await self._find_active_by_sha256(raw_file.sha256)
+        if existing is not None:
+            return existing, False
+
+        # The SELECT above is only a fast path: two concurrent requests for the
+        # same sha256 can both pass it, so the actual invariant is enforced by
+        # the partial unique index (uq_ingestion_jobs_sha256_active) via this
+        # atomic upsert, mirroring the pii_hash pattern in tasks/ingest.py.
+        stmt = (
+            pg_insert(IngestionJob)
+            .values(
+                batch_id=batch_id,
+                state=IngestionState.QUEUED.value,
+                source=source,
+                source_external_id=source_external_id,
+                jd_code=jd_code,
+                raw_file_key=raw_file.object_key,
+                raw_file_sha256=raw_file.sha256,
+                raw_file_size_bytes=raw_file.size_bytes,
+                raw_file_content_type=raw_file.content_type,
+                raw_file_original_name_cipher=raw_file.original_name_cipher,
+                attempts=0,
+                actor=actor,
+                trace_id=trace_id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["raw_file_sha256"],
+                index_where=IngestionJob.state.notin_(_TERMINAL_VALUES),
+            )
+            .returning(IngestionJob.id)
+        )
+        inserted_id = (await self.db.execute(stmt)).scalar_one_or_none()
+        if inserted_id is not None:
+            job = (
+                await self.db.execute(
+                    select(IngestionJob).where(IngestionJob.id == inserted_id)
+                )
+            ).scalar_one()
+            await self.db.flush()
+            return job, True
+
+        # A concurrent insert won the race; re-read the row it created.
+        existing = await self._find_active_by_sha256(raw_file.sha256)
+        if existing is None:  # pragma: no cover - defensive, should be unreachable
+            raise RuntimeError(
+                "ingestion job insert conflicted but no active row was found"
+            )
+        return existing, False
+
+    async def _find_active_by_sha256(self, sha256: str) -> IngestionJob | None:
+        return (
             await self.db.execute(
                 select(IngestionJob)
-                .where(IngestionJob.raw_file_sha256 == raw_file.sha256)
+                .where(IngestionJob.raw_file_sha256 == sha256)
                 .where(IngestionJob.state.notin_(_TERMINAL_VALUES))
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if existing is not None:
-            return existing, False
-        job = IngestionJob(
-            batch_id=batch_id,
-            state=IngestionState.QUEUED.value,
-            source=source,
-            source_external_id=source_external_id,
-            jd_code=jd_code,
-            raw_file_key=raw_file.object_key,
-            raw_file_sha256=raw_file.sha256,
-            raw_file_size_bytes=raw_file.size_bytes,
-            raw_file_content_type=raw_file.content_type,
-            raw_file_original_name_cipher=raw_file.original_name_cipher,
-            attempts=0,
-            actor=actor,
-            trace_id=trace_id,
-        )
-        self.db.add(job)
-        await self.db.flush()
-        return job, True
 
     async def claim(self, job_id: int, *, lease_seconds: int) -> IngestionJob | None:
         job = (
@@ -88,11 +120,7 @@ class IngestionJobService:
         job.state = target.value
         if error_code is not None:
             job.last_error_code = error_code
-        if target not in {
-            IngestionState.PARSING,
-            IngestionState.EXTRACTING,
-            IngestionState.SCORING,
-        }:
+        if target not in PROCESSING_STATES:
             job.lease_expires_at = None
         await self.db.flush()
 
