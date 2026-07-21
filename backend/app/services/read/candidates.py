@@ -3,16 +3,19 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.config import get_settings
 from backend.app.models import JD, AuditLog, Candidate, IngestionJob, RuleVersion, Score
 from backend.app.schemas.read import (
     CandidateDetail,
     CandidateListItem,
     CandidateScoreSummary,
     RankedCandidateItem,
+    RawFileLink,
     ScoreDetail,
 )
 from backend.app.security.crypto import decrypt_pii
 from backend.app.services.read.pagination import Page
+from backend.app.services.storage import ResumeStorageService
 
 
 async def list_ranked_for_jd(
@@ -168,3 +171,28 @@ async def get_score_detail(
         rule_dimensions=score.rule_dimensions,
         judge_dimensions=score.judge_dimensions,
     )
+
+
+async def get_candidate_raw_file(
+    db: AsyncSession, candidate_id: int, *, actor: str, trace_id: str | None
+) -> RawFileLink | None:
+    candidate = (
+        await db.execute(select(Candidate).where(Candidate.id == candidate_id))
+    ).scalar_one_or_none()
+    if candidate is None or not candidate.raw_file_key:
+        return None
+    ttl = get_settings().RAW_FILE_PRESIGN_TTL_SECONDS
+    url = await ResumeStorageService().presigned_get_url(
+        candidate.raw_file_key, expires_seconds=ttl
+    )
+    db.add(
+        AuditLog(
+            event_type="raw_file_access",
+            actor=actor,
+            target_type="candidate",
+            target_id=candidate_id,
+            payload={"purpose": "raw_file_download", "trace_id": trace_id},
+        )
+    )
+    await db.commit()
+    return RawFileLink(url=url, expires_in_seconds=ttl)

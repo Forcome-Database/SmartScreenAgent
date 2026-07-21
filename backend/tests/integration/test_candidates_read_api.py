@@ -114,6 +114,28 @@ async def test_score_detail_and_unknown(client, db_session, auth_headers):
     assert missing.json()["detail"] == {"code": "not_found", "message": "score not found"}
 
 
+async def test_score_detail_rejects_score_not_owned_by_candidate(
+    client, db_session, auth_headers
+):
+    jd, cand, score = await _seed(db_session)
+    other_candidate = Candidate(
+        source="upload",
+        name_cipher=encrypt_pii("李四"),
+        phone_cipher=encrypt_pii("13900000000"),
+        pii_hash="h2",
+        extracted_json={"age": 28, "education": "本科", "experiences": []},
+    )
+    db_session.add(other_candidate)
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/api/v1/candidates/{other_candidate.id}/scores/{score.id}",
+        headers=await auth_headers("hr"),
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == {"code": "not_found", "message": "score not found"}
+
+
 async def test_raw_file_returns_presigned_url_and_writes_one_audit(
     client, db_session, auth_headers, monkeypatch
 ):
@@ -132,7 +154,7 @@ async def test_raw_file_returns_presigned_url_and_writes_one_audit(
             return f"https://minio.local/{key}?ttl={expires_seconds}"
 
     monkeypatch.setattr(
-        "backend.app.routers.candidates_read.ResumeStorageService", FakeStorage
+        "backend.app.services.read.candidates.ResumeStorageService", FakeStorage
     )
     resp = await client.get(
         f"/api/v1/candidates/{cand.id}/raw-file", headers=await auth_headers("hr")
@@ -161,7 +183,7 @@ async def test_raw_file_storage_unavailable_returns_503(
             raise StorageError(operation="presign", key=key)
 
     monkeypatch.setattr(
-        "backend.app.routers.candidates_read.ResumeStorageService", FailingStorage
+        "backend.app.services.read.candidates.ResumeStorageService", FailingStorage
     )
     resp = await client.get(
         f"/api/v1/candidates/{cand.id}/raw-file", headers=await auth_headers("hr")
