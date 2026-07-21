@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlparse
@@ -279,48 +278,6 @@ def celery_worker() -> Iterator[None]:
 
 
 @pytest_asyncio.fixture
-async def poll_job(client):
-    """Poll `GET /candidates/jobs/{id}` until `state` lands in `until`.
-
-    Fails the test outright — rather than looping forever or silently
-    passing — if the job reaches `terminal_failed` while `until` does not
-    expect it, or if `timeout` elapses first. A durability test that merely
-    waited and asserted afterward could pass on a hung worker as easily as a
-    working one; failing fast here makes that failure mode visible.
-    """
-
-    async def _poll(
-        job_id: int,
-        headers: dict[str, str],
-        *,
-        until: set[str],
-        timeout: float = 30.0,
-        interval: float = 0.2,
-    ) -> dict:
-        deadline = time.monotonic() + timeout
-        while True:
-            resp = await client.get(f"/api/v1/candidates/jobs/{job_id}", headers=headers)
-            assert resp.status_code == 200, resp.text
-            body = resp.json()
-            state = body["state"]
-            if state in until:
-                return body
-            if state == "terminal_failed" and "terminal_failed" not in until:
-                pytest.fail(
-                    f"ingestion job {job_id} reached terminal_failed "
-                    f"(error_code={body.get('last_error_code')!r}) while polling for {until}"
-                )
-            if time.monotonic() >= deadline:
-                pytest.fail(
-                    f"ingestion job {job_id} did not reach {until} within {timeout}s "
-                    f"(last observed state={state!r})"
-                )
-            await asyncio.sleep(interval)
-
-    return _poll
-
-
-@pytest_asyncio.fixture
 async def run_one_sweep():
     """Run one `ingest.sweep` pass synchronously, then hand any requeued job
     ids to Celery exactly as `sweep_task` does — without needing Beat itself
@@ -358,6 +315,7 @@ async def run_one_sweep():
                 db,
                 now=datetime.now(timezone.utc),
                 max_attempts=settings.INGESTION_MAX_ATTEMPTS,
+                queued_stale_seconds=settings.INGESTION_LEASE_SECONDS,
             )
             await db.commit()
         await engine.dispose()

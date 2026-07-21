@@ -16,7 +16,10 @@ def sweep_task() -> dict:
         try:
             async with AsyncSessionLocal() as db:
                 report = await sweep(
-                    db, now=datetime.now(timezone.utc), max_attempts=settings.INGESTION_MAX_ATTEMPTS
+                    db,
+                    now=datetime.now(timezone.utc),
+                    max_attempts=settings.INGESTION_MAX_ATTEMPTS,
+                    queued_stale_seconds=settings.INGESTION_LEASE_SECONDS,
                 )
                 await db.commit()
         finally:

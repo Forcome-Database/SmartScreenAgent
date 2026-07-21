@@ -92,7 +92,7 @@ async def assert_application_tables_empty(env: dict[str, str]) -> None:
     dsn = env["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
     connection = await asyncpg.connect(dsn)
     try:
-        for table in ("audit_logs", "scores", "candidates", "users"):
+        for table in ("audit_logs", "scores", "candidates", "users", "ingestion_jobs"):
             count = await connection.fetchval(f'SELECT count(*) FROM "{table}"')
             if count:
                 raise AssertionError(f"application table {table} contains {count} rows")

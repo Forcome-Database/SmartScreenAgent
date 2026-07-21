@@ -269,12 +269,19 @@ SKIP LOCKED`).
 - A single `batch_id` (UUID) is generated for the request.
 - Each file is streamed, validated, and persisted independently; each becomes one
   `ingestion_jobs` row with the shared `batch_id`.
-- A file that fails validation or object persistence records a job in
-  `terminal_failed` with the appropriate error code and does not abort the batch;
-  the response reports per-file outcomes.
+- A file that fails validation or object persistence is reported synchronously
+  in the `202` response body as `{state: "terminal_failed", error_code}` and
+  does not abort the batch; it does NOT create a durable `ingestion_jobs` row
+  (the file was never stored, so there is nothing to persist a job for).
 - The response is `202 {batch_id, jobs: [{job_id, state, error_code?}, ...]}`.
+  `job_id` is present only for files that were successfully queued.
 - Batch progress is read from `GET /candidates/batches/{batch_id}` as a
-  `state -> count` aggregate.
+  `state -> count` aggregate. Because rejected files never became
+  `ingestion_jobs` rows, this aggregate reflects only successfully-queued
+  jobs — it does not know about, and cannot report, per-file validation/storage
+  failures. A batch in which every file was rejected produced zero durable
+  jobs, so `GET /batches/{id}` returns `404` for it exactly as it would for an
+  unknown batch id.
 
 ## 11. Retention and Cleanup Scope
 

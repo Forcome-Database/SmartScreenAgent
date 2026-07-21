@@ -18,6 +18,9 @@ celery_app.conf.update(
     timezone="Asia/Shanghai",
     enable_utc=True,
     task_track_started=True,
+    # Must stay below `INGESTION_LEASE_SECONDS` (see config.py) so a task is
+    # never force-killed while its ingestion job's lease is still considered
+    # live — otherwise the sweeper could reclaim a job the worker still owns.
     task_time_limit=600,
     worker_max_tasks_per_child=100,
 )

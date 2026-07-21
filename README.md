@@ -167,7 +167,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/candidates/<id>/score \
 - 默认最大 20 MiB，可用 `MAX_RESUME_FILE_BYTES` 调整。
 - 原文件使用不含 PII 的不可变键写入私有 MinIO，并校验大小和 SHA-256。
 - 同一 SHA-256 的重复上传幂等：复用同一个非终止态 `ingestion_jobs` 行、返回同一个 `job_id`，本次重复对象会被清理，不会重复入队。
-- `POST /upload` 自身的稳定错误码（校验/存储阶段，非任务失败）：`invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`object_storage_unavailable`。任务在 worker 中失败时，稳定错误码写入任务的 `last_error_code`（见下）：`candidate_file_conflict`、`resume_parser_unavailable`、`resume_parser_contract_invalid`、`resume_parser_failed`、`ai_service_unavailable`、`ai_service_configuration_invalid`、`ai_invalid_output`，以及未分类异常的兜底码 `ingestion_worker_error`。
+- `POST /upload` 自身的稳定错误码（校验/存储阶段，非任务失败）：`invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`object_storage_unavailable`。任务在 worker 中失败时，稳定错误码写入任务的 `last_error_code`（见下）：`candidate_file_conflict`、`resume_parser_unavailable`、`resume_parser_contract_invalid`、`resume_parser_failed`、`ai_service_unavailable`、`ai_service_configuration_invalid`、`ai_invalid_output`，以及未分类异常的兜底码 `ingestion_worker_error`；
+批量上传单文件遇到未分类异常时的兜底码是 `ingestion_failed`（见下方 WP3 批量上传）。
 
 升级已有数据库后，部署前必须检查旧候选人的原文件元数据；非零结果需要先回填或隔离，不能宣称历史文件已完成持久化：
 
@@ -188,9 +189,9 @@ WHERE raw_file_key IS NULL
 `retryable_failed`/`terminal_failed`）在 Celery worker 中异步处理：
 
 - **`POST /api/v1/candidates/upload`** → `202 {job_id, batch_id, state}`：校验、恶意扫描、写入私有 MinIO、创建（或按 SHA-256 复用）`ingestion_jobs` 行后立即返回，并把 `job_id` 交给 `ingest.parse_and_score` 任务。
-- **`POST /api/v1/candidates/batch`** → `202 {batch_id, jobs: [{job_id, state, error_code?}]}`：一次请求上传多个文件，共享一个 `batch_id`；每个文件独立校验/存储/入队，单个文件失败（校验、存储或其他异常）只记录该文件的 `terminal_failed` 结果，不影响批次内其他文件；批次大小上限由 `INGESTION_BATCH_MAX_FILES` 控制，超限返回 `413 batch_too_large`。
+- **`POST /api/v1/candidates/batch`** → `202 {batch_id, jobs: [{job_id, state, error_code?}]}`：一次请求上传多个文件，共享一个 `batch_id`；每个文件独立校验/存储/入队。单个文件的校验或存储失败（或其他未分类异常）**只**在这个 `202` 响应体里同步报告为 `{state: "terminal_failed", error_code}`——该文件从未被写入 MinIO，也**不会**创建 `ingestion_jobs` 行；不影响批次内其他文件。批次大小上限由 `INGESTION_BATCH_MAX_FILES` 控制，超限返回 `413 batch_too_large`。
 - **`GET /api/v1/candidates/jobs/{job_id}`** → `{state, attempts, last_error_code, candidate_id, score_id, batch_id}` 或 `404`。
-- **`GET /api/v1/candidates/batches/{batch_id}`** → `{total, by_state}`（按状态聚合计数）或 `404`（无效 UUID 或没有任何任务属于该批次）。
+- **`GET /api/v1/candidates/batches/{batch_id}`** → `{total, by_state}`（按状态聚合计数）或 `404`（无效 UUID 或没有任何任务属于该批次）。由于被拒绝的文件从未产生 `ingestion_jobs` 行，这个聚合结果只反映成功入队的任务；如果一个批次里的文件全部被拒绝（零个持久化任务），该接口会返回 `404`，与未知 `batch_id` 的情形一致。
 
 **Celery Beat 回收/重试 sweeper**（`ingest.sweep`，每 `INGESTION_SWEEP_INTERVAL_SECONDS` 秒运行一次）：
 
