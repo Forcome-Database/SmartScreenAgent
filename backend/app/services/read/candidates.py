@@ -72,7 +72,9 @@ async def list_candidates(
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     rows = (
         await db.execute(
-            base.order_by(Candidate.created_at.desc()).offset(page.offset).limit(page.page_size)
+            base.order_by(Candidate.created_at.desc(), Candidate.id.desc())
+            .offset(page.offset)
+            .limit(page.page_size)
         )
     ).all()
     items: list[CandidateListItem] = []
@@ -113,6 +115,9 @@ async def get_candidate_detail(
             .where(Score.candidate_id == candidate_id)
         )
     ).all()
+    name = decrypt_pii(candidate.name_cipher)
+    phone = decrypt_pii(candidate.phone_cipher) if candidate.phone_cipher else None
+    email = decrypt_pii(candidate.email_cipher) if candidate.email_cipher else None
     db.add(
         AuditLog(
             event_type="pii_decrypt",
@@ -125,9 +130,9 @@ async def get_candidate_detail(
     await db.commit()
     return CandidateDetail(
         candidate_id=candidate.id,
-        name=decrypt_pii(candidate.name_cipher),
-        phone=decrypt_pii(candidate.phone_cipher) if candidate.phone_cipher else None,
-        email=decrypt_pii(candidate.email_cipher) if candidate.email_cipher else None,
+        name=name,
+        phone=phone,
+        email=email,
         age=extracted.get("age"),
         education=extracted.get("education"),
         experiences=extracted.get("experiences", []),
@@ -181,10 +186,11 @@ async def get_candidate_raw_file(
     ).scalar_one_or_none()
     if candidate is None or not candidate.raw_file_key:
         return None
+    storage = ResumeStorageService()
+    if not await storage.object_exists(candidate.raw_file_key):
+        return None
     ttl = get_settings().RAW_FILE_PRESIGN_TTL_SECONDS
-    url = await ResumeStorageService().presigned_get_url(
-        candidate.raw_file_key, expires_seconds=ttl
-    )
+    url = await storage.presigned_get_url(candidate.raw_file_key, expires_seconds=ttl)
     db.add(
         AuditLog(
             event_type="raw_file_access",

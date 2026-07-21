@@ -36,6 +36,8 @@ class StorageClient(Protocol):
 
     def stat_object(self, key: str) -> ObjectStat: ...
 
+    def object_exists(self, key: str) -> bool: ...
+
     def delete_object(self, key: str) -> None: ...
 
     def download_object(self, key: str, destination: Path) -> None: ...
@@ -131,6 +133,9 @@ class ResumeStorageService:
         return await to_thread.run_sync(
             lambda: self.storage.presigned_get_url(key, expires_seconds=expires_seconds)
         )
+
+    async def object_exists(self, key: str) -> bool:
+        return await to_thread.run_sync(lambda: self.storage.object_exists(key))
 
     async def download_verified(self, stored: StoredResume, destination: Path) -> None:
         try:
