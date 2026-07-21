@@ -58,6 +58,60 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
                   ))
                 )}
               </div>
+              <div className="space-y-2">
+                <div className="font-medium">工作经历</div>
+                {query.data.experiences.length === 0 ? (
+                  <p className="text-muted-foreground">暂无工作经历</p>
+                ) : (
+                  query.data.experiences.map((exp, i) => {
+                    const company = typeof exp.company === "string" ? exp.company : null;
+                    const title = typeof exp.title === "string" ? exp.title : null;
+                    const startDate =
+                      typeof exp.start_date === "string" || typeof exp.start_date === "number"
+                        ? exp.start_date
+                        : null;
+                    const endDate =
+                      typeof exp.end_date === "string" || typeof exp.end_date === "number"
+                        ? exp.end_date
+                        : null;
+                    const period =
+                      typeof exp.period === "string"
+                        ? exp.period
+                        : startDate || endDate
+                          ? `${startDate ?? "—"} ~ ${endDate ?? "—"}`
+                          : null;
+                    const otherEntries = Object.entries(exp).filter(
+                      ([key, value]) =>
+                        !["company", "title", "period", "start_date", "end_date"].includes(key) &&
+                        (typeof value === "string" || typeof value === "number") &&
+                        value !== "",
+                    );
+                    return (
+                      <div key={i} className="rounded-md border p-2">
+                        <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                          <span className="font-medium">
+                            {company || title ? [company, title].filter(Boolean).join(" · ") : `经历 ${i + 1}`}
+                          </span>
+                          {period ? <span className="text-muted-foreground text-xs">{period}</span> : null}
+                        </div>
+                        {company && title ? (
+                          <div className="text-muted-foreground text-xs">{title}</div>
+                        ) : null}
+                        {otherEntries.length > 0 ? (
+                          <dl className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-xs">
+                            {otherEntries.map(([key, value]) => (
+                              <div key={key} className="contents">
+                                <dt className="text-muted-foreground">{key}</dt>
+                                <dd>{String(value)}</dd>
+                              </div>
+                            ))}
+                          </dl>
+                        ) : null}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
             </CardContent>
           </Card>
         ) : null}

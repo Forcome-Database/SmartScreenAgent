@@ -25,4 +25,28 @@ describe("Scorecard", () => {
     expect(screen.getByText("82")).toBeInTheDocument();
     expect(screen.getByText("独立负责北美大客户开发")).toBeInTheDocument();
   });
+
+  it("renders hard-filter rejection reason", () => {
+    render(
+      <Scorecard
+        detail={{
+          score_id: 2,
+          candidate_id: 8,
+          jd_code: "FT",
+          rule_version: "v1",
+          total_score: 0,
+          grade: "REJECTED",
+          hard_filter_result: {
+            rejected: true,
+            failed_filter_ids: ["age_max"],
+            audit_entries: [{ filter_id: "age_max", audit_tag: "age", rule: "age <= 45" }],
+          },
+          rule_dimensions: {},
+          judge_dimensions: null,
+        }}
+      />,
+    );
+    expect(screen.getByText("拒绝")).toBeInTheDocument();
+    expect(screen.getByText(/age <= 45/)).toBeInTheDocument();
+  });
 });
