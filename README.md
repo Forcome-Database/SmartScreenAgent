@@ -8,7 +8,7 @@ AI-driven resume screening agent for HR.
 
 **WP0 可重复集成基线、WP1 安全与原文件完整性、WP2 生产解析器契约与校验 AI 输出均已完成并通过托管 CI**：候选人写接口已强制 JWT/RBAC，上传经流式大小/类型/文件签名校验并持久化到私有 MinIO；MinerU 已切换到官方 API v4，简历抽取与 LLM judge 输出经严格 Pydantic 与证据溯源校验后才能落库。WP2 托管验收见 [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)。
 
-**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）现已 Ready for planning**；前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）In progress**：只读的候选人/JD/规则版本接口已实现并通过本地全量门禁，尚待托管 CI 验收后才会标记为 Complete；前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 
@@ -216,6 +216,51 @@ GROUP BY candidate_id, jd_id, rule_version_id
 HAVING count(*) > 1;
 ```
 
+### WP4 — 只读 API（候选人/JD/规则版本）
+
+在 WP1（JWT/RBAC）与 WP3（可恢复异步任务）之上新增的只读 HTTP 面，供 HR 客户端完成
+“上传 → 轮询状态 → 列表 → 查看 → 重新评分”闭环而无需直接访问数据库。全部路由要求
+Bearer JWT 且角色属于 `hr`、`hr_lead`、`admin`；未知资源统一返回 `404 {code, message}`。
+
+**候选人两种列表**（均不解密 PII、不写审计日志）：
+
+- 岗位维度排行榜：`GET /api/v1/jds/{code}/candidates?grade=&page=&page_size=` —— 返回该 JD **当前生效规则版本**下的评分结果，按 `total_score` 降序（`Score.id` 兜底稳定排序），每项 `{candidate_id, score_id, total_score, grade, rule_version, scored_at}`；JD 不存在返回 `404`。
+- 全量候选人列表：`GET /api/v1/candidates?state=&page=&page_size=` —— 按创建时间倒序，`latest_state` 取该候选人最近一条 `ingestion_jobs` 的状态（无任务记录为 `null`），每项 `{candidate_id, created_at, latest_state, scored_jd_codes}`。
+
+**候选人详情（PII，审计）**：`GET /api/v1/candidates/{id}` 解密姓名/电话/邮箱并返回
+`{candidate_id, name, phone, email, age, education, experiences, source, created_at, scores}`；
+每次调用精确写入一条 `event_type="pii_decrypt"` 的 `audit_logs` 记录（`actor`/`candidate_id`/
+`purpose`/`trace_id`，不含明文）；候选人不存在返回 `404`。
+
+**评分详情（评分卡，含证据）**：`GET /api/v1/candidates/{id}/scores/{score_id}` 返回
+`{score_id, candidate_id, jd_code, rule_version, total_score, grade, hard_filter_result, rule_dimensions, judge_dimensions}`，其中 `judge_dimensions` 含每个维度的档位、分数、`evidence_quotes`、理由、置信度与建议追问；不属于该候选人的评分返回 `404`。评分卡本身不视为 PII 视图。
+
+**原始文件预签名下载（审计）**：`GET /api/v1/candidates/{id}/raw-file` 返回
+`{url, expires_in_seconds}`（默认 `RAW_FILE_PRESIGN_TTL_SECONDS=300` 秒的 MinIO 预签名 GET
+URL），每次调用精确写入一条 `event_type="raw_file_access"` 的审计记录；预签名 URL 不写入日志；
+候选人或原始对象不存在返回 `404`；MinIO 不可用返回 `503 object_storage_unavailable`。
+
+**JD 列表/详情**：`GET /api/v1/jds?status=&page=&page_size=` 返回
+`{code, name, status, active_rule_version}` 列表；`GET /api/v1/jds/{code}` 返回含
+`active_rule_version: {id, version, published_at}` 的详情；未知 JD 返回 `404`。
+
+**规则版本列表与结构化 diff**：`GET /api/v1/jds/{code}/rule-versions?page=&page_size=` 按
+`published_at` 降序返回 `{id, version, published_at, published_by_user_id, notes,
+golden_set_metrics, is_active}`（`is_active` 仅在 JD 当前生效版本上为 `true`）；
+`GET /api/v1/jds/{code}/rule-versions/{from_version}/diff/{to_version}` 返回
+`{jd_code, from_version, to_version, changes: [{path, kind, before, after}]}`，覆盖
+`passing_threshold`、`hard_filters[id]`、`rule_dimensions[id]`、`judge_dimensions[id]`、
+`grade_thresholds[grade]`，`kind` 为 `added`/`removed`/`changed`；JD 或任一版本不存在返回 `404`。
+
+**分页**：所有列表接口使用统一的 offset 分页——`?page=`（从 1 开始，默认 1）与
+`?page_size=`（默认 `READ_PAGE_SIZE_DEFAULT=20`，上限 `READ_PAGE_SIZE_MAX=100`），响应体统一
+包裹为 `{items, page, page_size, total}`。
+
+**读写边界**：除候选人详情与原始文件下载外，其余列表/详情接口**从不解密 PII、也从不写
+审计日志**——只有这两个接口触发解密与审计。设计文档：
+[`docs/superpowers/specs/2026-07-21-wp4-read-apis-design.md`](docs/superpowers/specs/2026-07-21-wp4-read-apis-design.md)；
+实施计划：[`docs/superpowers/plans/2026-07-21-wp4-read-apis.md`](docs/superpowers/plans/2026-07-21-wp4-read-apis.md)。
+
 ### MinerU 解析器模式
 
 `MINERU_MODE` 环境变量：
@@ -253,7 +298,7 @@ uv run python scripts/verify_external_contracts.py
 ### 后续工作范围
 
 - 段 D 双引擎交叉打分（cross_engine_diff / is_suspicious 字段已存模型，本期始终 None/False）
-- What-If 规则模拟、规则版本 diff、黄金集回归（设计 §6）
+- 规则版本受控发布（写入工作流）、What-If 规则模拟、黄金集回归（设计 §6）；只读的规则版本列表与 diff 已随 WP4 上线，见上文
 - 钉钉招聘文档 API 同步任务（设计 §8.2）
 - 评分卡 Web UI 与所有前端页面（设计 §10）
 - HR 复核反馈回流（设计 §7）
