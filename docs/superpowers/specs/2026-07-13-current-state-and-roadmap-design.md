@@ -399,7 +399,7 @@ The following remain later extensions:
 
 ### WP3: Durable asynchronous ingestion and batch processing
 
-**Status:** In progress - implementation is complete: `ingestion_jobs` state machine and migration, `IngestionJobService` (sha256 idempotency, lease claim, transitions, batch aggregate), Celery worker orchestration (`ingest.parse_and_score`) with typed retryable/terminal error classification, an idempotent `(candidate_id, jd_id, rule_version_id)` score upsert, a Celery Beat sweeper (`ingest.sweep`) that reclaims lease-expired jobs and re-enqueues/terminates by attempt cap, async upload/batch/status HTTP endpoints, and end-to-end plus crash-recovery integration tests (a job forced into `parsing` with an expired lease against a real stored object, swept and retried through a real worker, produces exactly one candidate). The local strict verification gate (offline suite, full integration suite including the new async/crash-recovery tests, Ruff, mypy) passed; hosted CI verification is in progress and WP3 is not yet marked Complete.
+**Status:** Complete on 2026-07-21 - `ingestion_jobs` state machine and migration, `IngestionJobService` (sha256 idempotency, lease claim, transitions, batch aggregate), Celery worker orchestration (`ingest.parse_and_score`) with typed retryable/terminal error classification, an idempotent `(candidate_id, jd_id, rule_version_id)` score upsert, a Celery Beat sweeper (`ingest.sweep`) that reclaims lease-expired jobs, re-enqueues/terminates by attempt cap, and rescans stranded `queued` jobs, async upload/batch/status HTTP endpoints, and end-to-end plus crash-recovery integration tests (a job forced into `parsing` with an expired lease against a real stored object, swept and retried through a real worker, produces exactly one candidate). Hosted [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194) passed Python 3.10, Python 3.14, and strict integration at commit `4bd7130` (WP3 range `5c57cab..4bd7130`, PR #3). Local evidence: 252 offline and 64 integration tests passed; Ruff, mypy, and the Alembic round trip to head `2f27938b430b` passed.
 
 **Goal:** move long-running work out of HTTP requests and support retries and progress.
 
@@ -410,6 +410,8 @@ The following remain later extensions:
 **Exit gate:** upload responds after durable storage and job creation; workers can restart without duplicate candidates or scores; batch progress is queryable.
 
 ### WP4: Read APIs and rule lifecycle
+
+**Status:** Ready for planning - unblocked on 2026-07-21 once WP3 delivered durable job/candidate states and passed hosted CI.
 
 **Goal:** expose the stable backend surface required by an HR client.
 

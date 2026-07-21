@@ -8,7 +8,7 @@ AI-driven resume screening agent for HR.
 
 **WP0 可重复集成基线、WP1 安全与原文件完整性、WP2 生产解析器契约与校验 AI 输出均已完成并通过托管 CI**：候选人写接口已强制 JWT/RBAC，上传经流式大小/类型/文件签名校验并持久化到私有 MinIO；MinerU 已切换到官方 API v4，简历抽取与 LLM judge 输出经严格 Pydantic 与证据溯源校验后才能落库。WP2 托管验收见 [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)。
 
-**WP3 可恢复异步任务实现已完成，本地验证通过，托管 CI 验证进行中**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结，不会产生重复候选人或评分。读 API（WP4）与前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）现已 Ready for planning**；前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 

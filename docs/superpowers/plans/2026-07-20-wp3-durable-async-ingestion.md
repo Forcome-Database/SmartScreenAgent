@@ -1300,24 +1300,32 @@ git commit -m "test(wp3): end-to-end async ingestion, crash recovery, docs, and 
 
 ## Task 9: Push, hosted CI, and WP3 exit review
 
-- [ ] **Step 1: Push the branch and open a PR**
+- [x] **Step 1: Push the branch and open a PR**
 
 ```bash
 git push -u origin codex/wp3-durable-async-ingestion
 gh pr create --title "WP3: durable asynchronous ingestion and batch processing" --body "<summary + exit evidence>"
 ```
 
-- [ ] **Step 2: Confirm hosted CI**
+- [x] **Step 2: Confirm hosted CI**
 
 Watch the `verify` run for the PR head; require `unit-and-static (3.10)`, `unit-and-static (3.14)`, and `integration` to pass.
 
-- [ ] **Step 3: Record completion evidence**
+- [x] **Step 3: Record completion evidence**
 
 In this plan and the roadmap: exact commit range, hosted run URL, offline/integration counts, and the duplicate-score reconciliation result on the configured deployment.
 
-- [ ] **Step 4: Mark WP3 Complete and WP4 Ready for planning**
+- [x] **Step 4: Mark WP3 Complete and WP4 Ready for planning**
 
 Only after every offline and integration exit criterion and hosted CI pass.
+
+### Completion evidence (2026-07-21)
+
+- **Scoped commits:** WP3 range `5c57cab..4bd7130` (design spec, plan, and 18 implementation/fix commits) on branch `codex/wp3-durable-async-ingestion`, [PR #3](https://github.com/Forcome-Database/SmartScreenAgent/pull/3) into `main`.
+- **Hosted CI:** [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194) passed `unit-and-static (3.10)`, `unit-and-static (3.14)`, and strict `integration` at commit `4bd7130`. The Linux `integration` job runs the full `scripts/verify.py` (managed compose stack, migration round trip, clean-state assertions) which cannot bind port 61000 on the Windows dev host.
+- **Local evidence (Windows/Python 3.14):** 252 offline tests and 64 integration tests passed (real PostgreSQL/Redis/MinIO/worker, including end-to-end upload→worker→status and crash-recovery-produces-one-candidate); Ruff and mypy clean; Alembic upgrade/downgrade round trip to head `2f27938b430b`.
+- **Migrations:** `0e57f449e555` (ingestion_jobs table + scores uniqueness) and `2f27938b430b` (sha256 active-job partial unique index). The `scores` unique constraint has a duplicate-row reconciliation gate documented in the README; the configured deployment must run it before applying.
+- **Deferred non-blocking follow-ups:** remove the now-dead `run_parse_and_score`; close the narrow duplicate-branch crash window (object deleted before `candidate_id` commit); add a `lease_expired` marker on sweeper reclaim.
 
 ---
 
