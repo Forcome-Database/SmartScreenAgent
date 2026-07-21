@@ -85,15 +85,30 @@ async def test_full_p2_flow(
     jd.active_rule_version_id = rv.id
     await db_session.commit()
 
-    # 2. Upload resume (synchronous 200 "parsed")
+    # 2. Upload resume (async: 202 + job_id, then drive the worker inline —
+    # same claim/run_job path the Celery task uses, see test_tasks_ingest.py)
+    from backend.app.models import IngestionJob
+    from backend.app.services.ingestion.jobs import IngestionJobService
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+    from backend.app.tasks.ingest import run_job
+
     headers = await auth_headers()
     resp = await client.post(
         "/api/v1/candidates/upload",
         files={"file": ("r.pdf", valid_pdf_bytes, "application/pdf")},
         headers=headers,
     )
-    assert resp.status_code == 200, resp.text
-    cid = resp.json()["candidate_id"]
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+
+    ingestion_svc = IngestionJobService(db_session)
+    claimed = await ingestion_svc.claim(job_id, lease_seconds=900)
+    await db_session.commit()
+    await run_job(db=db_session, job=claimed, storage=ResumeStorageService(storage=minio_storage))
+
+    refreshed_job = await db_session.get(IngestionJob, job_id)
+    assert refreshed_job.candidate_id is not None
+    cid = refreshed_job.candidate_id
 
     # 3. Score
     resp = await client.post(
@@ -127,8 +142,11 @@ async def test_p2_hard_filter_rejection(
 
     from backend.app.models import JD, AuditLog, RuleVersion
     from backend.app.rules.excel_importer import import_workbook
+    from backend.app.services.ingestion.jobs import IngestionJobService
     from backend.app.services.parser.extractor import ExtractedResume
     from backend.app.services.parser.mineru_client import ParseResult
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+    from backend.app.tasks.ingest import run_job
 
     monkeypatch.setenv("MINERU_MODE", "stub")
     monkeypatch.setattr(
@@ -177,10 +195,20 @@ async def test_p2_hard_filter_rejection(
         params={"jd_code": "FOREIGN_TRADE"},
         headers=await auth_headers(),
     )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
 
-    # The upload route uses its own session via `get_db` and commits there.
-    # Expire our session so the next query reloads audit rows from the DB.
+    # Upload only validates/stores/enqueues; drive the worker inline (same
+    # claim/run_job path the Celery task uses) so scoring — and the hard
+    # filter rejection audit log it produces — actually runs.
+    ingestion_svc = IngestionJobService(db_session)
+    claimed = await ingestion_svc.claim(job_id, lease_seconds=900)
+    await db_session.commit()
+    await run_job(db=db_session, job=claimed, storage=ResumeStorageService(storage=minio_storage))
+
+    # The upload route (and the worker) use their own session lifecycle via
+    # `get_db`/`AsyncSessionLocal` and commit there. Expire our session so
+    # the next query reloads audit rows from the DB.
     db_session.expire_all()
     audits = (
         await db_session.execute(

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
@@ -44,6 +45,36 @@ class ScoringPipeline:
         self.db = db
         self.judge = judge or LLMJudge()
 
+    async def _upsert_score(self, **values: Any) -> tuple[int, bool]:
+        """Insert a `Score` row idempotently on `uq_scores_candidate_jd_rule`.
+
+        Returns `(score_id, created)`. On conflict, `created` is `False` and
+        `score_id` is the id of the pre-existing row — a retried scoring run
+        for the same (candidate, jd, rule_version) returns that row instead
+        of raising `IntegrityError`.
+        """
+        stmt = (
+            pg_insert(Score)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=["candidate_id", "jd_id", "rule_version_id"]
+            )
+            .returning(Score.id)
+        )
+        score_id = (await self.db.execute(stmt)).scalar_one_or_none()
+        if score_id is not None:
+            return score_id, True
+        score_id = (
+            await self.db.execute(
+                select(Score.id).where(
+                    Score.candidate_id == values["candidate_id"],
+                    Score.jd_id == values["jd_id"],
+                    Score.rule_version_id == values["rule_version_id"],
+                )
+            )
+        ).scalar_one()
+        return score_id, False
+
     async def run(self, *, candidate_id: int, jd_id: int) -> PipelineResult:
         candidate = (
             await self.db.execute(select(Candidate).where(Candidate.id == candidate_id))
@@ -56,6 +87,24 @@ class ScoringPipeline:
                 select(RuleVersion).where(RuleVersion.id == jd.active_rule_version_id)
             )
         ).scalar_one()
+
+        existing = (
+            await self.db.execute(
+                select(Score).where(
+                    Score.candidate_id == candidate.id,
+                    Score.jd_id == jd.id,
+                    Score.rule_version_id == rv.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return PipelineResult(
+                score_id=existing.id,
+                total_score=float(existing.total_score),
+                grade=existing.grade,
+                rejected=existing.grade == "rejected",
+            )
+
         schema = RuleSchema.model_validate(rv.schema_json)
         extracted: dict[str, Any] = candidate.extracted_json or {}
         extraction_meta = extracted.get("_meta")
@@ -69,22 +118,7 @@ class ScoringPipeline:
         # Stage A — hard filter
         hf = run_hard_filters(candidate=extracted, filters=schema.hard_filters)
         if hf.rejected:
-            for entry in hf.audit_entries:
-                self.db.add(
-                    AuditLog(
-                        event_type="hard_filter_reject",
-                        actor="system",
-                        target_type="candidate",
-                        target_id=candidate.id,
-                        payload={
-                            **entry,
-                            "jd_code": jd.code,
-                            "rule_version": rv.version,
-                        },
-                        rule_version_id=rv.id,
-                    )
-                )
-            score_row = Score(
+            score_id, created = await self._upsert_score(
                 candidate_id=candidate.id,
                 jd_id=jd.id,
                 rule_version_id=rv.id,
@@ -100,11 +134,25 @@ class ScoringPipeline:
                 is_suspicious=False,
                 llm_model_extract=extraction_model,
             )
-            self.db.add(score_row)
-            await self.db.flush()
-            await self.db.refresh(score_row)
+            if created:
+                for entry in hf.audit_entries:
+                    self.db.add(
+                        AuditLog(
+                            event_type="hard_filter_reject",
+                            actor="system",
+                            target_type="candidate",
+                            target_id=candidate.id,
+                            payload={
+                                **entry,
+                                "jd_code": jd.code,
+                                "rule_version": rv.version,
+                            },
+                            rule_version_id=rv.id,
+                        )
+                    )
+                await self.db.flush()
             return PipelineResult(
-                score_id=score_row.id,
+                score_id=score_id,
                 total_score=0,
                 grade="rejected",
                 rejected=True,
@@ -125,7 +173,7 @@ class ScoringPipeline:
         total = rule_total + judge_total
         grade = _grade_from(total, schema)
 
-        score_row = Score(
+        score_id, created = await self._upsert_score(
             candidate_id=candidate.id,
             jd_id=jd.id,
             rule_version_id=rv.id,
@@ -143,26 +191,25 @@ class ScoringPipeline:
             llm_model_extract=extraction_model,
             cost_tokens=judge_result.tokens,
         )
-        self.db.add(score_row)
-        self.db.add(
-            AuditLog(
-                event_type="score",
-                actor="system",
-                target_type="candidate",
-                target_id=candidate.id,
-                payload={
-                    "jd_code": jd.code,
-                    "rule_version": rv.version,
-                    "total": total,
-                    "grade": grade,
-                },
-                rule_version_id=rv.id,
+        if created:
+            self.db.add(
+                AuditLog(
+                    event_type="score",
+                    actor="system",
+                    target_type="candidate",
+                    target_id=candidate.id,
+                    payload={
+                        "jd_code": jd.code,
+                        "rule_version": rv.version,
+                        "total": total,
+                        "grade": grade,
+                    },
+                    rule_version_id=rv.id,
+                )
             )
-        )
-        await self.db.flush()
-        await self.db.refresh(score_row)
+            await self.db.flush()
         return PipelineResult(
-            score_id=score_row.id,
+            score_id=score_id,
             total_score=float(total),
             grade=grade,
             rejected=False,

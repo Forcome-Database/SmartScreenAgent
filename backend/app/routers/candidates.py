@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from uuid import UUID, uuid4
+
+import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.config import get_settings
+from backend.app.config import Settings, get_settings
 from backend.app.database import get_db
 from backend.app.deps import require_roles
-from backend.app.models import JD, User
+from backend.app.models import JD, IngestionJob, User
 from backend.app.scoring.pipeline import ScoringPipeline
 from backend.app.security.crypto import encrypt_pii
+from backend.app.services.ingestion.jobs import IngestionJobService
 from backend.app.services.llm.errors import (
     LLMConfigurationError,
     LLMInvalidOutputError,
@@ -22,21 +26,20 @@ from backend.app.services.parser.errors import (
     MinerUTaskError,
     MinerUUnavailableError,
 )
-from backend.app.services.storage import ResumeStorageService, StorageError
+from backend.app.services.storage import ResumeStorageService, StorageError, StoredResume
 from backend.app.services.upload import UploadValidationError, UploadValidator, get_malware_scanner
-from backend.app.tasks.ingest import (
-    CandidateFileConflict,
-    RawFileReference,
-    run_parse_and_score,
-)
+from backend.app.tasks.ingest import RawFileReference
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/candidates", tags=["candidates"])
 WRITE_ROLES = ("hr", "hr_lead", "admin")
 
 
 class UploadResponse(BaseModel):
-    candidate_id: int
-    status: str = "parsed"
+    job_id: int
+    batch_id: str | None = None
+    state: str = "queued"
 
 
 def _upload_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -70,22 +73,50 @@ def _external_service_error(exc: Exception) -> HTTPException | None:
     return None
 
 
-@router.post("/upload", response_model=UploadResponse, status_code=200)
-async def upload_resume(
-    file: UploadFile = File(...),
-    jd_code: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles(*WRITE_ROLES)),
-) -> UploadResponse:
-    """P2: 同步解析+抽取（1000份/月 体量足够）；P3 钉钉同步任务一起切到 Celery 异步队列."""
-    artifact = None
+def enqueue_job(job_id: int) -> None:
+    """Hand a queued ingestion job off to the Celery worker.
+
+    A thin, module-level wrapper so tests can monkeypatch enqueuing without
+    touching Celery. The import is deferred to keep `backend.app.tasks.ingest`
+    (and its Celery task registration) out of this module's import-time
+    dependency graph.
+    """
+    from backend.app.tasks.ingest import parse_and_score_task
+
+    parse_and_score_task.delay(job_id)
+
+
+async def _process_one_file(
+    file: UploadFile,
+    *,
+    jd_code: str | None,
+    actor: str,
+    batch_id: UUID | None,
+    db: AsyncSession,
+    settings: Settings,
+) -> tuple[IngestionJob, bool]:
+    """Validate, scan, store, and create/reuse an ingestion job for one file.
+
+    Shared by `upload_resume` (single) and `upload_batch` (once per file) so
+    both routes fail identically for a given file: on success the job row is
+    committed and `(job, created)` is returned. On ANY failure — validation,
+    storage, or otherwise — the DB session is rolled back and, if this
+    file's object was already stored in MinIO, that object is deleted
+    before the exception is re-raised (mirrors the `owns_new_object`
+    compensating-delete pattern in
+    `backend.app.tasks.ingest.run_parse_and_score`). The caller decides how
+    to map the propagated exception to a response.
+    """
+    artifact = await UploadValidator().validate(file)
+    storage: ResumeStorageService | None = None
+    stored: StoredResume | None = None
+    object_needs_cleanup = False
     try:
-        settings = get_settings()
-        artifact = await UploadValidator().validate(file)
         await get_malware_scanner(settings.MALWARE_SCAN_MODE).scan(artifact)
         original_name_cipher = encrypt_pii(artifact.original_filename)
         storage = ResumeStorageService()
         stored = await storage.store(artifact)
+        object_needs_cleanup = True
         raw_file = RawFileReference(
             object_key=stored.object_key,
             sha256=stored.sha256,
@@ -93,47 +124,196 @@ async def upload_resume(
             content_type=stored.content_type,
             original_name_cipher=original_name_cipher,
         )
-        result = await run_parse_and_score(
-            db=db,
-            local_file_path=str(artifact.path),
+        job, created = await IngestionJobService(db).create_or_reuse(
             raw_file=raw_file,
-            storage=storage,
             source="upload",
             source_external_id=None,
             jd_code=jd_code,
+            actor=actor,
+            batch_id=batch_id,
+            trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
+        )
+        if not created:
+            # Idempotent resubmission of the same sha256: an active job for
+            # this file already exists, so the object just stored above is
+            # redundant — drop it rather than leaving two copies in MinIO.
+            await storage.delete(stored.object_key)
+            object_needs_cleanup = False
+        await db.commit()
+        object_needs_cleanup = False
+        return job, created
+    except Exception:
+        await db.rollback()
+        if object_needs_cleanup and storage is not None and stored is not None:
+            try:
+                await storage.delete(stored.object_key)
+            except StorageError as cleanup_exc:
+                logger.critical(
+                    "raw_file_cleanup_failed",
+                    trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
+                    object_key=stored.object_key,
+                    sha256=stored.sha256,
+                    error_type=type(cleanup_exc).__name__,
+                )
+        raise
+    finally:
+        artifact.cleanup()
+
+
+@router.post("/upload", response_model=UploadResponse, status_code=202)
+async def upload_resume(
+    file: UploadFile = File(...),
+    jd_code: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(*WRITE_ROLES)),
+) -> UploadResponse:
+    """Validate, persist, and enqueue a resume for asynchronous processing.
+
+    Parsing, extraction, and scoring no longer happen inline here — they run
+    in the Celery worker (`backend.app.tasks.ingest.parse_and_score_task`).
+    This endpoint only validates the upload, scans it, stores the object in
+    MinIO, and creates (or reuses, via sha256 idempotency) the ingestion job
+    row before returning `202`. The work is delegated to `_process_one_file`
+    (shared with `/batch`); unlike `/batch`, a validation or storage failure
+    here is still surfaced directly as the mapped HTTP error, not as a
+    `terminal_failed` result.
+    """
+    settings = get_settings()
+    try:
+        job, created = await _process_one_file(
+            file,
+            jd_code=jd_code,
             actor=f"user:{current_user.id}",
+            batch_id=None,
+            db=db,
+            settings=settings,
         )
     except UploadValidationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    except CandidateFileConflict as exc:
-        raise _upload_error(
-            409,
-            "candidate_file_conflict",
-            "Existing candidate raw file is unavailable",
-        ) from exc
-    except (
-        MinerUUnavailableError,
-        MinerUContractError,
-        MinerUTaskError,
-        LLMUnavailableError,
-        LLMConfigurationError,
-        LLMInvalidResponseError,
-        LLMInvalidOutputError,
-    ) as exc:
-        mapped = _external_service_error(exc)
-        assert mapped is not None
-        raise mapped from exc
     except StorageError as exc:
         raise _upload_error(
-            503,
-            "object_storage_unavailable",
-            "Resume storage is unavailable",
+            503, "object_storage_unavailable", "Resume storage is unavailable"
         ) from exc
     finally:
-        if artifact is not None:
-            artifact.cleanup()
         await file.close()
-    return UploadResponse(candidate_id=result.candidate_id, status=result.status)
+
+    if created:
+        enqueue_job(job.id)
+    return UploadResponse(
+        job_id=job.id,
+        batch_id=str(job.batch_id) if job.batch_id else None,
+        state=job.state,
+    )
+
+
+class BatchJobResult(BaseModel):
+    job_id: int | None = None
+    state: str
+    error_code: str | None = None
+
+
+class BatchResponse(BaseModel):
+    batch_id: str
+    jobs: list[BatchJobResult]
+
+
+@router.post("/batch", response_model=BatchResponse, status_code=202)
+async def upload_batch(
+    files: list[UploadFile] = File(...),
+    jd_code: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(*WRITE_ROLES)),
+) -> BatchResponse:
+    """Validate, persist, and enqueue multiple resumes under one shared batch.
+
+    Each file is handled independently via `_process_one_file`: ANY failure
+    for one file — validation, storage unavailability, or any other
+    unexpected error — records a `terminal_failed` result (with a stable
+    error_code only, never the raw exception body) for that file only and
+    does not abort the rest of the batch. `_process_one_file` commits and
+    compensates per file, so an earlier file's already-stored object is
+    never orphaned by a later file's failure. Only successfully created
+    jobs are enqueued, once every file has been processed.
+    """
+    settings = get_settings()
+    if len(files) > settings.INGESTION_BATCH_MAX_FILES:
+        raise _upload_error(413, "batch_too_large", "Too many files in one batch")
+
+    batch_id = uuid4()
+    results: list[BatchJobResult] = []
+    to_enqueue: list[int] = []
+
+    for file in files:
+        try:
+            job, created = await _process_one_file(
+                file,
+                jd_code=jd_code,
+                actor=f"user:{current_user.id}",
+                batch_id=batch_id,
+                db=db,
+                settings=settings,
+            )
+            if created:
+                to_enqueue.append(job.id)
+            results.append(BatchJobResult(job_id=job.id, state=job.state))
+        except UploadValidationError as exc:
+            results.append(BatchJobResult(state="terminal_failed", error_code=exc.code))
+        except StorageError:
+            results.append(
+                BatchJobResult(
+                    state="terminal_failed", error_code="object_storage_unavailable"
+                )
+            )
+        except Exception as exc:
+            logger.error(
+                "batch_file_ingestion_failed",
+                trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
+                error_type=type(exc).__name__,
+            )
+            results.append(
+                BatchJobResult(state="terminal_failed", error_code="ingestion_failed")
+            )
+        finally:
+            await file.close()
+
+    for job_id in to_enqueue:
+        enqueue_job(job_id)
+    return BatchResponse(batch_id=str(batch_id), jobs=results)
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(
+    job_id: int,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(require_roles(*WRITE_ROLES)),
+) -> dict:
+    job = await db.get(IngestionJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "state": job.state,
+        "attempts": job.attempts,
+        "last_error_code": job.last_error_code,
+        "candidate_id": job.candidate_id,
+        "score_id": job.score_id,
+        "batch_id": str(job.batch_id) if job.batch_id else None,
+    }
+
+
+@router.get("/batches/{batch_id}")
+async def get_batch(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(require_roles(*WRITE_ROLES)),
+) -> dict:
+    try:
+        parsed = UUID(batch_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="batch not found") from exc
+    counts = await IngestionJobService(db).batch_counts(parsed)
+    if not counts:
+        raise HTTPException(status_code=404, detail="batch not found")
+    return {"total": sum(counts.values()), "by_state": counts}
 
 
 class ScoreRequest(BaseModel):

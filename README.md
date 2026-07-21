@@ -8,7 +8,7 @@ AI-driven resume screening agent for HR.
 
 **WP0 可重复集成基线、WP1 安全与原文件完整性、WP2 生产解析器契约与校验 AI 输出均已完成并通过托管 CI**：候选人写接口已强制 JWT/RBAC，上传经流式大小/类型/文件签名校验并持久化到私有 MinIO；MinerU 已切换到官方 API v4，简历抽取与 LLM judge 输出经严格 Pydantic 与证据溯源校验后才能落库。WP2 托管验收见 [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)。
 
-项目仍不能直接公网部署：**WP3 尚需把同步处理切换为可恢复的异步任务**（当前上传接口仍同步调用两个外部 AI 服务），读 API（WP4）与前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）现已 Ready for planning**；前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 
@@ -36,14 +36,19 @@ uv run uvicorn backend.app.main:app --reload
 # 6. 启动 Celery worker (新终端)
 uv run celery -A backend.app.tasks.celery_app worker -l info
 
-# 7. 验证
+# 7. 启动 Celery Beat (新终端；定期触发 ingest.sweep 回收/重试处理中任务)
+uv run celery -A backend.app.tasks.celery_app beat -l info
+
+# 8. 验证
 curl http://127.0.0.1:8000/healthz
 # 应返回 {"status":"ok","checks":{"db":"ok","redis":"ok","minio":"ok"}}
 
-# 8. 跑测试
+# 9. 跑测试
 uv run pytest                 # 全部
 uv run pytest -m "not integration"  # 仅单元
 ```
+
+`docker-compose.yml` 只编排基础设施（PostgreSQL/Redis/MinIO）；应用、worker、beat 均通过 `uv run` 在宿主机启动，不在 compose 里。
 
 注：本机若 `localhost` 被劫持到其他服务，所有 curl 用 `127.0.0.1`。
 
@@ -129,7 +134,7 @@ P2 完成了简历评分核心闭环：Excel 规则导入 → 解析 → 抽取 
 uv run python -m backend.app.cli.import_rules import-rules 招聘JD整理-智能筛简历.xlsx
 ```
 
-### 上传简历 + 评分（同步）
+### 上传简历（异步）+ 评分
 
 ```bash
 # 用钉钉授权码换取 JWT（示例需要 jq）
@@ -137,12 +142,19 @@ TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/dingtalk/login \
   -H "Content-Type: application/json" \
   -d '{"auth_code":"<dingtalk-auth-code>"}' | jq -r .token)
 
-# 上传简历，返回 candidate_id 和 parsed/duplicate 状态
-curl -F "file=@resume.pdf" \
+# 上传简历：立即返回 202 + job_id，不在请求内解析/抽取/评分
+curl -i -F "file=@resume.pdf" \
   -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8000/api/v1/candidates/upload
+# 202 {"job_id": 123, "batch_id": null, "state": "queued"}
 
-# 对指定岗位评分
+# 轮询任务状态，直到 state 落在 ready/completed（或 terminal_failed）
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/api/v1/candidates/jobs/123
+# {"state": "completed", "attempts": 1, "last_error_code": null,
+#  "candidate_id": 45, "score_id": 9, "batch_id": null}
+
+# 对指定岗位评分（同步，独立于上传/任务队列）
 curl -X POST http://127.0.0.1:8000/api/v1/candidates/<id>/score \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -154,8 +166,9 @@ curl -X POST http://127.0.0.1:8000/api/v1/candidates/<id>/score \
 - 支持 PDF、DOCX、PNG、JPEG；旧版 DOC 暂不支持。
 - 默认最大 20 MiB，可用 `MAX_RESUME_FILE_BYTES` 调整。
 - 原文件使用不含 PII 的不可变键写入私有 MinIO，并校验大小和 SHA-256。
-- 重复身份返回 `status: duplicate`，本次重复对象会被清理。
-- 稳定错误码包括 `invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`candidate_file_conflict`、`object_storage_unavailable`、`resume_parser_unavailable`、`resume_parser_contract_invalid`、`resume_parser_failed`、`ai_service_unavailable`、`ai_service_configuration_invalid` 和 `ai_invalid_output`。
+- 同一 SHA-256 的重复上传幂等：复用同一个非终止态 `ingestion_jobs` 行、返回同一个 `job_id`，本次重复对象会被清理，不会重复入队。
+- `POST /upload` 自身的稳定错误码（校验/存储阶段，非任务失败）：`invalid_upload`、`file_too_large`、`unsupported_media_type`、`invalid_document`、`object_storage_unavailable`。任务在 worker 中失败时，稳定错误码写入任务的 `last_error_code`（见下）：`candidate_file_conflict`、`resume_parser_unavailable`、`resume_parser_contract_invalid`、`resume_parser_failed`、`ai_service_unavailable`、`ai_service_configuration_invalid`、`ai_invalid_output`，以及未分类异常的兜底码 `ingestion_worker_error`；
+批量上传单文件遇到未分类异常时的兜底码是 `ingestion_failed`（见下方 WP3 批量上传）。
 
 升级已有数据库后，部署前必须检查旧候选人的原文件元数据；非零结果需要先回填或隔离，不能宣称历史文件已完成持久化：
 
@@ -167,6 +180,40 @@ WHERE raw_file_key IS NULL
    OR raw_file_size_bytes IS NULL
    OR raw_file_content_type IS NULL
    OR raw_file_original_name_cipher IS NULL;
+```
+
+### WP3 — 可恢复异步任务、批量上传与状态查询
+
+简历解析/抽取/评分不再阻塞 HTTP 请求，改为经由 `ingestion_jobs` 状态机
+（`queued -> parsing -> extracting -> (ready | scoring -> completed)`，失败分支
+`retryable_failed`/`terminal_failed`）在 Celery worker 中异步处理：
+
+- **`POST /api/v1/candidates/upload`** → `202 {job_id, batch_id, state}`：校验、恶意扫描、写入私有 MinIO、创建（或按 SHA-256 复用）`ingestion_jobs` 行后立即返回，并把 `job_id` 交给 `ingest.parse_and_score` 任务。
+- **`POST /api/v1/candidates/batch`** → `202 {batch_id, jobs: [{job_id, state, error_code?}]}`：一次请求上传多个文件，共享一个 `batch_id`；每个文件独立校验/存储/入队。单个文件的校验或存储失败（或其他未分类异常）**只**在这个 `202` 响应体里同步报告为 `{state: "terminal_failed", error_code}`——该文件从未被写入 MinIO，也**不会**创建 `ingestion_jobs` 行；不影响批次内其他文件。批次大小上限由 `INGESTION_BATCH_MAX_FILES` 控制，超限返回 `413 batch_too_large`。
+- **`GET /api/v1/candidates/jobs/{job_id}`** → `{state, attempts, last_error_code, candidate_id, score_id, batch_id}` 或 `404`。
+- **`GET /api/v1/candidates/batches/{batch_id}`** → `{total, by_state}`（按状态聚合计数）或 `404`（无效 UUID 或没有任何任务属于该批次）。由于被拒绝的文件从未产生 `ingestion_jobs` 行，这个聚合结果只反映成功入队的任务；如果一个批次里的文件全部被拒绝（零个持久化任务），该接口会返回 `404`，与未知 `batch_id` 的情形一致。
+
+**Celery Beat 回收/重试 sweeper**（`ingest.sweep`，每 `INGESTION_SWEEP_INTERVAL_SECONDS` 秒运行一次）：
+
+1. 回收：处理中状态（`parsing`/`extracting`/`scoring`）且租约（`lease_expires_at`）已过期的任务——判定持有者 worker 已死——转入 `retryable_failed`。
+2. 重新入队：`retryable_failed` 且 `attempts < INGESTION_MAX_ATTEMPTS` 的任务转回 `queued` 并重新提交给 Celery。
+3. 终结：`retryable_failed` 且已达 `INGESTION_MAX_ATTEMPTS` 上限的任务转入 `terminal_failed`，不再重试。
+
+Worker 崩溃恢复不会产生重复数据：候选人按 `pii_hash` 唯一，评分按
+`(candidate_id, jd_id, rule_version_id)` 唯一（`uq_scores_candidate_jd_rule`
+约束 + upsert），且一个任务若已经在崩溃前创建了候选人（`job.candidate_id`
+已回填），重试时会跳过下载/解析/抽取，直接从评分/完成阶段继续——不会对同一
+个已删除的原始对象重新发起下载。
+
+**部署前的重复评分回归门禁**：在应用 `uq_scores_candidate_jd_rule` 唯一约束
+的迁移前，必须先确认已部署数据库中没有违反该约束的历史行；非零结果需要先
+回填/去重或隔离，不能直接迁移：
+
+```sql
+SELECT candidate_id, jd_id, rule_version_id, count(*) AS duplicate_count
+FROM scores
+GROUP BY candidate_id, jd_id, rule_version_id
+HAVING count(*) > 1;
 ```
 
 ### MinerU 解析器模式

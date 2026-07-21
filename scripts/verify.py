@@ -43,7 +43,7 @@ TEST_ENV = {
     "SMARTSCREEN_REQUIRE_INTEGRATION": "1",
     "COMPOSE_PROJECT_NAME": COMPOSE_PROJECT_NAME,
 }
-HEAD_REVISION = "b57c2f9e1a6d"
+HEAD_REVISION = "2f27938b430b"
 CELERY_KEYS = (CELERY_QUEUE, CELERY_BINDING_KEY)
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
@@ -92,7 +92,7 @@ async def assert_application_tables_empty(env: dict[str, str]) -> None:
     dsn = env["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
     connection = await asyncpg.connect(dsn)
     try:
-        for table in ("audit_logs", "scores", "candidates", "users"):
+        for table in ("audit_logs", "scores", "candidates", "users", "ingestion_jobs"):
             count = await connection.fetchval(f'SELECT count(*) FROM "{table}"')
             if count:
                 raise AssertionError(f"application table {table} contains {count} rows")

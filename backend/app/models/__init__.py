@@ -4,6 +4,7 @@ from backend.app.models.candidate import Candidate
 from backend.app.models.candidate_embedding import CandidateEmbedding
 from backend.app.models.feedback import Feedback
 from backend.app.models.golden_set import GoldenSet
+from backend.app.models.ingestion_job import IngestionJob
 from backend.app.models.jd import JD
 from backend.app.models.rule_version import RuleVersion
 from backend.app.models.score import Score
@@ -21,4 +22,5 @@ __all__ = [
     "GoldenSet",
     "AuditLog",
     "CandidateEmbedding",
+    "IngestionJob",
 ]

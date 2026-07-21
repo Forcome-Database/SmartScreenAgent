@@ -66,6 +66,7 @@ def _apply_migrations():
 
 # Children before parents — FK-safe TRUNCATE order.
 _CLEAN_TABLES = [
+    "ingestion_jobs",
     "audit_logs",
     "feedback",
     "scores",
@@ -111,6 +112,48 @@ async def client():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
         yield c
+
+
+@pytest_asyncio.fixture
+async def stored_job_factory(db_session):
+    """Insert an `IngestionJob` row with dummy-but-valid raw_file_* columns.
+
+    Each call gets a fresh, unique sha256 (64 hex chars) so repeated
+    invocations within a test never collide with the partial unique index
+    on `raw_file_sha256` (`uq_ingestion_jobs_sha256_active`).
+    """
+    import hashlib
+    from uuid import uuid4
+
+    from backend.app.models import IngestionJob
+    from backend.app.services.ingestion.states import IngestionState
+
+    async def _make(
+        *,
+        state: IngestionState,
+        attempts: int = 0,
+        lease_expires_at=None,
+    ) -> IngestionJob:
+        sha256 = hashlib.sha256(uuid4().bytes).hexdigest()
+        job = IngestionJob(
+            state=state.value,
+            source="upload",
+            source_external_id=None,
+            jd_code=None,
+            raw_file_key=f"resumes/test/sweeper-{sha256[:16]}",
+            raw_file_sha256=sha256,
+            raw_file_size_bytes=1234,
+            raw_file_content_type="application/pdf",
+            raw_file_original_name_cipher="cipher",
+            attempts=attempts,
+            lease_expires_at=lease_expires_at,
+            actor="test",
+        )
+        db_session.add(job)
+        await db_session.flush()
+        return job
+
+    return _make
 
 
 @pytest_asyncio.fixture
@@ -232,3 +275,51 @@ def celery_worker() -> Iterator[None]:
                     celery_app._local.backend = previous_local_backend
             finally:
                 redis_client.close()
+
+
+@pytest_asyncio.fixture
+async def run_one_sweep():
+    """Run one `ingest.sweep` pass synchronously, then hand any requeued job
+    ids to Celery exactly as `sweep_task` does — without needing Beat itself
+    running in-process for tests.
+
+    Uses its own `AsyncSessionLocal()` (not the test's `db_session`) and
+    disposes the shared async engine pool before calling `.delay()`, mirroring
+    the asyncpg loop-affinity hazard already documented in
+    `test_tasks_ingest.py::test_celery_task_downloads_verified_object`: the
+    `celery_worker` fixture runs the worker in a background thread with its
+    own event loop, and handing it a connection checked out on the main
+    pytest-asyncio loop would crash it with "attached to a different loop".
+
+    Returns `(report, async_results)`: `async_results` is the list of
+    `AsyncResult` handles from each `.delay()` call above, one per
+    `report.requeued` job id and in the same order, so a caller can
+    `.get(timeout=...)` them to block until the worker actually finishes
+    each re-enqueued job — instead of resorting to concurrent HTTP polling
+    against the same shared engine, which carries the identical cross-loop
+    hazard while the worker is still running.
+    """
+    from datetime import datetime, timezone
+
+    from celery.result import AsyncResult
+
+    from backend.app.config import get_settings
+    from backend.app.database import AsyncSessionLocal, engine
+    from backend.app.services.ingestion.sweeper import SweepReport, sweep
+    from backend.app.tasks.ingest import parse_and_score_task
+
+    async def _run() -> tuple[SweepReport, list[AsyncResult]]:
+        settings = get_settings()
+        async with AsyncSessionLocal() as db:
+            report = await sweep(
+                db,
+                now=datetime.now(timezone.utc),
+                max_attempts=settings.INGESTION_MAX_ATTEMPTS,
+                queued_stale_seconds=settings.INGESTION_LEASE_SECONDS,
+            )
+            await db.commit()
+        await engine.dispose()
+        async_results = [parse_and_score_task.delay(job_id) for job_id in report.requeued]
+        return report, async_results
+
+    return _run
