@@ -36,9 +36,13 @@ class StorageClient(Protocol):
 
     def stat_object(self, key: str) -> ObjectStat: ...
 
+    def object_exists(self, key: str) -> bool: ...
+
     def delete_object(self, key: str) -> None: ...
 
     def download_object(self, key: str, destination: Path) -> None: ...
+
+    def presigned_get_url(self, key: str, *, expires_seconds: int = 300) -> str: ...
 
 
 class StorageIntegrityError(StorageError):
@@ -124,6 +128,14 @@ class ResumeStorageService:
                 last_error = exc
         if last_error is not None:
             raise last_error
+
+    async def presigned_get_url(self, key: str, *, expires_seconds: int) -> str:
+        return await to_thread.run_sync(
+            lambda: self.storage.presigned_get_url(key, expires_seconds=expires_seconds)
+        )
+
+    async def object_exists(self, key: str) -> bool:
+        return await to_thread.run_sync(lambda: self.storage.object_exists(key))
 
     async def download_verified(self, stored: StoredResume, destination: Path) -> None:
         try:

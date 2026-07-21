@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     INGESTION_SWEEP_INTERVAL_SECONDS: int = 60
     INGESTION_BATCH_MAX_FILES: int = 50
 
+    # Read APIs (WP4)
+    RAW_FILE_PRESIGN_TTL_SECONDS: int = 300
+    READ_PAGE_SIZE_DEFAULT: int = 20
+    READ_PAGE_SIZE_MAX: int = 100
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 
