@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlparse
@@ -275,3 +276,92 @@ def celery_worker() -> Iterator[None]:
                     celery_app._local.backend = previous_local_backend
             finally:
                 redis_client.close()
+
+
+@pytest_asyncio.fixture
+async def poll_job(client):
+    """Poll `GET /candidates/jobs/{id}` until `state` lands in `until`.
+
+    Fails the test outright — rather than looping forever or silently
+    passing — if the job reaches `terminal_failed` while `until` does not
+    expect it, or if `timeout` elapses first. A durability test that merely
+    waited and asserted afterward could pass on a hung worker as easily as a
+    working one; failing fast here makes that failure mode visible.
+    """
+
+    async def _poll(
+        job_id: int,
+        headers: dict[str, str],
+        *,
+        until: set[str],
+        timeout: float = 30.0,
+        interval: float = 0.2,
+    ) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            resp = await client.get(f"/api/v1/candidates/jobs/{job_id}", headers=headers)
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            state = body["state"]
+            if state in until:
+                return body
+            if state == "terminal_failed" and "terminal_failed" not in until:
+                pytest.fail(
+                    f"ingestion job {job_id} reached terminal_failed "
+                    f"(error_code={body.get('last_error_code')!r}) while polling for {until}"
+                )
+            if time.monotonic() >= deadline:
+                pytest.fail(
+                    f"ingestion job {job_id} did not reach {until} within {timeout}s "
+                    f"(last observed state={state!r})"
+                )
+            await asyncio.sleep(interval)
+
+    return _poll
+
+
+@pytest_asyncio.fixture
+async def run_one_sweep():
+    """Run one `ingest.sweep` pass synchronously, then hand any requeued job
+    ids to Celery exactly as `sweep_task` does — without needing Beat itself
+    running in-process for tests.
+
+    Uses its own `AsyncSessionLocal()` (not the test's `db_session`) and
+    disposes the shared async engine pool before calling `.delay()`, mirroring
+    the asyncpg loop-affinity hazard already documented in
+    `test_tasks_ingest.py::test_celery_task_downloads_verified_object`: the
+    `celery_worker` fixture runs the worker in a background thread with its
+    own event loop, and handing it a connection checked out on the main
+    pytest-asyncio loop would crash it with "attached to a different loop".
+
+    Returns `(report, async_results)`: `async_results` is the list of
+    `AsyncResult` handles from each `.delay()` call above, one per
+    `report.requeued` job id and in the same order, so a caller can
+    `.get(timeout=...)` them to block until the worker actually finishes
+    each re-enqueued job — instead of resorting to concurrent HTTP polling
+    against the same shared engine, which carries the identical cross-loop
+    hazard while the worker is still running.
+    """
+    from datetime import datetime, timezone
+
+    from celery.result import AsyncResult
+
+    from backend.app.config import get_settings
+    from backend.app.database import AsyncSessionLocal, engine
+    from backend.app.services.ingestion.sweeper import SweepReport, sweep
+    from backend.app.tasks.ingest import parse_and_score_task
+
+    async def _run() -> tuple[SweepReport, list[AsyncResult]]:
+        settings = get_settings()
+        async with AsyncSessionLocal() as db:
+            report = await sweep(
+                db,
+                now=datetime.now(timezone.utc),
+                max_attempts=settings.INGESTION_MAX_ATTEMPTS,
+            )
+            await db.commit()
+        await engine.dispose()
+        async_results = [parse_and_score_task.delay(job_id) for job_id in report.requeued]
+        return report, async_results
+
+    return _run

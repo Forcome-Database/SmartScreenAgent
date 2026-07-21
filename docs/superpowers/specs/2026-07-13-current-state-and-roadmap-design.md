@@ -147,9 +147,9 @@ Status values:
 | Resume extraction | P2 scoring plan | Strict Pydantic extraction models (`extra=forbid`) with `_meta` gateway metadata and primary+fallback attempts | Unit tests for valid Chinese resumes and typed rejection of wrong types, bad ages, invalid dates, and excessive lists | Implemented |
 | Three-stage scoring | P2 scoring plan | Hard filter, deterministic rules, LLM judge | Unit and DB integration tests | Implemented |
 | Evidence-backed scoring | Product design core value | Judge output validated against active rule dimensions/tiers/scores; every evidence quote must be a normalized substring of parsed Markdown or the score is rejected | Judge/evidence unit tests for fabricated, missing, and normalized-valid evidence | Implemented |
-| Candidate upload API | P2 scoring plan | Authenticated synchronous endpoint with validation, private storage, compensation, explicit duplicates, and now validated parser/AI contracts with stable error codes | Strict DB/MinIO-backed integration and boundary error tests pass; durable async ingestion is deferred to WP3 | Partial |
+| Candidate upload API | P2 scoring plan, hardened by WP3 | Authenticated async endpoint: validates, scans, persists to private MinIO, creates/reuses an `ingestion_jobs` row by sha256 idempotency, and returns `202 {job_id}`; parsing/extraction/scoring run in a Celery worker driving the `ingestion_jobs` state machine, with typed retryable/terminal error classification and stable error codes | Strict DB/MinIO/Redis/Celery-backed integration tests pass, including a real in-process-worker end-to-end test asserting the job reaches `ready`/`completed` with `candidate_id` populated | Implemented |
 | Candidate query API | P2 Task 14 title promised upload, score, and query | No query route | None | Absent |
-| Batch upload and async status | Original W5 | Celery entry point only | Task orchestration test exists | Partial |
+| Batch upload and async status | Original W5 | `POST /candidates/batch` (per-file isolated outcomes under one `batch_id`), `GET /candidates/jobs/{id}` and `GET /candidates/batches/{id}` status endpoints, and a Celery Beat sweeper (`ingest.sweep`) that reclaims lease-expired jobs and re-enqueues/terminates by attempt cap | Integration tests cover mixed valid/invalid batches, job/batch status shapes and 404s, sweeper reclaim/terminate/requeue logic, and a crash-recovery test (an object actually stored in MinIO, a job forced into `parsing` with an expired lease, swept and retried through a real worker) asserting exactly one candidate results | Implemented |
 | Candidate list and scorecard | Original W3-W5 | No API or UI | None | Absent |
 | Rule editor and version workflow | Original W3-W4 | Import-only CLI; active version pointer exists | Import tests | Partial |
 | Feedback review loop | Product design section 7 | Table only | Model test only | Absent |
@@ -399,7 +399,7 @@ The following remain later extensions:
 
 ### WP3: Durable asynchronous ingestion and batch processing
 
-**Status:** Ready for planning - unblocked on 2026-07-20 once WP2 stabilized the MinerU and AI contracts and passed hosted CI.
+**Status:** In progress - implementation is complete: `ingestion_jobs` state machine and migration, `IngestionJobService` (sha256 idempotency, lease claim, transitions, batch aggregate), Celery worker orchestration (`ingest.parse_and_score`) with typed retryable/terminal error classification, an idempotent `(candidate_id, jd_id, rule_version_id)` score upsert, a Celery Beat sweeper (`ingest.sweep`) that reclaims lease-expired jobs and re-enqueues/terminates by attempt cap, async upload/batch/status HTTP endpoints, and end-to-end plus crash-recovery integration tests (a job forced into `parsing` with an expired lease against a real stored object, swept and retried through a real worker, produces exactly one candidate). The local strict verification gate (offline suite, full integration suite including the new async/crash-recovery tests, Ruff, mypy) passed; hosted CI verification is in progress and WP3 is not yet marked Complete.
 
 **Goal:** move long-running work out of HTTP requests and support retries and progress.
 
