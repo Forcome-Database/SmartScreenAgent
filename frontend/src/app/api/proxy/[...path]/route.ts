@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { proxyJson } from "@/lib/server/api";
 import { readSession, SESSION_COOKIE } from "@/lib/server/session";
 import { safeUpstreamPath } from "@/lib/server/upstream-path";
+import { sessionExpiredResponse } from "@/lib/server/proxy-response";
 
 async function handle(req: Request, path: string[], method: string): Promise<NextResponse> {
   const session = await readSession((await cookies()).get(SESSION_COOKIE)?.value);
@@ -16,12 +17,7 @@ async function handle(req: Request, path: string[], method: string): Promise<Nex
   url.searchParams.forEach((v, k) => (query[k] = v));
   const body = method === "GET" ? undefined : await req.json().catch(() => undefined);
   const res = await proxyJson(upstreamPath, { method, token: session.token, query, body });
-  if (res.status === 401) {
-    // upstream rejected the token: clear the session
-    const out = NextResponse.json({ code: "unauthorized", message: "会话已失效，请重新登录" }, { status: 401 });
-    out.cookies.delete(SESSION_COOKIE);
-    return out;
-  }
+  if (res.status === 401) return sessionExpiredResponse();
   return NextResponse.json(res.body, { status: res.status });
 }
 

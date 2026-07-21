@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { z } from "zod";
 import { proxyJson } from "@/lib/server/api";
 import { readSession, SESSION_COOKIE } from "@/lib/server/session";
+import { sessionExpiredResponse } from "@/lib/server/proxy-response";
 
 const RawFileLink = z.object({ url: z.string(), expires_in_seconds: z.number() });
 
@@ -11,6 +12,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   if (!session) return NextResponse.json({ code: "unauthorized", message: "会话已失效" }, { status: 401 });
   const { id } = await ctx.params;
   const res = await proxyJson(`/api/v1/candidates/${id}/raw-file`, { method: "GET", token: session.token });
+  if (res.status === 401) return sessionExpiredResponse();
   if (res.status !== 200) return NextResponse.json(res.body, { status: res.status });
   const parsed = RawFileLink.safeParse(res.body);
   if (!parsed.success) {
