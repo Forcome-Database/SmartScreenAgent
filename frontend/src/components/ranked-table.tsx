@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 
 type Row = z.infer<typeof RankedCandidate>;
 
-export function RankedTable({ rows }: { rows: Row[] }) {
+export function RankedTable({ rows, startRank = 0 }: { rows: Row[]; startRank?: number }) {
   return (
     <Table>
       <TableHeader>
@@ -21,7 +21,7 @@ export function RankedTable({ rows }: { rows: Row[] }) {
       <TableBody>
         {rows.map((r, i) => (
           <TableRow key={r.score_id}>
-            <TableCell>{i + 1}</TableCell>
+            <TableCell>{startRank + i + 1}</TableCell>
             <TableCell>
               <Link className="underline" href={`/candidates/${r.candidate_id}`}>{r.candidate_id}</Link>
             </TableCell>

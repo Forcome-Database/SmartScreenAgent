@@ -8,7 +8,7 @@ export default function CandidatesPage() {
   return (
     <section className="space-y-4">
       <h1 className="text-xl font-semibold">候选人列表</h1>
-      <Suspense>
+      <Suspense fallback={<p className="text-muted-foreground">加载中…</p>}>
         <PaginatedList
           queryKey={["candidates"]}
           upstreamPath="/api/v1/candidates"

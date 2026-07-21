@@ -9,13 +9,13 @@ export default function JdRankedPage({ params }: { params: Promise<{ code: strin
   return (
     <section className="space-y-4">
       <h1 className="text-xl font-semibold">JD {code} · 候选人排名</h1>
-      <Suspense>
+      <Suspense fallback={<p className="text-muted-foreground">加载中…</p>}>
         <PaginatedList
           queryKey={["jd-ranked", code]}
           upstreamPath={`/api/v1/jds/${code}/candidates`}
           itemSchema={RankedCandidate}
           emptyText="该 JD 暂无已评分候选人"
-          render={(rows) => <RankedTable rows={rows} />}
+          render={(rows, { page, pageSize }) => <RankedTable rows={rows} startRank={(page - 1) * pageSize} />}
         />
       </Suspense>
     </section>

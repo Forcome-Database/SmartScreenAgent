@@ -26,7 +26,7 @@ export function PaginatedList<T>({
   upstreamPath: string;
   extraQuery?: Record<string, string | undefined>;
   itemSchema: z.ZodType<T>;
-  render: (rows: T[]) => React.ReactNode;
+  render: (rows: T[], meta: { page: number; pageSize: number }) => React.ReactNode;
   emptyText?: string;
 }) {
   const { page, pageSize } = usePageParams();
@@ -56,7 +56,7 @@ export function PaginatedList<T>({
         emptyText={emptyText}
         onRetry={() => query.refetch()}
       >
-        {query.data ? render(query.data.items) : null}
+        {query.data ? render(query.data.items, { page, pageSize }) : null}
       </DataState>
       <div className="flex items-center justify-between text-sm">
         <span className="text-muted-foreground">共 {total} 条 · 第 {page}/{maxPage} 页</span>
