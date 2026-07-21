@@ -47,21 +47,38 @@ export const ScoreDetail = z.object({
   judge_dimensions: z.record(z.string(), z.unknown()).nullable(),
 });
 export const JobStatus = z.object({
-  job_id: z.string(),
   state: z.string(),
-  candidate_id: z.number().nullable().optional(),
-  last_error_code: z.string().nullable().optional(),
+  attempts: z.number(),
+  last_error_code: z.string().nullable(),
+  candidate_id: z.number().nullable(),
+  score_id: z.number().nullable(),
+  batch_id: z.string().nullable(),
 });
 export const BatchStatus = z.object({
+  total: z.number(),
+  by_state: z.record(z.string(), z.number()),
+});
+export const UploadResponse = z.object({
+  job_id: z.number(),
+  batch_id: z.string().nullable(),
+  state: z.string(),
+});
+export const BatchResponse = z.object({
   batch_id: z.string(),
-  jobs: z.array(z.object({ job_id: z.string(), state: z.string(), filename: z.string().optional() })).optional(),
+  jobs: z.array(
+    z.object({
+      job_id: z.number().nullable(),
+      state: z.string(),
+      error_code: z.string().nullable().optional(),
+    }),
+  ),
 });
 
 export function pageEnvelope<T extends z.ZodTypeAny>(item: T) {
   return z.object({ items: z.array(item), page: z.number(), page_size: z.number(), total: z.number() });
 }
 
-const TERMINAL_JOB_STATES = new Set(["ready", "completed", "retryable_failed", "terminal_failed", "deleted"]);
+const TERMINAL_JOB_STATES = new Set(["ready", "completed", "terminal_failed", "deleted"]);
 export function isTerminalJobState(state: string): boolean {
   return TERMINAL_JOB_STATES.has(state);
 }
