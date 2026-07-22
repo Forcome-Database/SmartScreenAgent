@@ -50,6 +50,7 @@ export function FeedbackPanel({
       <textarea
         className="w-full rounded-md border p-2 text-sm"
         placeholder="理由（与 AI 不一致时必填）"
+        aria-label="复核理由"
         value={reason}
         onChange={(e) => setReason(e.target.value)}
       />
