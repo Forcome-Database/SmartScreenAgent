@@ -82,3 +82,16 @@ const TERMINAL_JOB_STATES = new Set(["ready", "completed", "terminal_failed", "d
 export function isTerminalJobState(state: string): boolean {
   return TERMINAL_JOB_STATES.has(state);
 }
+
+export const FeedbackItem = z.object({
+  id: z.number(),
+  score_id: z.number(),
+  reviewer_user_id: z.number(),
+  reviewer_display_name: z.string(),
+  decision: z.string(),
+  reason: z.string().nullable(),
+  ai_agreed: z.boolean().nullable(),
+  created_at: z.string(),
+  updated_at: z.string().nullable(),
+});
+export const FeedbackList = z.array(FeedbackItem);

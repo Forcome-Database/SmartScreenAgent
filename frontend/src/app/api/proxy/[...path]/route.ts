@@ -27,3 +27,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ path: string[] 
 export async function POST(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
   return handle(req, (await ctx.params).path, "POST");
 }
+export async function PUT(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
+  return handle(req, (await ctx.params).path, "PUT");
+}
