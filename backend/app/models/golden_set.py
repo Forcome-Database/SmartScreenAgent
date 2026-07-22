@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.models.base import Base
@@ -8,6 +8,13 @@ from backend.app.models.base import Base
 
 class GoldenSet(Base):
     __tablename__ = "golden_set"
+
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "jd_id", name="uq_golden_set_cand_jd"),
+        CheckConstraint(
+            "label IN ('advance', 'reject', 'borderline')", name="ck_golden_set_label"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     candidate_id: Mapped[int] = mapped_column(
@@ -19,5 +26,3 @@ class GoldenSet(Base):
     imported_by_user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.id"), nullable=False
     )
-
-    __table_args__ = (UniqueConstraint("candidate_id", "jd_id", name="uq_golden_set_cand_jd"),)
