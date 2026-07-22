@@ -10,8 +10,8 @@ from backend.app.security.crypto import encrypt_pii
 pytestmark = pytest.mark.integration
 
 
-async def _seed(db, grade="L4"):
-    jd = JD(code="FT", name="Foreign Trade", description="", status="active")
+async def _seed(db, grade="L4", *, jd_code="FT", pii_hash="h1"):
+    jd = JD(code=jd_code, name="Foreign Trade", description="", status="active")
     db.add(jd)
     await db.flush()
     rv = RuleVersion(
@@ -20,7 +20,7 @@ async def _seed(db, grade="L4"):
     db.add(rv)
     await db.flush()
     cand = Candidate(
-        source="upload", name_cipher=encrypt_pii("张三"), pii_hash="h1", extracted_json={}
+        source="upload", name_cipher=encrypt_pii("张三"), pii_hash=pii_hash, extracted_json={}
     )
     db.add(cand)
     await db.flush()
@@ -79,3 +79,43 @@ async def test_list_and_auth(client, db_session, auth_headers):
     assert lst.json()[0]["ai_agreed"] is None
     noauth = await client.put(feedback_url, json={"decision": "hold"})
     assert noauth.status_code == 401
+
+
+async def test_score_not_owned_by_candidate_or_unknown_returns_404(
+    client, db_session, auth_headers
+):
+    cand_a, score_a = await _seed(db_session, jd_code="FT", pii_hash="h1")
+    cand_b, score_b = await _seed(db_session, jd_code="FT2", pii_hash="h2")
+
+    # candidate A's URL with candidate B's score_id: mismatched ownership.
+    mismatched = await client.put(
+        f"/api/v1/candidates/{cand_a.id}/scores/{score_b.id}/feedback",
+        json={"decision": "hold"},
+        headers=await auth_headers("hr"),
+    )
+    assert mismatched.status_code == 404
+    assert mismatched.json()["detail"]["code"] == "not_found"
+
+    # candidate A's URL with a score_id that doesn't exist at all.
+    unknown_put = await client.put(
+        f"/api/v1/candidates/{cand_a.id}/scores/999999/feedback",
+        json={"decision": "hold"},
+        headers=await auth_headers("hr"),
+    )
+    assert unknown_put.status_code == 404
+    assert unknown_put.json()["detail"]["code"] == "not_found"
+
+    unknown_get = await client.get(
+        f"/api/v1/candidates/{cand_a.id}/scores/999999/feedback",
+        headers=await auth_headers("hr"),
+    )
+    assert unknown_get.status_code == 404
+    assert unknown_get.json()["detail"]["code"] == "not_found"
+
+    # score_a itself is untouched/reachable — confirms the 404s above were
+    # about candidate/score ownership, not e.g. a broken route.
+    still_ok = await client.get(
+        f"/api/v1/candidates/{cand_a.id}/scores/{score_a.id}/feedback",
+        headers=await auth_headers("hr"),
+    )
+    assert still_ok.status_code == 200
