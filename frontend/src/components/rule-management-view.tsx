@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import type { z } from "zod";
 import { DataState } from "@/components/data-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,12 +16,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiGet, ApiError, apiPost } from "@/lib/api-client";
-import { RuleVersionList, RuleVersionRef } from "@/lib/schemas";
+import { EvaluateResponse, RuleVersionList, RuleVersionRef } from "@/lib/schemas";
+
+function pct(value: number | null): string {
+  return value === null ? "—" : `${Math.round(value * 100)}%`;
+}
 
 export function RuleManagementView({ code, canManage }: { code: string; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [schemaText, setSchemaText] = useState("");
   const [notes, setNotes] = useState("");
+  const [evaluation, setEvaluation] = useState<{
+    version: string;
+    data: z.infer<typeof EvaluateResponse>;
+  } | null>(null);
   const path = `/api/v1/jds/${code}/rule-versions`;
   const list = useQuery({
     queryKey: ["rule-versions", code],
@@ -49,6 +58,32 @@ export function RuleManagementView({ code, canManage }: { code: string; canManag
     },
     onError: (error) =>
       toast.error(error instanceof ApiError ? error.message : "创建失败"),
+  });
+
+  const evaluate = useMutation({
+    mutationFn: (version: string) =>
+      apiPost(`${path}/${version}/evaluate`, {}, EvaluateResponse).then((data) => ({
+        version,
+        data,
+      })),
+    onSuccess: (result) => {
+      setEvaluation(result);
+      void queryClient.invalidateQueries({ queryKey: ["rule-versions", code] });
+    },
+    onError: (error) =>
+      toast.error(error instanceof ApiError ? error.message : "评估失败"),
+  });
+
+  const publish = useMutation({
+    mutationFn: (version: string) =>
+      apiPost(`${path}/${version}/publish`, {}, RuleVersionRef),
+    onSuccess: () => {
+      toast.success("规则版本已发布");
+      setEvaluation(null);
+      void queryClient.invalidateQueries({ queryKey: ["rule-versions", code] });
+    },
+    onError: (error) =>
+      toast.error(error instanceof ApiError ? error.message : "发布失败"),
   });
 
   return (
@@ -108,28 +143,85 @@ export function RuleManagementView({ code, canManage }: { code: string; canManag
               <TableHead>版本</TableHead>
               <TableHead>状态</TableHead>
               <TableHead>回归结果</TableHead>
+              <TableHead>操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {list.data?.items.map((version) => (
-              <TableRow key={version.id}>
-                <TableCell className="font-medium">
-                  {version.version}
-                  {version.is_active ? (
-                    <span className="text-muted-foreground ml-2 text-xs">生效中</span>
-                  ) : null}
-                </TableCell>
-                <TableCell>
-                  <Badge variant={version.status === "published" ? "default" : "outline"}>
-                    {version.status}
-                  </Badge>
-                </TableCell>
-                <TableCell>{version.golden_set_metrics ? "已记录" : "未记录"}</TableCell>
-              </TableRow>
-            ))}
+            {list.data?.items.map((version) => {
+              const hasRecordedMetrics =
+                Boolean(version.golden_set_metrics) || evaluation?.version === version.version;
+              return (
+                <TableRow key={version.id}>
+                  <TableCell className="font-medium">
+                    {version.version}
+                    {version.is_active ? (
+                      <span className="text-muted-foreground ml-2 text-xs">生效中</span>
+                    ) : null}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant={version.status === "published" ? "default" : "outline"}>
+                      {version.status}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>{hasRecordedMetrics ? "已记录" : "未记录"}</TableCell>
+                  <TableCell>
+                    {canManage && version.status === "draft" ? (
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          aria-label={`评估 ${version.version}`}
+                          disabled={evaluate.isPending}
+                          onClick={() => evaluate.mutate(version.version)}
+                        >
+                          评估
+                        </Button>
+                        <Button
+                          size="sm"
+                          aria-label={`发布 ${version.version}`}
+                          disabled={!hasRecordedMetrics || publish.isPending}
+                          onClick={() => publish.mutate(version.version)}
+                        >
+                          发布
+                        </Button>
+                      </div>
+                    ) : null}
+                  </TableCell>
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       </DataState>
+
+      {evaluation ? (
+        <div className="space-y-3 border-t pt-4">
+          <h2 className="font-medium">What-If 对比 · 草稿 {evaluation.version}</h2>
+          {evaluation.data.judge_dimensions_changed ? (
+            <p className="text-destructive text-sm">
+              草稿修改了 judge 维度；重算复用了原 judge 子分，结果为近似值。
+            </p>
+          ) : null}
+          <div className="grid gap-3 text-sm sm:grid-cols-2">
+            <div>
+              <p className="text-muted-foreground">草稿 F1</p>
+              <p className="text-2xl font-semibold">{pct(evaluation.data.draft.f1)}</p>
+            </div>
+            <div>
+              <p className="text-muted-foreground">基线 F1</p>
+              <p className="text-2xl font-semibold">
+                {evaluation.data.baseline ? pct(evaluation.data.baseline.f1) : "—"}
+              </p>
+            </div>
+          </div>
+          <p className="text-muted-foreground text-sm">
+            草稿混淆矩阵 TP {evaluation.data.draft.confusion.tp} / FP{" "}
+            {evaluation.data.draft.confusion.fp} / TN {evaluation.data.draft.confusion.tn} / FN{" "}
+            {evaluation.data.draft.confusion.fn} · 已评估 {evaluation.data.draft.evaluated} · 无法判定{" "}
+            {evaluation.data.draft.indeterminate}
+          </p>
+        </div>
+      ) : null}
     </section>
   );
 }
