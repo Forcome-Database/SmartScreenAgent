@@ -5,11 +5,12 @@ import csv
 import io
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import and_, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models import JD, Candidate, GoldenSet, User
+from backend.app.models import JD, Candidate, GoldenSet, Score, User
+from backend.app.schemas.golden_set import GoldenMetricsReport, JDMetrics, MetricStats
 from backend.app.services.read.pagination import Page
 
 VALID_LABELS = ("advance", "reject", "borderline")
@@ -155,3 +156,90 @@ async def list_golden_set(
         )
     ).all()
     return [(g, code, name) for g, code, name in rows], total
+
+
+def metric_stats(tp: int, fp: int, tn: int, fn: int) -> dict:
+    def ratio(num: int, den: int) -> float | None:
+        return (num / den) if den else None
+
+    return {
+        "confusion": {"tp": tp, "fp": fp, "tn": tn, "fn": fn},
+        "precision": ratio(tp, tp + fp),
+        "recall": ratio(tp, tp + fn),
+        "f1": ratio(2 * tp, 2 * tp + fp + fn),
+        "accuracy": ratio(tp + tn, tp + tn + fp + fn),
+    }
+
+
+def _build_stats(counts: dict[str, int]) -> dict:
+    tp, fp, tn, fn = counts["tp"], counts["fp"], counts["tn"], counts["fn"]
+    scored = tp + fp + tn + fn + counts["borderline_excluded"]
+    return {
+        "labeled_total": counts["labeled_total"],
+        "scored": scored,
+        "uncovered": counts["labeled_total"] - scored,
+        "borderline_excluded": counts["borderline_excluded"],
+        **metric_stats(tp, fp, tn, fn),
+    }
+
+
+def _empty_counts() -> dict[str, int]:
+    return {"labeled_total": 0, "borderline_excluded": 0, "tp": 0, "fp": 0, "tn": 0, "fn": 0}
+
+
+async def golden_metrics(db: AsyncSession, jd_code: str | None) -> GoldenMetricsReport:
+    latest = (
+        select(
+            Score.candidate_id,
+            Score.jd_id,
+            Score.grade,
+            func.row_number()
+            .over(
+                partition_by=(Score.candidate_id, Score.jd_id),
+                order_by=(Score.created_at.desc(), Score.id.desc()),
+            )
+            .label("rn"),
+        )
+        .subquery()
+    )
+    q = (
+        select(JD.code, GoldenSet.label, latest.c.grade)
+        .select_from(GoldenSet)
+        .join(JD, JD.id == GoldenSet.jd_id)
+        .outerjoin(
+            latest,
+            and_(
+                latest.c.candidate_id == GoldenSet.candidate_id,
+                latest.c.jd_id == GoldenSet.jd_id,
+                latest.c.rn == 1,
+            ),
+        )
+    )
+    if jd_code is not None:
+        q = q.where(JD.code == jd_code)
+    rows = (await db.execute(q)).all()
+
+    per_jd: dict[str, dict[str, int]] = {}
+    overall = _empty_counts()
+    for code, label, grade in rows:
+        c = per_jd.setdefault(code, _empty_counts())
+        for bucket in (c, overall):
+            bucket["labeled_total"] += 1
+        if grade is None:
+            continue  # uncovered
+        if label == "borderline":
+            for bucket in (c, overall):
+                bucket["borderline_excluded"] += 1
+            continue
+        ai_advance = grade != "rejected"
+        if label == "advance":
+            cell = "tp" if ai_advance else "fn"
+        else:  # label == "reject"
+            cell = "fp" if ai_advance else "tn"
+        for bucket in (c, overall):
+            bucket[cell] += 1
+
+    by_jd = [
+        JDMetrics(jd_code=code, **_build_stats(counts)) for code, counts in sorted(per_jd.items())
+    ]
+    return GoldenMetricsReport(overall=MetricStats(**_build_stats(overall)), by_jd=by_jd)

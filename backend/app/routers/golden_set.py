@@ -11,6 +11,7 @@ from backend.app.models import User
 from backend.app.schemas.golden_set import (
     GoldenImportError,
     GoldenImportResult,
+    GoldenMetricsReport,
     GoldenSetItem,
     GoldenSetList,
 )
@@ -18,6 +19,7 @@ from backend.app.services.golden_set import (
     GoldenImportTooLarge,
     InvalidCSV,
     RowError,
+    golden_metrics,
     import_golden_set,
     list_golden_set,
     parse_golden_csv,
@@ -88,3 +90,12 @@ async def list_entries(
         for g, code, name in rows
     ]
     return GoldenSetList(items=items, page=page.page, page_size=page.page_size, total=total)
+
+
+@router.get("/golden-set/metrics", response_model=GoldenMetricsReport)
+async def metrics(
+    jd_code: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _u: User = Depends(require_roles(*READ_ROLES)),
+) -> GoldenMetricsReport:
+    return await golden_metrics(db, jd_code)

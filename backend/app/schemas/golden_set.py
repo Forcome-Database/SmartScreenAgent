@@ -33,3 +33,31 @@ class GoldenSetItem(BaseModel):
 
 class GoldenSetList(PageMeta):
     items: list[GoldenSetItem]
+
+
+class Confusion(BaseModel):
+    tp: int
+    fp: int
+    tn: int
+    fn: int
+
+
+class MetricStats(BaseModel):
+    labeled_total: int
+    scored: int
+    uncovered: int
+    borderline_excluded: int
+    confusion: Confusion
+    precision: float | None
+    recall: float | None
+    f1: float | None
+    accuracy: float | None
+
+
+class JDMetrics(MetricStats):
+    jd_code: str
+
+
+class GoldenMetricsReport(BaseModel):
+    overall: MetricStats
+    by_jd: list[JDMetrics]
