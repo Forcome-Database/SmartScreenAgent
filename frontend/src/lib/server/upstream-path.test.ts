@@ -10,6 +10,12 @@ describe("safeUpstreamPath", () => {
     expect(safeUpstreamPath(["api", "v1", "..", "..", "..", "secret"])).toBeNull();
     expect(safeUpstreamPath(["api", "v1", "foo", ".", "bar"])).toBeNull();
   });
+  it("rejects decoded-encoded-slash traversal smuggled into a single segment", () => {
+    // Next.js decodeURIComponent's catch-all segments before we see them, so
+    // `..%2f..` in the URL arrives here as the single segment "../..".
+    expect(safeUpstreamPath(["api", "v1", "../..", "health"])).toBeNull();
+    expect(safeUpstreamPath(["api", "v1", "..\\..", "x"])).toBeNull();
+  });
   it("rejects empty segments", () => {
     expect(safeUpstreamPath(["api", "v1", "", "x"])).toBeNull();
   });

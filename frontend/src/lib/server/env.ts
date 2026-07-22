@@ -18,5 +18,8 @@ export function getServerEnv(): ServerEnv {
   if (!apiBaseUrl || !sessionSecret || !dingtalkClientId || !dingtalkRedirectUri) {
     throw new Error("Missing required server env (API_BASE_URL, SESSION_COOKIE_SECRET, DINGTALK_CLIENT_ID, DINGTALK_REDIRECT_URI)");
   }
+  if (sessionSecret.length < 32 || sessionSecret === "dev-only-change-me-32-bytes-minimum-xx") {
+    throw new Error("SESSION_COOKIE_SECRET must be a real secret of at least 32 bytes (not the placeholder)");
+  }
   return { apiBaseUrl, sessionSecret, dingtalkClientId, dingtalkRedirectUri, dingtalkAuthorizeUrl };
 }
