@@ -1,0 +1,30 @@
+node_modules
+.next
+.git
+.gitignore
+
+# test artifacts
+# NOTE: `e2e/` is intentionally NOT excluded — `playwright.config.ts` (which
+# is not excluded either, since the build stage's `next build` type-checks
+# every *.ts/*.tsx the root tsconfig.json includes) imports
+# `./e2e/helpers/session`. Excluding `e2e/` here made the build-stage
+# typecheck fail with "Cannot find module './e2e/helpers/session'" even
+# though nothing in `e2e/` reaches the final "run" stage (only
+# .next/standalone, .next/static, and public are copied into it).
+playwright-report
+test-results
+blob-report
+playwright/.cache
+coverage
+test
+
+# env / local secrets — never bake into the image
+.env
+.env.local
+.env*.local
+
+# misc
+npm-debug.log*
+*.tsbuildinfo
+next-env.d.ts
+README.md

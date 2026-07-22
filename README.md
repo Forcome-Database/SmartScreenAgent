@@ -8,7 +8,7 @@ AI-driven resume screening agent for HR.
 
 **WP0 可重复集成基线、WP1 安全与原文件完整性、WP2 生产解析器契约与校验 AI 输出均已完成并通过托管 CI**：候选人写接口已强制 JWT/RBAC，上传经流式大小/类型/文件签名校验并持久化到私有 MinIO；MinerU 已切换到官方 API v4，简历抽取与 LLM judge 输出经严格 Pydantic 与证据溯源校验后才能落库。WP2 托管验收见 [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)。
 
-**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）In progress**：只读的候选人/JD/规则版本接口已实现并通过本地全量门禁，尚待托管 CI 验收后才会标记为 Complete；前端（WP5）尚未开始。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）In progress**：只读的候选人/JD/规则版本接口已实现并通过本地全量门禁，尚待托管 CI 验收后才会标记为 Complete。**HR Web 工作台（WP5）In progress**：`frontend/` 下的 Next.js BFF 前端（候选人列表/详情/评分卡、JD、上传）已实现并通过本地全量门禁（lint/typecheck/vitest/Playwright e2e/build），托管 CI 验收与最终 Ready 标记随 WP6 一起完成。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 
@@ -300,5 +300,87 @@ uv run python scripts/verify_external_contracts.py
 - 段 D 双引擎交叉打分（cross_engine_diff / is_suspicious 字段已存模型，本期始终 None/False）
 - 规则版本受控发布（写入工作流）、What-If 规则模拟、黄金集回归（设计 §6）；只读的规则版本列表与 diff 已随 WP4 上线，见上文
 - 钉钉招聘文档 API 同步任务（设计 §8.2）
-- 评分卡 Web UI 与所有前端页面（设计 §10）
 - HR 复核反馈回流（设计 §7）
+
+## WP5 — HR Web 工作台（前端）
+
+`frontend/` 是面向 HR 的 Web 工作台：Next.js 15（App Router）+ React 19，作为 BFF
+（Backend-for-Frontend）代理 WP1/WP4 的 FastAPI 接口——浏览器不直接持有或看到
+Bearer JWT。技术栈：Tailwind CSS v4、shadcn/ui（`@base-ui/react` 基座）、TanStack
+Query（服务端数据获取/缓存）、zod（响应体运行时校验，`src/lib/schemas.ts`）、
+Vitest + Testing Library（单元/组件测试）、Playwright + `@axe-core/playwright`
+（端到端与无障碍）。页面：登录（钉钉一键登录）、候选人列表、候选人详情、评分卡、
+JD 详情、上传。
+
+### 开发/构建/测试命令
+
+进入 `frontend/`：
+
+```bash
+npm install
+npm run dev          # 开发服务器（Turbopack）
+npm run build         # 生产构建（next build --turbopack；产出 .next/standalone）
+npm run start           # 生产模式启动已构建的应用
+npm run lint             # eslint
+npm run typecheck        # tsc --noEmit
+npm run test              # vitest run（单元/组件）
+npm run e2e                # playwright test（desktop + mobile 两套 project）
+```
+
+`npm run e2e` 的 Playwright `webServer` 会自动执行 `npm run build && npm run start
+-- -p 4173`（3000/3100 等常规端口在本机被 Docker Desktop 占用，固定改用 4173，见
+`playwright.config.ts`）。e2e 用例通过 `page.route` 桩接浏览器发往 `/api/proxy/**`
+的请求，并用 `e2e/helpers/session.ts` 的 `mintSession()` 铸造与生产同算法
+（HMAC-SHA256）签名的 `ssa_session` cookie，覆盖"候选人列表 → 详情（PII）→ 评分卡
+（含证据）"这条金路径以及无障碍检查；真实的钉钉登录握手（服务端向 FastAPI 换取
+token）不可被 Playwright 拦截，改由 `src/lib/server/session.test.ts` 等单测覆盖。
+
+### BFF 鉴权模型
+
+- 登录页拿到钉钉 `auth_code` 后 `POST /api/auth/callback`；该路由在服务端调用
+  FastAPI `POST /auth/dingtalk/login` 换取 JWT，再用 `SESSION_COOKIE_SECRET` 对
+  `{token, displayName, role}` 做 HMAC-SHA256 签名，写入 httpOnly、`sameSite=lax`
+  （生产环境额外 `secure`）的 `ssa_session` cookie（`src/lib/server/session.ts`）。
+- `(app)/layout.tsx` 在服务端读取并校验 `ssa_session`；校验失败直接重定向登录页，
+  不渲染任何受保护内容。
+- 业务请求统一经服务端代理转发：`GET/POST /api/proxy/[...path]`
+  （`src/app/api/proxy/[...path]/route.ts`）从 cookie 中取出 `session.token`，以
+  `Authorization: Bearer` 附加后转发给 `API_BASE_URL`；浏览器发出的请求本身不带
+  token。
+- 原始简历文件走独立的 `GET /api/candidates/[id]/raw-file`：服务端向 FastAPI 换取
+  一次性预签名 MinIO URL 后直接 302 重定向浏览器——预签名 URL 不进入客户端 JS
+  状态，也不写入日志。
+- 登出 `POST /api/auth/logout` 清除 `ssa_session` cookie。
+
+### 环境变量（`frontend/.env.example`）
+
+| 变量 | 说明 |
+| --- | --- |
+| `API_BASE_URL` | 后端 FastAPI 地址；仅服务端读取，从不下发到浏览器 |
+| `SESSION_COOKIE_SECRET` | 签名 `ssa_session` cookie 的 HMAC-SHA256 密钥（≥32 字节随机串）；轮换会使已签发会话全部失效 |
+| `DINGTALK_CLIENT_ID` | 钉钉登录使用的 AppKey，须与后端交换 `auth_code` 时使用的一致 |
+| `DINGTALK_REDIRECT_URI` | 钉钉 OAuth 回调地址 |
+| `DINGTALK_AUTHORIZE_URL` | 可选，钉钉 OAuth 授权端点，默认为 `https://login.dingtalk.com/oauth2/auth` |
+
+### PII / 审计边界
+
+前端严格遵循 WP4 已实现的读取边界，不引入新的解密或审计路径：
+
+- **候选人列表**（`/candidates`、JD 维度排行榜）只消费 `GET /api/v1/candidates`、
+  `GET /api/v1/jds/{code}/candidates`——不含姓名/电话/邮箱，从不触发解密或审计
+  日志。
+- **候选人详情** `/candidates/[id]` 消费 `GET /api/v1/candidates/{id}`，是唯一
+  渲染姓名/电话/邮箱等 PII 的页面，对应后端每次调用精确写入一条 `pii_decrypt`
+  审计记录。
+- **评分卡** `/candidates/[id]/scores/[sid]` 展示评分维度、依据与证据引用
+  （`evidence_quotes`），不是 PII 视图。
+- **原始文件下载**只走上述服务端 302 重定向，前端代码从不落地或展示预签名
+  URL 本身。
+
+### Docker
+
+`frontend/Dockerfile` 是两阶段镜像（`node:22-alpine` 构建 + 运行，运行阶段以
+非 root 的 `node` 用户执行），依赖 `next.config.ts` 的 `output: "standalone"`；
+仓库根 `docker-compose.yml` 的 `frontend` service 构建该镜像，并通过
+`host.docker.internal` 访问宿主机运行的 FastAPI 后端（FastAPI/worker/beat 均不在
+compose 内，见上文"Quick start"）。
