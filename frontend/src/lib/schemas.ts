@@ -95,3 +95,20 @@ export const FeedbackItem = z.object({
   updated_at: z.string().nullable(),
 });
 export const FeedbackList = z.array(FeedbackItem);
+
+const AgreementStats = z.object({
+  total: z.number(), agreed: z.number(), disagreed: z.number(), hold: z.number(),
+  agreement_rate: z.number().nullable(),
+});
+export const FeedbackReport = z.object({
+  overall: AgreementStats,
+  by_jd: z.array(AgreementStats.extend({ jd_code: z.string() })),
+  disagreements: z.object({
+    items: z.array(z.object({
+      feedback_id: z.number(), score_id: z.number(), candidate_id: z.number(),
+      jd_code: z.string(), decision: z.string(), reason: z.string().nullable(),
+      reviewer_display_name: z.string(), updated_at: z.string().nullable(),
+    })),
+    page: z.number(), page_size: z.number(), total: z.number(),
+  }),
+});

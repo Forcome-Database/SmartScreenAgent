@@ -20,6 +20,9 @@ export function AppShell({
           <Link href="/upload" className="text-muted-foreground hover:text-foreground">
             上传
           </Link>
+          <Link href="/reports/feedback" className="text-muted-foreground hover:text-foreground">
+            复核报告
+          </Link>
         </nav>
         <div className="flex items-center gap-3 text-sm">
           <span className="text-muted-foreground">
