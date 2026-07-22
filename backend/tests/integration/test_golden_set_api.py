@@ -131,22 +131,31 @@ async def test_metrics_confusion_and_exclusions(client, db_session, auth_headers
     await _seed_score(db_session, bd, jd, grade="rejected")
     # uncovered: golden label but no score
     unc = await _seed_candidate(db_session, pii_hash="c4")
+    # golden reject + AI reject (grade rejected) -> TN
+    tn = await _seed_candidate(db_session, pii_hash="c5")
+    await _seed_score(db_session, tn, jd, grade="rejected")
+    # golden advance + AI reject (grade rejected) -> FN
+    fn = await _seed_candidate(db_session, pii_hash="c6")
+    await _seed_score(db_session, fn, jd, grade="rejected")
     await db_session.commit()
     body = (
         f"candidate_id,jd_code,label\n{tp.id},FT,advance\n{fp.id},FT,reject\n"
         f"{bd.id},FT,borderline\n{unc.id},FT,advance\n"
+        f"{tn.id},FT,reject\n{fn.id},FT,advance\n"
     ).encode()
     imp = await client.post(
         "/api/v1/golden-set/import",
         files={"file": ("g.csv", body, "text/csv")},
         headers=await auth_headers("admin"),
     )
-    assert imp.status_code == 200 and imp.json()["created"] == 4
+    assert imp.status_code == 200 and imp.json()["created"] == 6
     rep = await client.get("/api/v1/golden-set/metrics", headers=await auth_headers("hr"))
     assert rep.status_code == 200
     overall = rep.json()["overall"]
-    assert overall["confusion"] == {"tp": 1, "fp": 1, "tn": 0, "fn": 0}
-    assert overall["labeled_total"] == 4 and overall["scored"] == 3
+    assert overall["confusion"] == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
+    assert overall["labeled_total"] == 6 and overall["scored"] == 5
     assert overall["uncovered"] == 1 and overall["borderline_excluded"] == 1
     assert overall["precision"] == 0.5  # 1/(1+1)
+    assert overall["recall"] == 0.5  # 1/(1+1)
+    assert overall["accuracy"] == 0.5  # (1+1)/4
     assert "name_cipher" not in rep.text and "张三" not in rep.text
