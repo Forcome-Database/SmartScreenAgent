@@ -141,3 +141,19 @@ export const GoldenSetList = z.object({
   page_size: z.number(),
   total: z.number(),
 });
+
+const MetricStats = z.object({
+  labeled_total: z.number(),
+  scored: z.number(),
+  uncovered: z.number(),
+  borderline_excluded: z.number(),
+  confusion: z.object({ tp: z.number(), fp: z.number(), tn: z.number(), fn: z.number() }),
+  precision: z.number().nullable(),
+  recall: z.number().nullable(),
+  f1: z.number().nullable(),
+  accuracy: z.number().nullable(),
+});
+export const GoldenMetricsReport = z.object({
+  overall: MetricStats,
+  by_jd: z.array(MetricStats.extend({ jd_code: z.string() })),
+});

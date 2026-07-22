@@ -26,6 +26,9 @@ export function AppShell({
           <Link href="/golden-set" className="text-muted-foreground hover:text-foreground">
             黄金集
           </Link>
+          <Link href="/reports/baseline" className="text-muted-foreground hover:text-foreground">
+            基线指标
+          </Link>
         </nav>
         <div className="flex items-center gap-3 text-sm">
           <span className="text-muted-foreground">
