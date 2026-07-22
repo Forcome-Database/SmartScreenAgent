@@ -8,7 +8,7 @@ AI-driven resume screening agent for HR.
 
 **WP0 可重复集成基线、WP1 安全与原文件完整性、WP2 生产解析器契约与校验 AI 输出均已完成并通过托管 CI**：候选人写接口已强制 JWT/RBAC，上传经流式大小/类型/文件签名校验并持久化到私有 MinIO；MinerU 已切换到官方 API v4，简历抽取与 LLM judge 输出经严格 Pydantic 与证据溯源校验后才能落库。WP2 托管验收见 [`verify` run 29714208508](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29714208508)。
 
-**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）与 HR Web 工作台（WP5）均已完成并合入 main**（WP4：PR #4，托管 CI run 29813134361 绿；WP5：PR #5，后端托管 CI run 29880568935 绿）：只读的候选人/JD/规则版本接口，以及 `frontend/` 下的 Next.js BFF 前端（候选人列表/详情/评分卡、JD、上传）均已实现并通过托管 CI 验收。**HR 复核反馈与最小报表（WP6a）已完成**：候选人评分页新增复核反馈（推进/淘汰/待定 + 理由，`ai_agreed` 服务端派生）与一个 AI-HR 一致性最小报表页，后端/前端均已实现并通过本地全量门禁（含新增的 `frontend/e2e/feedback.spec.ts`）与托管 CI（[verify run 29899061689](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29899061689)，PR #6），已标记为 Complete。**金标数据集与基线指标（WP6b）已完成**：新增 CSV 导入的权威金标签（`advance`/`reject`/`borderline`）与一个只读的基线指标报表（precision/recall/F1/accuracy 与混淆矩阵，overall 与按 JD 拆分），后端/前端均已实现并通过本地全量门禁与托管 CI（[verify run 29926081927](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29926081927)，PR #7），已标记为 Complete。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
+**WP3 可恢复异步任务已完成并通过托管 CI**：候选人上传接口已切换为异步——`POST /candidates/upload` 立即返回 `202 {job_id}` 并把简历交给 `ingestion_jobs` 状态机和 Celery worker（`ingest.parse_and_score`）处理；Celery Beat 定期运行回收/重试 sweeper（`ingest.sweep`），处理中租约过期的任务会被回收并按 `INGESTION_MAX_ATTEMPTS` 重试或终结、卡在 `queued` 的任务会被重扫补入队，不会产生重复候选人或评分。WP3 托管验收见 [`verify` run 29795950194](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29795950194)（提交 `4bd7130`，PR #3）。**读 API（WP4）与 HR Web 工作台（WP5）均已完成并合入 main**（WP4：PR #4，托管 CI run 29813134361 绿；WP5：PR #5，后端托管 CI run 29880568935 绿）：只读的候选人/JD/规则版本接口，以及 `frontend/` 下的 Next.js BFF 前端（候选人列表/详情/评分卡、JD、上传）均已实现并通过托管 CI 验收。**HR 复核反馈与最小报表（WP6a）已完成**：候选人评分页新增复核反馈（推进/淘汰/待定 + 理由，`ai_agreed` 服务端派生）与一个 AI-HR 一致性最小报表页，后端/前端均已实现并通过本地全量门禁（含新增的 `frontend/e2e/feedback.spec.ts`）与托管 CI（[verify run 29899061689](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29899061689)，PR #6），已标记为 Complete。**金标数据集与基线指标（WP6b）已完成**：新增 CSV 导入的权威金标签（`advance`/`reject`/`borderline`）与一个只读的基线指标报表（precision/recall/F1/accuracy 与混淆矩阵，overall 与按 JD 拆分），后端/前端均已实现并通过本地全量门禁与托管 CI（[verify run 29926081927](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29926081927)，PR #7），已标记为 Complete。**规则发布、What-If 与回归门禁（WP6c）已完成本地实现，状态为 In progress**：本地全量门禁已通过，等待人工 push/PR 与托管 CI 后再判定 Complete。当前状态和后续依赖以 [`docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md`](docs/superpowers/specs/2026-07-13-current-state-and-roadmap-design.md) 为准。
 
 ## Quick start
 
@@ -245,8 +245,8 @@ URL），每次调用精确写入一条 `event_type="raw_file_access"` 的审计
 `active_rule_version: {id, version, published_at}` 的详情；未知 JD 返回 `404`。
 
 **规则版本列表与结构化 diff**：`GET /api/v1/jds/{code}/rule-versions?page=&page_size=` 按
-`published_at` 降序返回 `{id, version, published_at, published_by_user_id, notes,
-golden_set_metrics, is_active}`（`is_active` 仅在 JD 当前生效版本上为 `true`）；
+`published_at` 降序返回 `{id, version, status, published_at, published_by_user_id, notes,
+golden_set_metrics, is_active}`（草稿的 `published_at` 为 `null`，`is_active` 仅在 JD 当前生效版本上为 `true`）；
 `GET /api/v1/jds/{code}/rule-versions/{from_version}/diff/{to_version}` 返回
 `{jd_code, from_version, to_version, changes: [{path, kind, before, after}]}`，覆盖
 `passing_threshold`、`hard_filters[id]`、`rule_dimensions[id]`、`judge_dimensions[id]`、
@@ -298,9 +298,8 @@ uv run python scripts/verify_external_contracts.py
 ### 后续工作范围
 
 - 段 D 双引擎交叉打分（cross_engine_diff / is_suspicious 字段已存模型，本期始终 None/False）
-- 规则版本受控发布（写入工作流）、What-If 规则模拟、黄金集回归（设计 §6）；只读的规则版本列表与 diff 已随 WP4 上线，见上文
 - 钉钉招聘文档 API 同步任务（设计 §8.2）
-- HR 复核反馈回流（设计 §7）
+- 成本、校准、预算保护与更丰富的运营质量报告（WP7）
 
 ## WP5 — HR Web 工作台（前端）
 
@@ -503,3 +502,32 @@ precision/recall/F1/accuracy 含零分母 → null、borderline 排除、uncover
 
 WP6b 已通过本地全量门禁（后端 offline 268/integration 101/ruff/mypy，前端
 vitest 39/Playwright e2e 8/build）与托管 CI（[verify run 29926081927](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/29926081927)，PR #7），已标记为 Complete。
+
+## WP6c — 规则发布、What-If 与回归门禁
+
+WP6c 在 WP6b 的黄金集之上加入受控规则生命周期。`rule_versions` 新增
+`draft`/`published`/`archived` 状态、同一 JD 内版本号唯一约束，并允许草稿的
+`published_at` 为 `null`。`hr_lead`/`admin` 可通过
+`POST /api/v1/jds/{code}/rule-versions` 创建经 `RuleSchema` 校验的草稿；普通
+`hr` 只能读取版本列表。
+
+`POST /api/v1/jds/{code}/rule-versions/{version}/evaluate` 对黄金集执行离线
+What-If：重新运行草稿硬过滤与规则维度，judge 子分复用存量
+`total_score - rule_dimensions.subtotal`，不调用 LLM。存量硬拒且草稿不拒的候选人
+计为 `indeterminate`；`borderline` 和无评分条目分别排除并计数。响应仅包含聚合的
+混淆矩阵、precision/recall/F1/accuracy、覆盖计数和
+`judge_dimensions_changed` 近似值警告，不返回候选人 PII、密文或对象键。
+
+评估结果写入草稿 `golden_set_metrics`。只有已记录结果的草稿才能调用
+`POST /api/v1/jds/{code}/rule-versions/{version}/publish`；成功后该版本成为 JD 的
+active 版本，原 active 版本归档，并记录发布时间和发布者。前端
+`/jds/{code}/rules` 展示版本状态、草稿 JSON 创建、草稿/基线 What-If 对比与受门禁
+控制的发布操作。
+
+本地门禁于 2026-07-23 通过：后端 offline 273、integration 107、Ruff/mypy；
+前端 Vitest 43、Playwright 10（desktop + mobile）、生产 build。新增的
+[`frontend/e2e/rule-publication.spec.ts`](frontend/e2e/rule-publication.spec.ts)
+同时检查 What-If UI、发布门禁、axe 严重/关键问题和敏感信息不进入 DOM。设计与计划见
+[`WP6c design`](docs/superpowers/specs/2026-07-23-wp6c-rule-publication-design.md) 和
+[`WP6c plan`](docs/superpowers/plans/2026-07-23-wp6c-rule-publication.md)。WP6c 当前为
+**In progress**；人工 push/PR 与托管 CI 通过前不得标记 WP6c/WP6 Complete 或 WP7 Ready。
