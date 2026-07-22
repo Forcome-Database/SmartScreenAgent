@@ -91,7 +91,8 @@ class JDDetail(BaseModel):
 class RuleVersionItem(BaseModel):
     id: int
     version: str
-    published_at: datetime
+    status: str
+    published_at: datetime | None
     published_by_user_id: int | None
     notes: str | None
     golden_set_metrics: dict | None

@@ -31,9 +31,7 @@ class RuleVersion(Base):
     version: Mapped[str] = mapped_column(String(32), nullable=False)
     schema_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="published")
-    # Drafts are introduced with the publication service in Task 3; keep the
-    # pre-existing non-null type until its read serializers become draft-aware.
-    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_by_user_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("users.id"))
     notes: Mapped[str | None] = mapped_column(Text)
     golden_set_metrics: Mapped[dict | None] = mapped_column(JSONB)

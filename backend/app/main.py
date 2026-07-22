@@ -11,6 +11,7 @@ from backend.app.routers import feedback as feedback_router
 from backend.app.routers import golden_set as golden_set_router
 from backend.app.routers import health as health_router
 from backend.app.routers import jds as jds_router
+from backend.app.routers import rule_publication as rule_publication_router
 
 
 def create_app() -> FastAPI:
@@ -36,6 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(jds_router.router)
     app.include_router(feedback_router.router)
     app.include_router(golden_set_router.router)
+    app.include_router(rule_publication_router.router)
 
     @app.get("/")
     async def root() -> dict[str, str]:
