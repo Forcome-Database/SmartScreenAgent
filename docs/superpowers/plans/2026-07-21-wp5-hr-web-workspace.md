@@ -1751,7 +1751,7 @@ git commit -m "feat(wp5): resume upload with per-file job status polling to term
 **Interfaces:**
 - Produces: a Playwright golden-path e2e that stubs FastAPI at the network boundary (Playwright route interception on `**/api/proxy/**` and `/api/auth/**` — OR runs Next against a stub upstream), asserts the flow and that no token/URL leaks into the DOM; axe checks; a production Docker image and compose service.
 
-- [ ] **Step 1: Configure Playwright**
+- [x] **Step 1: Configure Playwright**
 
 ```ts
 // frontend/playwright.config.ts
@@ -1780,7 +1780,7 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 2: Write the golden-path e2e (stubs the BFF's upstream via route interception)**
+- [x] **Step 2: Write the golden-path e2e (stubs the BFF's upstream via route interception)**
 
 ```ts
 // frontend/e2e/golden-path.spec.ts
@@ -1817,7 +1817,7 @@ test("HR can log in and reach a scorecard with evidence, no token leak", async (
 });
 ```
 
-- [ ] **Step 3: Write the a11y e2e**
+- [x] **Step 3: Write the a11y e2e**
 
 ```ts
 // frontend/e2e/a11y.spec.ts
@@ -1839,12 +1839,12 @@ test("candidate list has no serious/critical a11y violations", async ({ page, co
 });
 ```
 
-- [ ] **Step 4: Run e2e**
+- [x] **Step 4: Run e2e**
 
 Run: `npm run e2e`
 Expected: desktop + mobile projects pass. (If cookie-presence middleware blocks `/candidates` before the stub cookie is set, the test adds the cookie via `context.addCookies` first — adjust the middleware matcher or the stub if needed.)
 
-- [ ] **Step 5: Dockerfile + compose service**
+- [x] **Step 5: Dockerfile + compose service**
 
 ```dockerfile
 # frontend/Dockerfile
@@ -1870,7 +1870,7 @@ CMD ["node", "server.js"]
 
 Set `output: "standalone"` in `next.config.ts`. Add a `frontend` service to the root `docker-compose.yml` depending on the backend, with the server-only env vars. Create `frontend/.env.example` documenting all env keys (no secrets).
 
-- [ ] **Step 6: Full local gate**
+- [x] **Step 6: Full local gate**
 
 ```bash
 cd frontend
@@ -1879,11 +1879,11 @@ npm run lint && npm run typecheck && npm run test && npm run e2e && npm run buil
 
 Expected: all green; the production build emits `.next/standalone`.
 
-- [ ] **Step 7: Docs + roadmap**
+- [x] **Step 7: Docs + roadmap**
 
 Update `README.md` (frontend section: stack, `frontend/` dev/build/test commands, BFF auth model, env vars). In the roadmap and plan index mark WP5 **In progress** (NOT Complete); do not mark WP6 Ready until the gate passes.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add frontend README.md docker-compose.yml docs/

@@ -46,6 +46,32 @@ services:
       timeout: 5s
       retries: 5
 
+  # WP5 HR web workspace (Next.js BFF). The FastAPI backend, Celery worker,
+  # and Celery beat are intentionally NOT compose services (see README.md
+  # "Quick start" — they run on the host via `uv run`), so this service has
+  # no `depends_on`; it reaches the host-run backend via
+  # `host.docker.internal`, which Docker Desktop resolves automatically.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: smartscreen-frontend
+    environment:
+      # Host-run FastAPI backend (see comment above); override if the
+      # backend is reachable elsewhere.
+      API_BASE_URL: ${FRONTEND_API_BASE_URL:-http://host.docker.internal:8000}
+      # Dev-only default; override with a real >=32-byte random secret for
+      # anything beyond local evaluation (see frontend/.env.example).
+      SESSION_COOKIE_SECRET: ${SESSION_COOKIE_SECRET:-dev-only-change-me-32-bytes-minimum-xx}
+      # Reuses the DingTalk AppKey already configured for the backend
+      # (docker-compose loads repo-root .env for variable substitution) —
+      # DingTalk's OAuth `client_id` must be the same AppKey the backend
+      # uses to exchange the resulting auth_code.
+      DINGTALK_CLIENT_ID: ${DINGTALK_APP_KEY:-}
+      DINGTALK_REDIRECT_URI: ${DINGTALK_REDIRECT_URI:-http://localhost:3000/auth/callback}
+    ports:
+      - "3000:3000"
+
 volumes:
   postgres_data:
   minio_data:

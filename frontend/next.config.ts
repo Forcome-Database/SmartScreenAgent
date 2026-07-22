@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Needed by frontend/Dockerfile, which copies .next/standalone into the
+  // final runtime image.
+  output: "standalone",
 };
 
 export default nextConfig;
