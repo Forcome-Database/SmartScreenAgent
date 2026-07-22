@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BASELINE_REVISION = "3884ec28fea9"
 WP1_REVISION = "b57c2f9e1a6d"
-WP3_HEAD_REVISION = "2f27938b430b"
+WP3_HEAD_REVISION = "1e9b39dbf340"
 
 
 def _alembic(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:

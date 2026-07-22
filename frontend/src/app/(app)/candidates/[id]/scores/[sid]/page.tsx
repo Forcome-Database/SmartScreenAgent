@@ -6,6 +6,7 @@ import { ScoreDetail } from "@/lib/schemas";
 import { DataState } from "@/components/data-state";
 import { Scorecard } from "@/components/scorecard";
 import { RescoreButton } from "@/components/rescore-button";
+import { FeedbackPanel } from "@/components/feedback-panel";
 
 export default function ScorecardPage({ params }: { params: Promise<{ id: string; sid: string }> }) {
   const { id, sid } = use(params);
@@ -27,6 +28,9 @@ export default function ScorecardPage({ params }: { params: Promise<{ id: string
         onRetry={() => query.refetch()}
       >
         {query.data ? <Scorecard detail={query.data} /> : null}
+        {query.data ? (
+          <FeedbackPanel candidateId={Number(id)} scoreId={Number(sid)} aiRejected={query.data.grade === "rejected"} />
+        ) : null}
       </DataState>
     </section>
   );

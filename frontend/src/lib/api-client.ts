@@ -44,3 +44,12 @@ export async function apiPost<T>(upstreamPath: string, body: unknown, schema: z.
   });
   return parseOrThrow(res, schema);
 }
+
+export async function apiPut<T>(upstreamPath: string, body: unknown, schema: z.ZodType<T>): Promise<T> {
+  const res = await fetch(`/api/proxy${upstreamPath}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  return parseOrThrow(res, schema);
+}

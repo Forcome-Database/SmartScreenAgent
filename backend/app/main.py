@@ -7,6 +7,7 @@ from backend.app.middleware import AccessLogMiddleware
 from backend.app.routers import auth as auth_router
 from backend.app.routers import candidates as candidates_router
 from backend.app.routers import candidates_read as candidates_read_router
+from backend.app.routers import feedback as feedback_router
 from backend.app.routers import health as health_router
 from backend.app.routers import jds as jds_router
 
@@ -32,6 +33,7 @@ def create_app() -> FastAPI:
     app.include_router(candidates_router.router)
     app.include_router(candidates_read_router.router)
     app.include_router(jds_router.router)
+    app.include_router(feedback_router.router)
 
     @app.get("/")
     async def root() -> dict[str, str]:
