@@ -112,3 +112,32 @@ export const FeedbackReport = z.object({
     page: z.number(), page_size: z.number(), total: z.number(),
   }),
 });
+
+export const GoldenImportResult = z.object({
+  total: z.number(),
+  created: z.number(),
+  updated: z.number(),
+  errors: z.array(
+    z.object({
+      row: z.number(),
+      candidate_id: z.number().nullable(),
+      jd_code: z.string().nullable(),
+      reason: z.string(),
+    }),
+  ),
+});
+export const GoldenSetList = z.object({
+  items: z.array(
+    z.object({
+      id: z.number(),
+      candidate_id: z.number(),
+      jd_code: z.string(),
+      label: z.string(),
+      imported_at: z.string(),
+      imported_by_display_name: z.string(),
+    }),
+  ),
+  page: z.number(),
+  page_size: z.number(),
+  total: z.number(),
+});

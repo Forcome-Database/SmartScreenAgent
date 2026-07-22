@@ -23,6 +23,9 @@ export function AppShell({
           <Link href="/reports/feedback" className="text-muted-foreground hover:text-foreground">
             复核报告
           </Link>
+          <Link href="/golden-set" className="text-muted-foreground hover:text-foreground">
+            黄金集
+          </Link>
         </nav>
         <div className="flex items-center gap-3 text-sm">
           <span className="text-muted-foreground">
