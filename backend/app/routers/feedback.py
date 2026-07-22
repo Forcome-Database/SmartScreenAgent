@@ -8,12 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.database import get_db
 from backend.app.deps import require_roles
 from backend.app.models import Feedback, Score, User
-from backend.app.schemas.feedback import FeedbackItem, FeedbackUpsertRequest
+from backend.app.schemas.feedback import FeedbackItem, FeedbackReport, FeedbackUpsertRequest
 from backend.app.services.feedback import (
     FeedbackReasonRequired,
+    feedback_report,
     list_feedback,
     upsert_feedback,
 )
+from backend.app.services.read.pagination import Page, page_params
 
 router = APIRouter(prefix="/api/v1", tags=["feedback"])
 ROLES = ("hr", "hr_lead", "admin")
@@ -67,3 +69,11 @@ async def list_for_score(
 ) -> list[FeedbackItem]:
     await _load_score(db, candidate_id, score_id)
     return [_serialize(fb, name) for fb, name in await list_feedback(db, score_id)]
+
+
+@router.get("/feedback/report", response_model=FeedbackReport)
+async def report(
+    jd_code: str | None = None, page: Page = Depends(page_params),
+    db: AsyncSession = Depends(get_db), _u: User = Depends(require_roles(*ROLES)),
+) -> FeedbackReport:
+    return await feedback_report(db, jd_code, page)

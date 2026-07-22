@@ -119,3 +119,18 @@ async def test_score_not_owned_by_candidate_or_unknown_returns_404(
         headers=await auth_headers("hr"),
     )
     assert still_ok.status_code == 200
+
+
+async def test_report_aggregates(client, db_session, auth_headers):
+    cand, score = await _seed(db_session, grade="L4")  # AI advance
+    # HR rejects (disagreement, reason required)
+    await client.put(f"/api/v1/candidates/{cand.id}/scores/{score.id}/feedback",
+                    json={"decision": "reject", "reason": "x"}, headers=await auth_headers("hr"))
+    rep = await client.get("/api/v1/feedback/report", headers=await auth_headers("hr"))
+    assert rep.status_code == 200
+    body = rep.json()
+    assert body["overall"]["disagreed"] == 1
+    assert body["overall"]["agreement_rate"] == 0.0
+    assert body["disagreements"]["total"] == 1
+    assert body["disagreements"]["items"][0]["jd_code"] == "FT"
+    assert "name_cipher" not in rep.text and "张三" not in rep.text  # no PII
