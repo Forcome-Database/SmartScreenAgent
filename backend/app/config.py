@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     READ_PAGE_SIZE_DEFAULT: int = 20
     READ_PAGE_SIZE_MAX: int = 100
 
+    # Golden set (WP6b)
+    GOLDEN_IMPORT_MAX_ROWS: int = 5000
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 
