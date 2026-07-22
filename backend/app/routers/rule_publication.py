@@ -7,13 +7,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.database import get_db
 from backend.app.deps import require_roles
 from backend.app.models import JD, RuleVersion, User
-from backend.app.schemas.rule_publication import CreateDraftRequest, RuleVersionRef
+from backend.app.schemas.rule_publication import (
+    CreateDraftRequest,
+    EvaluateResponse,
+    RuleMetrics,
+    RuleVersionRef,
+)
 from backend.app.services.rule_publication import (
     InvalidRuleSchema,
     NotADraft,
     RegressionNotRecorded,
     VersionExists,
+    active_baseline,
     create_draft,
+    evaluate_draft,
     publish_draft,
 )
 
@@ -115,4 +122,35 @@ async def publish(
         version=published.version,
         status=published.status,
         notes=published.notes,
+    )
+
+
+@router.post(
+    "/{code}/rule-versions/{version}/evaluate",
+    response_model=EvaluateResponse,
+)
+async def evaluate(
+    code: str,
+    version: str,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_roles(*WRITE_ROLES)),
+) -> EvaluateResponse:
+    jd = await _load_jd(db, code)
+    draft = await _load_version(db, jd, version)
+    try:
+        metrics, judge_dimensions_changed = await evaluate_draft(
+            db,
+            jd=jd,
+            draft=draft,
+        )
+    except NotADraft as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "not_a_draft", "message": "只能评估草稿版本"},
+        ) from exc
+    baseline = await active_baseline(db, jd=jd)
+    return EvaluateResponse(
+        draft=RuleMetrics(**metrics),
+        baseline=RuleMetrics(**baseline) if baseline is not None else None,
+        judge_dimensions_changed=judge_dimensions_changed,
     )
