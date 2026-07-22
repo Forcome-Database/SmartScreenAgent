@@ -102,7 +102,38 @@ describe("RuleManagementView", () => {
     expect(publish).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "评估 v2" }));
     expect(await screen.findByText("草稿 F1")).toBeInTheDocument();
-    expect(screen.getByText("80%")).toBeInTheDocument();
+    expect(screen.getAllByText("80%")).toHaveLength(2);
     expect(screen.getByText(/结果为近似值/)).toBeInTheDocument();
+  });
+
+  it("renders persisted F1 metrics after reload", async () => {
+    const persisted = {
+      ...LIST,
+      items: LIST.items.map((version) => ({
+        ...version,
+        golden_set_metrics:
+          version.version === "v2"
+            ? {
+                confusion: { tp: 2, fp: 0, tn: 1, fn: 1 },
+                precision: 1,
+                recall: 0.6667,
+                f1: 0.8,
+                accuracy: 0.75,
+                evaluated: 4,
+                indeterminate: 0,
+                borderline_excluded: 0,
+                uncovered: 0,
+              }
+            : null,
+      })),
+    };
+    global.fetch = vi.fn(
+      async () => new Response(JSON.stringify(persisted), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    render(wrap(<RuleManagementView code="FT" canManage={true} />));
+
+    expect(await screen.findByText("80%")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发布 v2" })).toBeEnabled();
   });
 });

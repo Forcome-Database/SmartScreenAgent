@@ -106,6 +106,37 @@ async def test_alembic_round_trip_from_base() -> None:
         assert columns["published_at"] == "YES"
         assert "ck_rule_versions_status" in constraints
         assert "uq_rule_versions_jd_version" in constraints
+
+        downgrade = _alembic("downgrade", "f412481450cf", env=env)
+        assert downgrade.returncode == 0, downgrade.stderr
+        connection = await asyncpg.connect(urls.sync_url)
+        try:
+            downgraded_columns = {
+                row["column_name"]: row["is_nullable"]
+                for row in await connection.fetch(
+                    """
+                    SELECT column_name, is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'rule_versions'
+                    """
+                )
+            }
+            downgraded_constraints = {
+                row["conname"]
+                for row in await connection.fetch(
+                    """
+                    SELECT conname
+                    FROM pg_constraint
+                    WHERE conrelid = 'public.rule_versions'::regclass
+                    """
+                )
+            }
+        finally:
+            await connection.close()
+        assert "status" not in downgraded_columns
+        assert downgraded_columns["published_at"] == "NO"
+        assert "ck_rule_versions_status" not in downgraded_constraints
+        assert "uq_rule_versions_jd_version" not in downgraded_constraints
     finally:
         await _drop_database(urls.admin_dsn, database_name)
 

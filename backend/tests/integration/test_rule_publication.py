@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -5,6 +6,7 @@ from sqlalchemy import select
 
 from backend.app.models import JD, Candidate, GoldenSet, RuleVersion, Score, User
 from backend.app.security.crypto import encrypt_pii
+from backend.app.services.rule_publication import publish_draft
 
 pytestmark = pytest.mark.integration
 
@@ -296,3 +298,142 @@ async def test_evaluate_then_publish_switches_active(
     not_a_draft = await client.post(evaluate_url, headers=lead_headers)
     assert not_a_draft.status_code == 409
     assert not_a_draft.json()["detail"]["code"] == "not_a_draft"
+
+
+async def test_evaluate_reuses_active_score_and_prefers_recorded_active_baseline(
+    client,
+    db_session,
+    auth_headers,
+) -> None:
+    jd = await _seed_jd_with_active(db_session)
+    lead_headers = await auth_headers("hr_lead")
+    importer = (
+        await db_session.execute(select(User).where(User.role == "hr_lead"))
+    ).scalar_one()
+    candidate = await _seed_scored_golden(
+        db_session,
+        jd,
+        label="advance",
+        extracted={"experiences": [{"start": "2019-01", "end": "2024-01"}]},
+        total=10,
+        rule_subtotal=4,
+        judge_dimensions={"dimensions": []},
+        pii_hash="active-score",
+        importer_id=importer.id,
+    )
+    active = (
+        await db_session.execute(
+            select(RuleVersion).where(RuleVersion.id == jd.active_rule_version_id)
+        )
+    ).scalar_one()
+    active.golden_set_metrics = {
+        "confusion": {"tp": 3, "fp": 1, "tn": 2, "fn": 1},
+        "precision": 0.75,
+        "recall": 0.75,
+        "f1": 0.75,
+        "accuracy": 5 / 7,
+        "evaluated": 7,
+        "indeterminate": 0,
+        "borderline_excluded": 0,
+        "uncovered": 0,
+    }
+    archived = RuleVersion(
+        jd_id=jd.id,
+        version="v0",
+        schema_json=_schema("v0"),
+        status="archived",
+        published_at=datetime.now(timezone.utc),
+    )
+    db_session.add(archived)
+    await db_session.flush()
+    db_session.add(
+        Score(
+            candidate_id=candidate.id,
+            jd_id=jd.id,
+            rule_version_id=archived.id,
+            total_score=0,
+            grade="rejected",
+            hard_filter_result={},
+            rule_dimensions={"subtotal": 0},
+            judge_dimensions=None,
+            is_suspicious=False,
+        )
+    )
+    await db_session.commit()
+
+    await client.post(
+        "/api/v1/jds/FT/rule-versions",
+        json={"schema_json": _schema("v2")},
+        headers=lead_headers,
+    )
+    evaluated = await client.post(
+        "/api/v1/jds/FT/rule-versions/v2/evaluate",
+        headers=lead_headers,
+    )
+
+    assert evaluated.status_code == 200
+    body = evaluated.json()
+    assert body["draft"]["confusion"]["tp"] == 1
+    assert body["draft"]["indeterminate"] == 0
+    assert body["baseline"]["confusion"] == {"tp": 3, "fp": 1, "tn": 2, "fn": 1}
+    assert body["baseline"]["f1"] == 0.75
+
+
+async def test_concurrent_publishes_leave_only_one_published_version(
+    db_session,
+    auth_headers,
+) -> None:
+    from backend.app.database import AsyncSessionLocal
+
+    jd = await _seed_jd_with_active(db_session)
+    jd_id = jd.id
+    await auth_headers("admin")
+    publisher = (
+        await db_session.execute(select(User).where(User.role == "admin"))
+    ).scalar_one()
+    drafts = [
+        RuleVersion(
+            jd_id=jd.id,
+            version=version,
+            schema_json=_schema(version),
+            status="draft",
+            published_at=None,
+            golden_set_metrics={},
+        )
+        for version in ("v2", "v3")
+    ]
+    db_session.add_all(drafts)
+    await db_session.commit()
+
+    async with AsyncSessionLocal() as first, AsyncSessionLocal() as second:
+        first_jd = (await first.execute(select(JD).where(JD.id == jd.id))).scalar_one()
+        second_jd = (await second.execute(select(JD).where(JD.id == jd.id))).scalar_one()
+        first_draft = (
+            await first.execute(select(RuleVersion).where(RuleVersion.version == "v2"))
+        ).scalar_one()
+        second_draft = (
+            await second.execute(select(RuleVersion).where(RuleVersion.version == "v3"))
+        ).scalar_one()
+        await asyncio.gather(
+            publish_draft(
+                first,
+                jd=first_jd,
+                draft=first_draft,
+                publisher_id=publisher.id,
+            ),
+            publish_draft(
+                second,
+                jd=second_jd,
+                draft=second_draft,
+                publisher_id=publisher.id,
+            ),
+        )
+
+    db_session.expire_all()
+    versions = (
+        await db_session.execute(
+            select(RuleVersion).where(RuleVersion.jd_id == jd_id)
+        )
+    ).scalars().all()
+    assert sum(version.status == "published" for version in versions) == 1
+    assert sum(version.status == "archived" for version in versions) == 2

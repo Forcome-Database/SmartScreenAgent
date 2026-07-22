@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import and_, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models import JD, Candidate, GoldenSet, RuleVersion, Score
@@ -92,7 +93,13 @@ async def create_draft(
         notes=notes,
     )
     db.add(draft)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if "uq_rule_versions_jd_version" in str(exc):
+            raise VersionExists from exc
+        raise
     await db.refresh(draft)
     return draft
 
@@ -104,27 +111,46 @@ async def publish_draft(
     draft: RuleVersion,
     publisher_id: int,
 ) -> RuleVersion:
-    if draft.status != "draft":
+    locked_jd = (
+        await db.execute(
+            select(JD)
+            .where(JD.id == jd.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    locked_draft = (
+        await db.execute(
+            select(RuleVersion)
+            .where(RuleVersion.id == draft.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+    if locked_draft.status != "draft":
         raise NotADraft
-    if draft.golden_set_metrics is None:
+    if locked_draft.golden_set_metrics is None:
         raise RegressionNotRecorded
 
-    if jd.active_rule_version_id is not None:
+    if locked_jd.active_rule_version_id is not None:
         previous = (
             await db.execute(
-                select(RuleVersion).where(RuleVersion.id == jd.active_rule_version_id)
+                select(RuleVersion)
+                .where(RuleVersion.id == locked_jd.active_rule_version_id)
+                .with_for_update()
             )
         ).scalar_one_or_none()
         if previous is not None:
             previous.status = "archived"
 
-    draft.status = "published"
-    draft.published_at = datetime.now(timezone.utc)
-    draft.published_by_user_id = publisher_id
-    jd.active_rule_version_id = draft.id
+    locked_draft.status = "published"
+    locked_draft.published_at = datetime.now(timezone.utc)
+    locked_draft.published_by_user_id = publisher_id
+    locked_jd.active_rule_version_id = locked_draft.id
     await db.commit()
-    await db.refresh(draft)
-    return draft
+    await db.refresh(locked_draft)
+    return locked_draft
 
 
 def _metrics_dict(
@@ -180,7 +206,10 @@ async def evaluate_draft(
             )
             .label("rn"),
         )
-        .where(Score.jd_id == jd.id)
+        .where(
+            Score.jd_id == jd.id,
+            Score.rule_version_id == jd.active_rule_version_id,
+        )
         .subquery()
     )
     rows = (
@@ -252,7 +281,31 @@ async def evaluate_draft(
 async def active_baseline(db: AsyncSession, *, jd: JD) -> dict[str, Any] | None:
     if jd.active_rule_version_id is None:
         return None
-    overall = (await golden_metrics(db, jd.code)).overall
+    active = (
+        await db.execute(
+            select(RuleVersion).where(RuleVersion.id == jd.active_rule_version_id)
+        )
+    ).scalar_one_or_none()
+    if active is None:
+        return None
+    stored = active.golden_set_metrics
+    required = {
+        "confusion",
+        "precision",
+        "recall",
+        "f1",
+        "accuracy",
+        "evaluated",
+        "indeterminate",
+        "borderline_excluded",
+        "uncovered",
+    }
+    if stored is not None and required.issubset(stored):
+        return stored
+
+    overall = (
+        await golden_metrics(db, jd.code, rule_version_id=active.id)
+    ).overall
     return {
         "confusion": overall.confusion.model_dump(),
         "precision": overall.precision,

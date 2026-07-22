@@ -158,7 +158,7 @@ export const GoldenMetricsReport = z.object({
   by_jd: z.array(MetricStats.extend({ jd_code: z.string() })),
 });
 
-const RuleMetrics = z.object({
+export const RuleMetrics = z.object({
   confusion: z.object({
     tp: z.number(),
     fp: z.number(),

@@ -1,5 +1,14 @@
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+from backend.app.models import JD
 from backend.app.rules.schema import RuleSchema
-from backend.app.services.rule_publication import bucket, whatif_grade
+from backend.app.services.rule_publication import (
+    VersionExists,
+    bucket,
+    create_draft,
+    whatif_grade,
+)
 
 _SCHEMA = {
     "version": "v2",
@@ -94,3 +103,43 @@ def test_bucket_quadrants() -> None:
     assert bucket("advance", "rejected") == "fn"
     assert bucket("reject", "L1") == "fp"
     assert bucket("reject", "rejected") == "tn"
+
+
+class _EmptyResult:
+    def scalar_one_or_none(self) -> None:
+        return None
+
+
+class _ConflictingSession:
+    rolled_back = False
+
+    async def execute(self, _statement):
+        return _EmptyResult()
+
+    def add(self, _value) -> None:
+        return None
+
+    async def commit(self) -> None:
+        raise IntegrityError(
+            "INSERT",
+            {},
+            Exception("duplicate key violates uq_rule_versions_jd_version"),
+        )
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
+
+async def test_create_draft_maps_unique_constraint_race_to_version_exists() -> None:
+    session = _ConflictingSession()
+    jd = JD(id=1, code="FT", name="Foreign Trade", status="active")
+
+    with pytest.raises(VersionExists):
+        await create_draft(
+            session,  # type: ignore[arg-type]
+            jd=jd,
+            schema_json=_SCHEMA,
+            notes=None,
+        )
+
+    assert session.rolled_back is True

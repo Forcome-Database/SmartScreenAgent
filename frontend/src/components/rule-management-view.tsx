@@ -16,10 +16,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiGet, ApiError, apiPost } from "@/lib/api-client";
-import { EvaluateResponse, RuleVersionList, RuleVersionRef } from "@/lib/schemas";
+import {
+  EvaluateResponse,
+  RuleMetrics,
+  RuleVersionList,
+  RuleVersionRef,
+} from "@/lib/schemas";
 
 function pct(value: number | null): string {
   return value === null ? "—" : `${Math.round(value * 100)}%`;
+}
+
+function persistedMetrics(value: Record<string, unknown> | null) {
+  const parsed = RuleMetrics.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 export function RuleManagementView({ code, canManage }: { code: string; canManage: boolean }) {
@@ -142,14 +152,17 @@ export function RuleManagementView({ code, canManage }: { code: string; canManag
             <TableRow>
               <TableHead>版本</TableHead>
               <TableHead>状态</TableHead>
-              <TableHead>回归结果</TableHead>
+              <TableHead>回归 F1</TableHead>
               <TableHead>操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {list.data?.items.map((version) => {
+              const storedMetrics = persistedMetrics(version.golden_set_metrics);
+              const currentMetrics =
+                evaluation?.version === version.version ? evaluation.data.draft : storedMetrics;
               const hasRecordedMetrics =
-                Boolean(version.golden_set_metrics) || evaluation?.version === version.version;
+                currentMetrics !== null;
               return (
                 <TableRow key={version.id}>
                   <TableCell className="font-medium">
@@ -163,7 +176,7 @@ export function RuleManagementView({ code, canManage }: { code: string; canManag
                       {version.status}
                     </Badge>
                   </TableCell>
-                  <TableCell>{hasRecordedMetrics ? "已记录" : "未记录"}</TableCell>
+                  <TableCell>{currentMetrics ? pct(currentMetrics.f1) : "未记录"}</TableCell>
                   <TableCell>
                     {canManage && version.status === "draft" ? (
                       <div className="flex gap-2">
