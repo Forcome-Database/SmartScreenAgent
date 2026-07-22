@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BASELINE_REVISION = "3884ec28fea9"
 WP1_REVISION = "b57c2f9e1a6d"
-WP3_HEAD_REVISION = "f412481450cf"
+WP3_HEAD_REVISION = "25954dc70368"
 
 
 def _alembic(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -76,6 +76,36 @@ async def test_alembic_round_trip_from_base() -> None:
         current = _alembic("current", env=env)
         assert current.returncode == 0, current.stderr
         assert WP3_HEAD_REVISION in current.stdout
+
+        connection = await asyncpg.connect(urls.sync_url)
+        try:
+            columns = {
+                row["column_name"]: row["is_nullable"]
+                for row in await connection.fetch(
+                    """
+                    SELECT column_name, is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'rule_versions'
+                    """
+                )
+            }
+            constraints = {
+                row["conname"]
+                for row in await connection.fetch(
+                    """
+                    SELECT conname
+                    FROM pg_constraint
+                    WHERE conrelid = 'public.rule_versions'::regclass
+                    """
+                )
+            }
+        finally:
+            await connection.close()
+
+        assert columns["status"] == "NO"
+        assert columns["published_at"] == "YES"
+        assert "ck_rule_versions_status" in constraints
+        assert "uq_rule_versions_jd_version" in constraints
     finally:
         await _drop_database(urls.admin_dsn, database_name)
 
