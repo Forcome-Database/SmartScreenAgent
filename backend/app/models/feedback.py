@@ -1,4 +1,12 @@
-from sqlalchemy import BigInteger, Boolean, ForeignKey, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.models.base import Base, TimestampMixin
@@ -6,6 +14,11 @@ from backend.app.models.base import Base, TimestampMixin
 
 class Feedback(Base, TimestampMixin):
     __tablename__ = "feedback"
+
+    __table_args__ = (
+        UniqueConstraint("score_id", "reviewer_user_id", name="uq_feedback_score_reviewer"),
+        CheckConstraint("decision IN ('advance', 'reject', 'hold')", name="ck_feedback_decision"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     score_id: Mapped[int] = mapped_column(
