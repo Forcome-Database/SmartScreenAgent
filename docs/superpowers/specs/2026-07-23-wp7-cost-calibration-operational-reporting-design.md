@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 
-**Status:** Draft (independent review approved; awaiting user document approval)
+**Status:** Approved
 
 **Work package:** WP7
 
