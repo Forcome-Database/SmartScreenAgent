@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +37,11 @@ class Settings(BaseSettings):
     LLM_MODEL_JUDGE_FALLBACK: str
     LLM_MODEL_LIGHT: str
     LLM_STRUCTURED_OUTPUT_MODE: Literal["json_schema", "json_object"] = "json_schema"
+    LLM_PRICE_CNY_PER_MILLION_JSON: str
+    LLM_BUDGET_WARN_RATIO: float = Field(default=0.80, gt=0, le=1, allow_inf_nan=False)
+    LLM_BUDGET_RECONCILE_MAX_PERIODS_PER_RUN: int = Field(default=31, ge=1, le=366)
+    LLM_USAGE_PENDING_TIMEOUT_SECONDS: int = Field(default=600, ge=1)
+    LLM_USAGE_FINALIZE_MAX_RETRIES: int = Field(default=3, ge=1, le=10)
 
     # DingTalk
     DINGTALK_APP_KEY: str = ""
@@ -47,8 +55,25 @@ class Settings(BaseSettings):
     PII_ENCRYPTION_KEY: str
 
     # Cost
-    DAILY_LLM_BUDGET_CNY: float = 100.0
-    MONTHLY_LLM_BUDGET_CNY: float = 1500.0
+    DAILY_LLM_BUDGET_CNY: float = Field(default=100.0, ge=0, allow_inf_nan=False)
+    MONTHLY_LLM_BUDGET_CNY: float = Field(default=1500.0, ge=0, allow_inf_nan=False)
+
+    # Quality and cross-engine operations (WP7)
+    QUALITY_F1_TARGET: float = Field(default=0.75, ge=0, le=1, allow_inf_nan=False)
+    QUALITY_EVIDENCE_COVERAGE_TARGET: float = Field(
+        default=0.95, ge=0, le=1, allow_inf_nan=False
+    )
+    QUALITY_CONFIDENCE_MIN_BUCKET_SIZE: int = Field(default=10, ge=1)
+    CROSS_ENGINE_MODEL: str = ""
+    CROSS_ENGINE_SAMPLE_PERCENT: int = Field(default=10, ge=0, le=100)
+    CROSS_ENGINE_LOW_CONFIDENCE: float = Field(
+        default=0.60, ge=0, le=1, allow_inf_nan=False
+    )
+    CROSS_ENGINE_DIFF_THRESHOLD: float = Field(default=10, ge=0, allow_inf_nan=False)
+    CROSS_ENGINE_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    CROSS_ENGINE_LEASE_SECONDS: int = Field(default=900, gt=600)
+    CROSS_ENGINE_SWEEP_INTERVAL_SECONDS: int = Field(default=60, ge=1)
+    CROSS_ENGINE_BACKFILL_MAX: int = Field(default=500, ge=1)
 
     # Resume parser (MinerU)
     MINERU_MODE: Literal["official", "stub"] = "official"
@@ -91,6 +116,12 @@ class Settings(BaseSettings):
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
+
+    @model_validator(mode="after")
+    def _cross_engine_model_differs_from_primary(self) -> Settings:
+        if self.CROSS_ENGINE_MODEL and self.CROSS_ENGINE_MODEL == self.LLM_MODEL_JUDGE:
+            raise ValueError("CROSS_ENGINE_MODEL must differ from LLM_MODEL_JUDGE")
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

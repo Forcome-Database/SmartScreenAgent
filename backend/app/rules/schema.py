@@ -1,8 +1,21 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
+
+
+def _reject_boolean_weight(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("weight must be numeric, not boolean")
+    return value
+
+
+Weight = Annotated[
+    float,
+    BeforeValidator(_reject_boolean_weight),
+    Field(ge=0, allow_inf_nan=False),
+]
 
 
 class Tier(BaseModel):
@@ -26,7 +39,7 @@ class HardFilter(BaseModel):
 class RuleDimension(BaseModel):
     id: str
     name: str
-    weight: float
+    weight: Weight
     method: Literal["tiered_keyword_match", "experience_years", "lookup"]
     tiers: list[Tier] = Field(default_factory=list)
     table: dict[str, float] | None = None
@@ -35,7 +48,7 @@ class RuleDimension(BaseModel):
 class JudgeDimension(BaseModel):
     id: str
     name: str
-    weight: float
+    weight: Weight
     prompt_hint: str
     tiers: list[Tier]
 
