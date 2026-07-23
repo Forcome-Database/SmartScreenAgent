@@ -1,5 +1,8 @@
+from uuid import UUID
+
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.models.base import Base, TimestampMixin
@@ -21,6 +24,9 @@ class Score(Base, TimestampMixin):
     jd_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("jds.id"), nullable=False, index=True)
     rule_version_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("rule_versions.id"), nullable=False
+    )
+    llm_judge_call_group_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), index=True
     )
 
     total_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False)
