@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 
-**Status:** Draft (design approved; document review pending)
+**Status:** Draft (independent review approved; awaiting user document approval)
 
 **Work package:** WP7
 
@@ -175,6 +175,38 @@ golden_set_snapshots + quality_releases ---> quality UI
 - **Batch analysis:** deterministic queries over persisted score JSON and audit
   tags; it does not call an LLM.
 
+### 5.2 Gateway and recorder interface
+
+All public gateway calls receive an immutable `LLMCallContext`:
+
+```text
+operation
+call_group_id
+trace_id?
+ingestion_job_id?
+score_id?
+jd_id?
+rule_version_id?
+```
+
+The caller creates one `call_group_id` per logical operation. `ScoringPipeline`
+accepts this context from the ingestion task (or creates one for synchronous
+scoring) and persists the judge group on the resulting Score. The trace ID is
+the ambient request/job trace rather than a new unrelated value per attempt.
+
+`LLMGateway.judge` additionally accepts an internal-only `model_override` and
+`attempt_role`. They are permitted only for the cross-check service, which
+passes the configured secondary model and role `secondary`; that call does not
+use the primary model's fallback. Normal extract/judge APIs retain their
+configured primary/fallback selection and create a separate ledger attempt for
+each.
+
+`UsageRecorder` owns `AsyncSessionLocal`-backed independent sessions for its
+short transactions. It never commits, rolls back, or reuses the caller's
+candidate/score transaction. This keeps external calls outside business-data
+transactions while allowing task, API, and cross-check callers to share one
+metered gateway.
+
 ## 6. Data Model and Migration
 
 One additive Alembic migration on the current WP6c head creates the following
@@ -187,10 +219,14 @@ One row represents one provider request, not one logical extract/judge
 operation.
 
 - `id`: bigint primary key
+- `call_group_id`: UUID, non-null, indexed; generated once per logical
+  extract/judge/cross-check/lightweight operation and shared by its
+  primary/fallback attempts
 - `trace_id`: string(64), nullable, indexed
 - `ingestion_job_id`: nullable FK to `ingestion_jobs.id`, indexed
 - `score_id`: nullable FK to `scores.id`, indexed
 - `jd_id`: nullable FK to `jds.id`, indexed
+- `rule_version_id`: nullable FK to `rule_versions.id`, indexed
 - `operation`: string(32), one of `extract`, `judge`, `cross_check`,
   `lightweight`
 - `attempt_role`: string(16), one of `primary`, `fallback`, `secondary`
@@ -201,9 +237,9 @@ operation.
   `invalid_response`, `configuration_error`, `abandoned`
 - `input_tokens`: nullable integer
 - `output_tokens`: nullable integer
-- `input_price_cny_per_million`: numeric(14,6), non-null
-- `output_price_cny_per_million`: numeric(14,6), non-null
-- `estimated_cost_cny`: nullable numeric(14,6)
+- `input_price_cny_per_million`: numeric(18,6), non-null
+- `output_price_cny_per_million`: numeric(18,6), non-null
+- `estimated_cost_cny`: nullable numeric(24,12)
 - `latency_ms`: nullable integer
 - `error_code`: nullable string(64), stable taxonomy only
 - `started_at`: timezone-aware datetime, non-null
@@ -214,6 +250,15 @@ terminal rows having `finished_at`. Application services never update a
 terminal row. There is no prompt, provider response, exception message,
 candidate name, resume text, ciphertext, object key, or arbitrary metadata
 column.
+
+The same migration adds nullable, indexed UUID
+`Score.llm_judge_call_group_id`. A new-score judge call receives a
+`call_group_id` before the provider request and persists that value when the
+`Score` is inserted. Its terminal ledger rows remain immutable and may have
+`score_id = NULL`; the call-group link provides exact correlation after score
+creation. Calls for an already existing score, including cross-checks, populate
+`score_id` directly. `rule_version_id` is known before every judge/cross-check
+call and supports version-exact release attribution.
 
 `Score.cost_tokens` and `Score.cost_cny` remain for schema compatibility. New
 reports do not read them; the ledger is authoritative. No historical rows are
@@ -231,6 +276,7 @@ synthesized from these incomplete fields.
   `retryable_failed`, `terminal_failed`
 - `attempts`: nonnegative integer
 - `lease_expires_at`: nullable timezone-aware datetime
+- `lease_token`: nullable UUID
 - `last_error_code`: nullable string(64)
 - `secondary_total_score`: nullable numeric(6,2)
 - `secondary_dimensions`: nullable JSONB containing only dimension `id`, `tier`,
@@ -246,6 +292,14 @@ already queued/completed score.
 
 The sanitized `secondary_dimensions` intentionally excludes reasoning,
 evidence quotes, prompts, and candidate text.
+
+Indexes support the required query paths:
+
+- ledger `(started_at, id)`, `(status, started_at)`,
+  `(jd_id, rule_version_id, started_at)`, and `(operation, started_at)`;
+- cross-check `(state, lease_expires_at)`, `(score_id, id)`, and
+  `(completed_at, absolute_diff)`; and
+- release `(created_at, id)` and release-JD `(jd_id, quality_release_id)`.
 
 ### 6.3 `golden_set_snapshots` and `golden_set_snapshot_entries`
 
@@ -296,6 +350,25 @@ SHA-256 hashing. Concurrent creation uses the unique hash and
 The API exposes snapshot hash/count and rule-version mappings, not snapshot
 candidate entries.
 
+`targets_json` includes `metric_schema_version = "wp7_v1"` plus all numeric
+targets, fixed bin boundaries, minimum bucket size, evidence definition, and
+classification label mapping so old releases remain interpretable after code
+changes.
+
+### 6.5 `operations_reconciliation_state`
+
+A small cursor table makes budget-alert recovery durable across extended
+downtime:
+
+- `key`: string(32) primary key (`budget_daily` or `budget_monthly`)
+- `next_period_start`: timezone-aware datetime, non-null
+- `updated_at`: timezone-aware datetime, non-null
+
+On first use, a cursor initializes to the earliest ledger `started_at` at or
+after WP7 rollout (or the current local period if the ledger is empty). This is
+operational state, not a budget-blocking control and not a user-facing alert
+record.
+
 ## 7. Attempt-Level Usage Recording
 
 ### 7.1 Call lifecycle
@@ -322,6 +395,11 @@ Cost is:
 (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000
 ```
 
+The calculation uses Python `Decimal` constructed from validated decimal
+strings, never binary float. The per-attempt result is quantized once to
+12 fractional CNY digits with `ROUND_HALF_UP`, matching
+`numeric(24,12)`. Aggregates sum stored decimals and round only for display.
+
 If the provider does not report usage, token counts and cost are `null`, not
 zero. A provider HTTP success that later fails domain validation is still a
 successful paid provider attempt; the existing extraction/judge validation and
@@ -345,6 +423,21 @@ retry path records the application-level invalid-output failure separately.
 This yields honest accounting even across process crashes: duplicate provider
 calls caused by a retried ingestion job remain separate ledger attempts.
 
+### 7.3 Time attribution
+
+All database timestamps are timezone-aware and stored in UTC. Query intervals
+are half-open `[start, end)`:
+
+- a provider attempt and its cost belong to `started_at`;
+- latency is included only after a terminal attempt has known `latency_ms`;
+- score throughput belongs to `Score.created_at`;
+- feedback belongs to `coalesce(Feedback.updated_at, Feedback.created_at)`;
+- cross-check completion belongs to `completed_at`; and
+- release creation belongs to `quality_releases.created_at`.
+
+An attempt has `unknown_usage = true` if either input or output token count is
+null; in that case both cost computation and `estimated_cost_cny` are null.
+
 ## 8. Pricing, Budget State, and Alerts
 
 ### 8.1 Price configuration
@@ -361,14 +454,17 @@ model name:
 
 Configuration validation requires finite, nonnegative input/output numbers for
 every model that may be called, including fallbacks and the optional secondary
-model. The price snapshot on the ledger row, rather than current configuration,
-is used for all historical totals.
+model. A rate with more than six fractional decimal places is rejected; accepted
+rates are normalized to six places once and that exact Decimal is used both for
+snapshot persistence and cost calculation. The price snapshot on the ledger
+row, rather than current configuration, is used for all historical totals.
 
 ### 8.2 Budget semantics
 
 - Existing `DAILY_LLM_BUDGET_CNY` and `MONTHLY_LLM_BUDGET_CNY` remain.
 - `LLM_BUDGET_WARN_RATIO` defaults to `0.80`.
-- Daily and calendar-month boundaries use `Asia/Shanghai`.
+- Daily and calendar-month boundaries use `Asia/Shanghai`, converted to UTC
+  half-open ranges for querying `started_at`.
 - The numerator sums every non-null `estimated_cost_cny`, regardless of final
   success/failure status. Unknown-cost attempts are counted separately.
 - State is:
@@ -377,13 +473,31 @@ is used for all historical totals.
   - `exceeded`: at/above 100%.
 - State is informational and never authorizes or denies a provider call.
 
-After attempt finalization, threshold evaluation may write audit events
+After attempt finalization, threshold evaluation writes audit events
 `llm_budget_warning` and `llm_budget_exceeded`. The dedupe key is
 `scope:period_start:threshold`. A PostgreSQL transaction-level advisory lock
 for that key serializes "check existing audit row + insert", producing at most
 one event for each daily/monthly threshold crossing without another state
 table. Audit payload contains only scope, period, threshold, budget, and
 observed aggregate.
+
+Alert creation is crash-safe through cursor-based reconciliation. For each
+daily/monthly cursor, the sweeper locks its state row, evaluates complete local
+periods in order (bounded work per run), inserts any missing event under the
+same advisory lock, and advances the cursor only after that period succeeds.
+It also evaluates the current partial period every run. Therefore downtime does
+not skip an old crossing; backlog is drained over subsequent runs without an
+unbounded single query. Finalization provides low-latency notification and the
+durable cursor provides eventual delivery. A call that moves directly from
+normal to exceeded emits both the warning and exceeded events because each
+threshold/dedupe key is evaluated independently.
+
+Operations comparison windows are:
+
+- `today`: local midnight to now, compared with the same elapsed duration
+  beginning at the previous local midnight;
+- `7d`/`30d`: `[now - N days, now)`, compared with the immediately preceding
+  equal-length interval.
 
 ## 9. Quality Release Semantics
 
@@ -398,8 +512,10 @@ observed aggregate.
    JD without one produces `409 active_rule_missing`.
 4. Create or reuse the content-addressed snapshot for only the selected JDs.
 5. For each snapshot entry, select the most recent `Score` whose
-   `rule_version_id` exactly matches that JD's bound version. A score produced
-   by a different version is `uncovered`, not silently substituted.
+   `rule_version_id` exactly matches that JD's bound version **and whose
+   `created_at` is in `[window_start, window_end)`**. A score outside the
+   observation window or produced by a different version is `uncovered`, not
+   silently substituted.
 6. Compute aggregate and per-JD metrics.
 7. Persist the release, JD/version bindings, metric payloads, and target
    snapshot atomically.
@@ -407,6 +523,19 @@ observed aggregate.
 The default observation window is the preceding 30 days. Input timestamps must
 be ordered, timezone-aware, end no later than request time, and span no more
 than 365 days.
+
+Classification, evidence, confidence, feedback, latency, throughput, and cost
+all use this same half-open current window. Trend metrics use the immediately
+preceding equal-length window
+`[window_start - (window_end - window_start), window_start)`.
+
+Snapshot reuse and the release insert are covered by a bounded whole-transaction
+retry (maximum three attempts) for PostgreSQL serialization failures and a
+concurrent snapshot-hash unique conflict. Each retry rolls back and restarts the
+entire repeatable-read transaction, including reading golden rows and active
+rule versions; it never tries to reload a concurrently inserted snapshot inside
+an old transaction snapshot. Exhaustion returns retryable `503
+release_transaction_conflict`.
 
 ### 9.2 Immutable result
 
@@ -418,11 +547,26 @@ reuse the same golden snapshot.
 Quality targets do not block persistence. `below_target` is a visible and
 audited result, not an HTTP error.
 
+The release transaction always writes `quality_release_created`; when status is
+`below_target` it also writes `quality_release_below_target`. Each `AuditLog`
+uses actor `user:{created_by_user_id}`, target type `quality_release`, target ID
+the new release ID, and a candidate-content-free payload containing snapshot
+hash, selected JD/rule-version IDs, aggregate F1/evidence target states, and the
+observation window. Release rows and both required audit rows commit atomically.
+
 ## 10. Metric Definitions
 
 All ratios are returned as numbers from 0 to 1 or `null` when their denominator
 is zero. Responses include counts/denominators so a percentage is never
 detached from sample size.
+
+WP7 strengthens the governed `RuleSchema` contract: every rule/judge dimension
+weight must be finite and nonnegative. Zero-weight dimensions remain legal but
+are excluded from weighted-confidence and low-score calculations. Draft
+creation/import rejects a negative/non-finite weight as
+`422 invalid_rule_schema`; release creation against a pre-existing invalid
+active schema returns `409 invalid_active_rule` rather than producing a
+nonsensical metric.
 
 ### 10.1 Classification
 
@@ -448,6 +592,8 @@ Only candidates whose stored score reached the judge
 - Hard-filter rejects are counted separately and are not in the denominator.
 - If selected rules define no judge dimensions, coverage is `null` with status
   `not_applicable`.
+- If judge dimensions exist but there is no version/window-matching score that
+  reached the judge, coverage is `null` with status `insufficient_data`.
 - Default target is `QUALITY_EVIDENCE_COVERAGE_TARGET=0.95`.
 
 No evidence quote is copied into a release response or metric payload.
@@ -472,6 +618,10 @@ sum(confidence_i * weight_i) / sum(weight_i)
    matches the golden label, otherwise 0.
 5. Place the item in one of five fixed bins:
    `[0,.2)`, `[.2,.4)`, `[.4,.6)`, `[.6,.8)`, `[.8,1]`.
+
+If every matched dimension is unknown, missing, or has total eligible weight
+zero, that candidate has no weighted confidence: it is excluded from bins/ECE
+and counted as `confidence_unavailable`.
 
 Each bin reports count, mean confidence, empirical decision accuracy, absolute
 gap, and status. A bin with fewer than
@@ -510,9 +660,15 @@ For the release window, report:
 - the same values for the immediately preceding equal-length window, with
   absolute and percentage deltas where defined.
 
-Unattributed usage rows remain in the overall operations total but not a JD
-release subtotal. Latency, throughput, cost, ECE, and agreement are trend/
-diagnostic metrics only; they do not change release status.
+Latency percentiles use PostgreSQL `percentile_cont(0.50)` and
+`percentile_cont(0.95)` over known `latency_ms`, i.e. continuous linear
+interpolation. The aggregate release operation metrics are the sum/union of the
+same per-JD attribution rule: extraction attempts attributed to each selected
+JD plus judge/cross-check attempts whose `rule_version_id` equals that JD's
+release binding. Wrong-version judge attempts and unattributed usage remain in
+the global operations dashboard total but not in a quality release. Latency,
+throughput, cost, ECE, and agreement are trend/diagnostic metrics only; they do
+not change release status.
 
 ### 10.6 Target result
 
@@ -523,8 +679,11 @@ Each target metric reports `meets_target`, `below_target`,
 - A null F1 caused by no covered classification sample is
   `insufficient_data`.
 - Evidence coverage for a rule with no judge dimensions is `not_applicable`.
-- Release rollup is `below_target` if any evaluable target is below target or
-  F1 is insufficient; otherwise it is `meets_target`.
+- Only the **aggregate** F1 and aggregate evidence target results control the
+  release rollup; per-JD target results are diagnostic and cannot overturn it.
+- Release rollup is `below_target` if either aggregate target is
+  `below_target` or `insufficient_data`. An aggregate `not_applicable`
+  evidence result has no effect. Otherwise it is `meets_target`.
 - All results are saved.
 
 ## 11. Cross-Engine Sampling and Recovery
@@ -532,15 +691,21 @@ Each target metric reports `meets_target`, `below_target`,
 ### 11.1 Eligibility and triggers
 
 Cross-engine checking is enabled only when `CROSS_ENGINE_MODEL` is configured
-and differs from the primary judge model. Only scores that reached the judge
-are eligible.
+and differs from the primary judge model. A score is eligible only when the
+bound RuleVersion schema has at least one judge dimension and persisted
+`judge_dimensions.dimensions` is a non-empty list matching that schema. A
+non-null payload with an empty dimensions list did not make a provider judge
+call and is not eligible.
 
 A check is ensured when any trigger is true:
 
-- `deterministic_sample`: stable hash of score ID and prompt version falls in
-  the configured `CROSS_ENGINE_SAMPLE_PERCENT` (default 10%);
+- `deterministic_sample`: SHA-256 of the UTF-8 string
+  `"wp7:{score_id}:{prompt_version}"`; interpret the first eight digest bytes
+  as an unsigned big-endian integer, take modulo 100, and select when the result
+  is below `CROSS_ENGINE_SAMPLE_PERCENT` (default 10%);
 - `low_confidence`: weighted judge confidence is below
-  `CROSS_ENGINE_LOW_CONFIDENCE` (default 0.60);
+  `CROSS_ENGINE_LOW_CONFIDENCE` (default 0.60), or confidence is unavailable
+  because all judge dimensions are unknown;
 - `golden_error`: an advance/reject golden label disagrees with the score;
 - `ai_hr_disagreement`: persisted feedback has `ai_agreed = false`;
 - `admin_backfill`: selected by the bounded backfill endpoint.
@@ -548,7 +713,11 @@ A check is ensured when any trigger is true:
 New-score completion evaluates deterministic/low-confidence and any current
 golden label. Feedback upsert and golden-set import/update re-evaluate their
 respective disagreement triggers. All paths call the same idempotent
-`ensure_cross_check` service.
+`ensure_cross_check` service **inside the same database transaction that
+persists the Score, Feedback, or GoldenSet change**. Existing feedback/golden
+services are refactored so the caller owns the commit. This prevents a crash
+between the business write and queue-row creation from losing a trigger.
+Celery delivery occurs only after that transaction commits.
 
 ### 11.2 Secondary computation
 
@@ -569,17 +738,37 @@ The worker:
 The default `CROSS_ENGINE_DIFF_THRESHOLD` is 10 score points. The secondary
 result never changes the primary total or grade.
 
+The cross-check table, not Score, is authoritative history. For each score, the
+row with the greatest `score_cross_checks.id` is the current requested
+configuration. Creating a newer row atomically clears the two Score projection
+fields. A worker may update the projection only if its row is still that
+greatest ID; delayed completion of an older model/prompt row remains historical
+and cannot overwrite it. The suspicious-list endpoint likewise considers only
+the greatest-ID row per score, and only when that row is `completed` and meets
+its snapshotted threshold.
+
 ### 11.3 Durable delivery
 
 - Queue row creation commits before Celery delivery.
 - A committed `queued` row is the source of truth; a lost `.delay()` is
   recovered by the sweeper.
-- The task claims with state/lease checks so duplicate deliveries do not make
-  concurrent calls.
-- Expired `running` and `retryable_failed` rows are requeued until
-  `CROSS_ENGINE_MAX_ATTEMPTS`; then they become `terminal_failed`.
-- Provider/configuration error classification follows the existing ingestion
-  policy.
+- A new row starts `queued`, `attempts = 0`, with no lease/token.
+- Claim uses `SELECT ... FOR UPDATE`, accepts `queued` only, verifies
+  `attempts < CROSS_ENGINE_MAX_ATTEMPTS`, then commits `running`,
+  `attempts + 1`, a random `lease_token`, and
+  `lease_expires_at = now + CROSS_ENGINE_LEASE_SECONDS`.
+- Completion/failure uses a conditional update matching row ID, `running`
+  state, and lease token. A duplicate/stale worker cannot finalize.
+- Retryable failure changes `running -> retryable_failed`, clears the lease,
+  and records a stable error code. The sweeper changes it to `queued` when
+  attempts remain, otherwise `terminal_failed`.
+- An expired `running` lease follows the same retry/terminal rule.
+- `unavailable`, `usage_ledger_unavailable`, and transient database/provider
+  failures are retryable. `model_price_missing`, provider configuration/auth
+  errors, invalid secondary output after validation retries, and a missing
+  score/rule/candidate are terminal.
+- `CROSS_ENGINE_LEASE_SECONDS` must be greater than Celery
+  `task_time_limit` (currently 600 seconds); the default is 900.
 - The periodic sweeper also marks stale usage attempts abandoned.
 
 ### 11.4 Historical backfill
@@ -628,7 +817,8 @@ Roles: `hr_lead`, `admin`.
     completed attempt time.
 - `GET /api/v1/operations/usage`
   - paginated;
-  - filters: bounded `from`/`to`, operation, requested/actual model, status,
+  - filters: half-open, at-most-90-day `from`/`to`, operation,
+    requested/actual model, status,
     attempt role, trace ID, ingestion job ID, score ID, and JD code;
   - returns only ledger metadata defined in §6.1.
 
@@ -637,10 +827,20 @@ Roles: `hr_lead`, `admin`.
 Read roles: `hr`, `hr_lead`, `admin`. Create roles: `hr_lead`, `admin`.
 
 - `POST /api/v1/quality/releases`
-  - body: `{window_start?, window_end?, jd_codes?}`;
+  - body:
+    `{window_start?, window_end?, jd_codes?, expected_input_fingerprint?}`;
   - returns `201` with the immutable release detail;
   - `409 golden_set_empty`, `409 active_rule_missing`;
+  - when the optional preview fingerprint no longer matches, `409
+    release_input_changed`;
   - invalid/range-too-large input is `422`.
+- `POST /api/v1/quality/releases/preview`
+  - same selection fields, read-only and non-persisting;
+  - returns selected JD/version mappings, golden item/label counts,
+    version/window-matching score coverage counts, targets, and an
+    `input_fingerprint`;
+  - the fingerprint is a canonical hash of golden content hash, JD/version
+    bindings, window, targets, and metric schema version.
 - `GET /api/v1/quality/releases`
   - paginated newest first; optional JD/status filters.
 - `GET /api/v1/quality/releases/{release_id}`
@@ -670,12 +870,15 @@ List roles: `hr`, `hr_lead`, `admin`. Backfill role: `admin`.
   - no name, contact data, resume text, evidence, reasoning, ciphertext, object
     key, or prompt.
 - `POST /api/v1/cross-checks/backfill`
-  - body: `{jd_code?, from, to, limit}`;
-  - returns selected/already-existing/newly-queued counts;
+  - body: `{jd_code?, from, to, limit, dry_run=false}`;
+  - `dry_run=true` returns selected/already-existing/would-queue counts without
+    mutation; the confirmed request sends `false` and returns newly queued;
   - invalid limit/window is `422`.
 
-Candidate detail is reached through the existing audited candidate/scorecard
-route and its existing authorization, not embedded in the suspicious response.
+Candidate detail is not embedded in the suspicious response. WP7 adds a
+metadata-only `score_detail_read` audit write to the existing authorized score
+detail GET (actor user ID, target score ID, candidate ID, and JD code; no
+candidate content), and the UI uses that audited route for drill-down.
 
 ## 14. Authorization and Leak Safety
 
@@ -691,10 +894,13 @@ route and its existing authorization, not embedded in the suspicious response.
 No token gives `401`; an authenticated but disallowed role gives `403`.
 
 Usage, metrics, releases, batch reports, and suspicious-list responses are
-PII-free. Integration tests inspect serialized response bodies for candidate
-names, `name_cipher`, contact fields, object keys, prompt text, resume excerpts,
-evidence quotes, and reasoning. Candidate IDs and score/job/trace IDs are
-operational references, not candidate content.
+free of **candidate PII and candidate-authored content**. Release metadata may
+return its authorized staff creator as `{user_id, display_name}` for
+accountability; it never returns candidate names. Integration tests inspect
+serialized response bodies for candidate names, `name_cipher`, contact fields,
+object keys, prompt text, resume excerpts, evidence quotes, and reasoning.
+Candidate IDs and score/job/trace IDs are operational references, not candidate
+content.
 
 ## 15. Frontend Information Architecture and UX
 
@@ -735,7 +941,9 @@ workflows rather than becoming an ambiguous global rule link.
     evidence coverage, agreement, trend measures, per-JD table, and immutable
     release history.
   - `hr_lead`/`admin` create via a right-side Sheet, inspect a preflight
-    summary, then confirm immutability in a Dialog.
+    summary from the preview endpoint, then confirm immutability in a Dialog.
+    The create call sends the preview fingerprint and refreshes the preview if
+    inputs changed.
 - `/reports/batch`
   - bounded filters, ranked deterministic reasons, grade distribution, and
     aggregate detail table.
@@ -743,7 +951,7 @@ workflows rather than becoming an ambiguous global rule link.
   - PII-free suspicious queue with a right-side inspector for score/dimension
     differences; link to the existing audited scorecard.
   - admin backfill uses a Sheet for filters/preview and a Dialog for final
-    confirmation.
+    confirmation; preview calls `dry_run=true`.
 
 ### 15.4 Responsive and accessible behavior
 
@@ -771,7 +979,9 @@ New settings:
 
 - `LLM_PRICE_CNY_PER_MILLION_JSON`
 - `LLM_BUDGET_WARN_RATIO=0.80`
+- `LLM_BUDGET_RECONCILE_MAX_PERIODS_PER_RUN=31`
 - `LLM_USAGE_PENDING_TIMEOUT_SECONDS=600`
+- `LLM_USAGE_FINALIZE_MAX_RETRIES=3`
 - `QUALITY_F1_TARGET=0.75`
 - `QUALITY_EVIDENCE_COVERAGE_TARGET=0.95`
 - `QUALITY_CONFIDENCE_MIN_BUCKET_SIZE=10`
@@ -786,8 +996,9 @@ New settings:
 
 All numeric settings are validated for finite values and valid ranges. A
 configured secondary model must have a price entry and differ from the primary
-judge model. `.env.example`, deployment documentation, and test settings gain
-safe example values; no secret or live provider price is committed.
+judge model. The cross-engine lease must exceed Celery's task time limit.
+`.env.example`, deployment documentation, and test settings gain safe example
+values; no secret or live provider price is committed.
 
 ## 17. Testing
 
@@ -795,10 +1006,12 @@ Default tests remain offline and deterministic.
 
 ### 17.1 Backend unit tests
 
-- Price-config validation and immutable snapshot selection.
+- Price-config validation (including rejecting more than six rate decimals) and
+  immutable snapshot selection.
 - Exact decimal cost calculation; unknown usage remains null.
-- Budget period boundaries in `Asia/Shanghai`, warning/exceeded state, and
-  threshold dedupe-key construction.
+- Half-open time attribution, prior equal-length windows, budget period
+  boundaries in `Asia/Shanghai`, warning/exceeded state, and threshold
+  dedupe-key construction.
 - Weighted confidence, five-bin assignment, insufficient bucket handling, and
   ECE.
 - Evidence coverage, including unknown dimensions, hard rejects, missing
@@ -806,6 +1019,8 @@ Default tests remain offline and deterministic.
 - Classification and target rollup reuse WP6 metric semantics.
 - Deterministic sampling stability, trigger merging, and score-difference
   threshold.
+- Negative/non-finite rule weights are rejected; zero weights are safely
+  excluded.
 - Deterministic batch-reason aggregation with multi-reason percentages.
 
 ### 17.2 Backend integration tests
@@ -813,27 +1028,41 @@ Default tests remain offline and deterministic.
 - Alembic upgrade/downgrade round trip and current-head assertions.
 - Primary success, primary failure + fallback success, configuration failure,
   missing usage, and separate attempt rows with no prompts/PII.
+- Call-group correlation links a pre-Score judge attempt to the created Score
+  without mutating a terminal ledger row; secondary calls populate score ID.
 - Transaction A failure proves the provider mock was not called and produces
   `usage_ledger_unavailable`.
 - Finalization failure does not trigger a duplicate provider call; stale
   pending becomes abandoned.
 - Budget yellow/red audit events are deduplicated under concurrent finalizers
-  and do not block calls.
+  and do not block calls; reconciliation restores a deliberately missed event
+  after multiple elapsed daily periods, advances its durable cursor, and a
+  direct jump emits both thresholds.
 - Operations endpoints aggregate exact price snapshots and enforce RBAC/
   pagination/filter bounds.
 - Snapshot hashing is order-independent, identical content is reused, and
-  concurrent release creation is safe.
+  concurrent release creation retries the whole transaction safely.
+- Release preview performs no writes; matching fingerprint creates, while a
+  changed input fingerprint returns `release_input_changed`.
 - Release creation binds active rule versions under repeatable read, excludes
   borderline, marks wrong-version scores uncovered, saves `below_target`, and
   returns 409 for empty golden set/missing active rule.
+- Release creation atomically writes its created/below-target audit events, and
+  rollback leaves neither release nor audit residue.
 - Confidence/evidence/agreement results have expected denominators and no
   evidence/PII response fields.
+- Latency percentiles and deterministic sample selection match the specified
+  database/hash algorithms exactly.
 - Cross-check insertion is idempotent from score, golden import, and feedback;
-  lost delivery is recovered; duplicate task delivery produces one provider
-  call; leases retry/terminate correctly; completed results update the existing
-  Score projection.
+  the trigger row commits atomically with each source write; lost delivery is
+  recovered; duplicate task delivery produces one provider call; lease tokens
+  reject stale completion; retries/terminal classification are correct; and an
+  older delayed model/prompt row cannot overwrite the newest Score projection.
 - Admin backfill is bounded/idempotent; unauthorized roles fail.
+- Backfill dry-run performs no writes and matches the subsequent confirmed
+  selection when inputs are unchanged.
 - Batch analysis is aggregate, deterministic, bounded, and PII-free.
+- Suspicious drill-down writes `score_detail_read` audit metadata.
 
 ### 17.3 Frontend tests
 
