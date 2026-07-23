@@ -3,16 +3,21 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
-from sqlalchemy import update
+from openai import APIConnectionError
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.database import AsyncSessionLocal, engine
 from backend.app.models import LLMUsageAttempt
 from backend.app.services.llm.errors import ModelPriceMissing, UsageLedgerUnavailable
+from backend.app.services.llm.gateway import LLMGateway
 from backend.app.services.llm.pricing import PriceBook, parse_price_book
 from backend.app.services.llm.usage import (
     LLMCallContext,
@@ -24,7 +29,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
 def _prices() -> PriceBook:
-    return parse_price_book('{"test-judge":{"input":1,"output":2}}')
+    return parse_price_book(
+        '{"test-judge":{"input":1,"output":2},'
+        '"test-judge-fallback":{"input":1,"output":2}}'
+    )
 
 
 def _context() -> LLMCallContext:
@@ -392,3 +400,53 @@ async def test_finalize_rejects_invalid_terminal_values_without_touching_pending
     assert len(
         [record for record in caplog.records if record.levelno == logging.CRITICAL]
     ) == len(invalid_cases)
+
+
+async def test_gateway_primary_failure_and_fallback_are_two_content_free_rows(db_session):
+    private_name = "Private Candidate Name"
+    context = LLMCallContext(
+        operation="judge",
+        call_group_id=uuid4(),
+        trace_id="usage-trace",
+        jd_id=None,
+    )
+    gateway = LLMGateway(recorder=UsageRecorder(prices=_prices()))
+    gateway._client.chat.completions.create = AsyncMock(
+        side_effect=[
+            APIConnectionError(
+                request=httpx.Request(
+                    "POST", "https://provider.invalid/v1/chat/completions"
+                )
+            ),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok":true}'))],
+                model="test-judge-fallback-versioned",
+                usage=SimpleNamespace(prompt_tokens=9, completion_tokens=4),
+            ),
+        ]
+    )
+
+    response = await gateway.judge(
+        {"resume_markdown": private_name}, schema={"type": "object"}, context=context
+    )
+
+    assert response.used_fallback is True
+    rows = (
+        await db_session.execute(
+            select(LLMUsageAttempt)
+            .where(LLMUsageAttempt.call_group_id == context.call_group_id)
+            .order_by(LLMUsageAttempt.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 2
+    assert [row.attempt_role for row in rows] == ["primary", "fallback"]
+    assert [row.status for row in rows] == ["unavailable", "succeeded"]
+    assert rows[0].error_code == "provider_unavailable"
+    assert rows[1].error_code is None
+    assert all(row.call_group_id == context.call_group_id for row in rows)
+    assert private_name not in repr(
+        [
+            {column.name: getattr(row, column.name) for column in row.__table__.columns}
+            for row in rows
+        ]
+    )

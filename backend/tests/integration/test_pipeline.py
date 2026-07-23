@@ -1,14 +1,19 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 
-from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
-from backend.app.scoring.llm_judge import JudgeDimensionResult, JudgeResult
+from backend.app.database import AsyncSessionLocal
+from backend.app.models import JD, AuditLog, Candidate, LLMUsageAttempt, RuleVersion, Score
+from backend.app.scoring.llm_judge import JudgeDimensionResult, JudgeResult, LLMJudge
 from backend.app.scoring.pipeline import ScoringPipeline
+from backend.app.services.llm.gateway import LLMGateway
+from backend.app.services.llm.usage import UsageRecorder
 from backend.app.services.parser.pii import compute_pii_hash, encrypt_pii
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json"
@@ -58,6 +63,7 @@ async def test_pipeline_happy_path(db_session):
     await db_session.commit()
 
     fake_judge = AsyncMock()
+    call_group_id = uuid4()
     fake_judge.score.return_value = JudgeResult(
         dimensions=[
             JudgeDimensionResult(
@@ -73,6 +79,7 @@ async def test_pipeline_happy_path(db_session):
         model="gpt-5.5",
         tokens=100,
         prompt_version="resume_judge_v1",
+        call_group_id=call_group_id,
     )
     pipeline = ScoringPipeline(db=db_session, judge=fake_judge)
     result = await pipeline.run(candidate_id=cand.id, jd_id=jd.id)
@@ -103,6 +110,8 @@ async def test_pipeline_happy_path(db_session):
     assert stored.rule_version_id == rv.id
     assert not stored.is_suspicious
     assert stored.llm_model_main == "gpt-5.5"
+    assert stored.llm_judge_call_group_id == call_group_id
+    assert fake_judge.score.await_args.kwargs["context"].rule_version_id == rv.id
 
     # A "score" audit row was written.
     score_audits = (
@@ -147,6 +156,10 @@ async def test_pipeline_hard_filter_rejection_writes_audit(db_session):
     assert result.score_id is not None
     assert result.grade == "rejected"
 
+    stored = await db_session.get(Score, result.score_id)
+    assert stored.llm_judge_call_group_id is None
+    pipeline.judge.score.assert_not_awaited()
+
     audits = (
         await db_session.execute(
             select(AuditLog).where(AuditLog.event_type == "hard_filter_reject")
@@ -155,3 +168,167 @@ async def test_pipeline_hard_filter_rejection_writes_audit(db_session):
     assert len(audits) == 1
     assert audits[0].payload["audit_tag"] == "AGE"
     assert audits[0].payload["jd_code"] == "X"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_empty_judge_dimensions_persist_null_group(db_session):
+    rule_data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    rule_data["judge_dimensions"] = []
+    rule_data["total_score"] = 90
+    jd = JD(code="NO_JUDGE", name="No Judge", description="", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    rv = RuleVersion(
+        jd_id=jd.id,
+        version="v1",
+        schema_json=rule_data,
+        published_at=datetime.now(tz=timezone.utc),
+    )
+    db_session.add(rv)
+    await db_session.flush()
+    jd.active_rule_version_id = rv.id
+    cand = Candidate(
+        source="upload",
+        name_cipher=encrypt_pii("No Judge Candidate"),
+        pii_hash=compute_pii_hash(name="No Judge Candidate", phone=None),
+        parsed_markdown="resume",
+        extracted_json={"age": 30, "education": "本科", "experiences": []},
+    )
+    db_session.add(cand)
+    await db_session.commit()
+    gateway = AsyncMock()
+
+    result = await ScoringPipeline(
+        db=db_session, judge=LLMJudge(gateway=gateway)
+    ).run(candidate_id=cand.id, jd_id=jd.id)
+
+    score = await db_session.get(Score, result.score_id)
+    assert score.llm_judge_call_group_id is None
+    gateway.judge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_correlates_terminal_attempts_without_mutating_them(db_session):
+    rule_data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    jd = JD(code="METERED", name="Metered", description="", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    rv = RuleVersion(
+        jd_id=jd.id,
+        version="v1",
+        schema_json=rule_data,
+        published_at=datetime.now(tz=timezone.utc),
+    )
+    db_session.add(rv)
+    await db_session.flush()
+    jd.active_rule_version_id = rv.id
+    cand = Candidate(
+        source="upload",
+        name_cipher=encrypt_pii("Private Candidate"),
+        pii_hash=compute_pii_hash(name="Private Candidate", phone=None),
+        parsed_markdown="independent ownership",
+        extracted_json={"age": 30, "education": "本科", "experiences": []},
+    )
+    db_session.add(cand)
+    await db_session.commit()
+
+    invalid_payload = {
+        "dimensions": [
+            {
+                "id": "wrong-id",
+                "tier": "high",
+                "score": 10,
+                "evidence_quotes": ["independent ownership"],
+                "reasoning": "supported",
+                "confidence": 0.9,
+                "suggested_interview_questions": [],
+            }
+        ]
+    }
+    valid_payload = {
+        "dimensions": [
+            {
+                **invalid_payload["dimensions"][0],
+                "id": "independence",
+            }
+        ]
+    }
+    provider = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(invalid_payload))
+                    )
+                ],
+                model="test-judge",
+                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(valid_payload))
+                    )
+                ],
+                model="test-judge-fallback",
+                usage=SimpleNamespace(prompt_tokens=13, completion_tokens=8),
+            ),
+        ]
+    )
+    gateway = LLMGateway(recorder=UsageRecorder())
+    gateway._client.chat.completions.create = provider
+
+    result = await ScoringPipeline(
+        db=db_session, judge=LLMJudge(gateway=gateway)
+    ).run(candidate_id=cand.id, jd_id=jd.id, trace_id="pipeline-trace")
+    pending_score = await db_session.get(Score, result.score_id)
+    assert pending_score.llm_judge_call_group_id is not None
+
+    async with AsyncSessionLocal() as verify_db:
+        attempts = (
+            await verify_db.execute(
+                select(LLMUsageAttempt)
+                .where(
+                    LLMUsageAttempt.call_group_id
+                    == pending_score.llm_judge_call_group_id
+                )
+                .order_by(LLMUsageAttempt.id)
+            )
+        ).scalars().all()
+        assert [row.attempt_role for row in attempts] == ["primary", "fallback"]
+        assert [row.status for row in attempts] == ["succeeded", "succeeded"]
+        assert all(row.score_id is None for row in attempts)
+        terminal_snapshots = [
+            (
+                row.status,
+                row.input_tokens,
+                row.output_tokens,
+                row.estimated_cost_cny,
+                row.finished_at,
+            )
+            for row in attempts
+        ]
+
+    await db_session.commit()
+    async with AsyncSessionLocal() as verify_db:
+        committed_score = await verify_db.get(Score, result.score_id)
+        assert committed_score.llm_judge_call_group_id == attempts[0].call_group_id
+        reloaded = (
+            await verify_db.execute(
+                select(LLMUsageAttempt)
+                .where(LLMUsageAttempt.call_group_id == attempts[0].call_group_id)
+                .order_by(LLMUsageAttempt.id)
+            )
+        ).scalars().all()
+        assert [
+            (
+                row.status,
+                row.input_tokens,
+                row.output_tokens,
+                row.estimated_cost_cny,
+                row.finished_at,
+            )
+            for row in reloaded
+        ] == terminal_snapshots
+        assert all(row.score_id is None for row in reloaded)
+    provider.assert_awaited()

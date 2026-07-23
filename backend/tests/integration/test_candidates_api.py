@@ -8,7 +8,12 @@ from sqlalchemy import select
 from backend.app.models import JD, AuditLog, Candidate, IngestionJob, RuleVersion, Score
 from backend.app.scoring.llm_judge import JudgeResult
 from backend.app.security.crypto import encrypt_pii
-from backend.app.services.llm.errors import LLMInvalidOutputError, LLMUnavailableError
+from backend.app.services.llm.errors import (
+    LLMInvalidOutputError,
+    LLMUnavailableError,
+    ModelPriceMissing,
+    UsageLedgerUnavailable,
+)
 from backend.app.services.parser.pii import compute_pii_hash
 from backend.app.services.storage import ResumeStorageService, StorageError
 
@@ -152,6 +157,87 @@ async def test_score_endpoint_unknown_jd_returns_404(client, db_session, auth_he
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("error", "detail"),
+    [
+        (
+            UsageLedgerUnavailable("private ledger coordinates"),
+            {
+                "code": "usage_ledger_unavailable",
+                "message": "LLM usage ledger unavailable",
+            },
+        ),
+        (
+            ModelPriceMissing("private-provider-model"),
+            {
+                "code": "model_price_missing",
+                "message": "Configured LLM model price is unavailable",
+            },
+        ),
+    ],
+)
+async def test_score_accounting_failure_returns_precise_503_without_provider_call(
+    client,
+    db_session,
+    auth_headers,
+    monkeypatch,
+    error,
+    detail,
+):
+    import json
+    from datetime import datetime, timezone
+
+    rule_data = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    jd = JD(code=f"ACCOUNTING_{type(error).__name__}", name="Accounting", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    rv = RuleVersion(
+        jd_id=jd.id,
+        version="v1",
+        schema_json=rule_data,
+        published_at=datetime.now(tz=timezone.utc),
+    )
+    db_session.add(rv)
+    await db_session.flush()
+    jd.active_rule_version_id = rv.id
+    candidate = Candidate(
+        source="upload",
+        name_cipher=encrypt_pii("Private Candidate"),
+        pii_hash=compute_pii_hash(name="Private Candidate", phone=None),
+        parsed_markdown="independent ownership",
+        extracted_json={"age": 30, "education": "本科", "experiences": []},
+    )
+    db_session.add(candidate)
+    await db_session.commit()
+
+    provider = AsyncMock()
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=provider))
+    )
+    monkeypatch.setattr(
+        "backend.app.services.llm.gateway.AsyncOpenAI", lambda **_kwargs: fake_client
+    )
+    begin = AsyncMock(side_effect=error)
+    monkeypatch.setattr("backend.app.services.llm.gateway.UsageRecorder.begin", begin)
+
+    response = await client.post(
+        f"/api/v1/candidates/{candidate.id}/score",
+        json={"jd_code": jd.code},
+        headers=await auth_headers(),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == detail
+    provider.assert_not_awaited()
+    assert begin.await_args.kwargs["context"].trace_id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("error", "status_code", "detail"),
     [
         (
@@ -213,7 +299,13 @@ async def test_rescore_ai_failure_preserves_existing_score_and_rolls_back_partia
     await db_session.commit()
     existing_score_id = existing_score.id
 
-    async def fail_after_partial_write(pipeline, *, candidate_id: int, jd_id: int):
+    async def fail_after_partial_write(
+        pipeline,
+        *,
+        candidate_id: int,
+        jd_id: int,
+        trace_id: str | None = None,
+    ):
         pipeline.db.add(
             AuditLog(
                 event_type="score",

@@ -1,5 +1,7 @@
 import asyncio
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -9,6 +11,7 @@ from backend.app.config import get_settings
 from backend.app.scoring.llm_judge import JudgeDimensionResult
 from backend.app.services.llm.gateway import LLMGateway
 from backend.app.services.llm.structured_output import decode_json_object
+from backend.app.services.llm.usage import LLMCallContext
 from backend.app.services.parser.extractor import ExtractedResumePayload
 
 pytestmark = pytest.mark.external_contract
@@ -18,6 +21,15 @@ class _ProbeJudgeOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     dimensions: list[JudgeDimensionResult]
+
+
+class _ProbeRecorder:
+    async def begin(self, **kwargs: Any) -> SimpleNamespace:
+        context = kwargs["context"]
+        return SimpleNamespace(attempt_id=1, trace_id=context.trace_id)
+
+    async def finalize(self, *_args: Any, **_kwargs: Any) -> bool:
+        return True
 
 
 async def _get_with_transport_retries(
@@ -67,10 +79,11 @@ async def test_deployed_newapi_lists_every_configured_model() -> None:
 async def test_extraction_models_support_configured_structured_output(
     fallback_only: bool,
 ) -> None:
-    gateway = LLMGateway()
+    gateway = LLMGateway(recorder=_ProbeRecorder())
     response = await gateway.extract(
         "SYNTHETIC RESUME\nEXPORT EXPERIENCE 2020-2026",
         schema=ExtractedResumePayload.model_json_schema(),
+        context=LLMCallContext(operation="extract", call_group_id=uuid4()),
         fallback_only=fallback_only,
     )
 
@@ -83,7 +96,7 @@ async def test_extraction_models_support_configured_structured_output(
 async def test_judge_models_support_configured_structured_output(
     fallback_only: bool,
 ) -> None:
-    gateway = LLMGateway()
+    gateway = LLMGateway(recorder=_ProbeRecorder())
     response = await gateway.judge(
         {
             "resume_markdown": "SYNTHETIC RESUME\nEXPORT EXPERIENCE 2020-2026",
@@ -97,6 +110,7 @@ async def test_judge_models_support_configured_structured_output(
             ],
         },
         schema=_ProbeJudgeOutput.model_json_schema(),
+        context=LLMCallContext(operation="judge", call_group_id=uuid4()),
         fallback_only=fallback_only,
     )
 

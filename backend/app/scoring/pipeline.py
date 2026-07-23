@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -12,6 +13,7 @@ from backend.app.rules.schema import RuleSchema
 from backend.app.scoring.hard_filter import run_hard_filters
 from backend.app.scoring.llm_judge import LLMJudge
 from backend.app.scoring.rule_engine import score_dimensions
+from backend.app.services.llm.usage import LLMCallContext
 
 
 @dataclass
@@ -75,7 +77,14 @@ class ScoringPipeline:
         ).scalar_one()
         return score_id, False
 
-    async def run(self, *, candidate_id: int, jd_id: int) -> PipelineResult:
+    async def run(
+        self,
+        *,
+        candidate_id: int,
+        jd_id: int,
+        ingestion_job_id: int | None = None,
+        trace_id: str | None = None,
+    ) -> PipelineResult:
         candidate = (
             await self.db.execute(select(Candidate).where(Candidate.id == candidate_id))
         ).scalar_one()
@@ -133,6 +142,7 @@ class ScoringPipeline:
                 judge_dimensions=None,
                 is_suspicious=False,
                 llm_model_extract=extraction_model,
+                llm_judge_call_group_id=None,
             )
             if created:
                 for entry in hf.audit_entries:
@@ -163,12 +173,26 @@ class ScoringPipeline:
         rule_total = sum((r.get("score") or 0) for r in rule_results)
 
         # Stage C — LLM judge
+        judge_context = LLMCallContext(
+            operation="judge",
+            call_group_id=uuid4(),
+            trace_id=trace_id,
+            ingestion_job_id=ingestion_job_id,
+            jd_id=jd.id,
+            rule_version_id=rv.id,
+        )
         judge_result = await self.judge.score(
             resume_text=candidate.parsed_markdown or "",
             dims=schema.judge_dimensions,
+            context=judge_context,
         )
         judge_total = sum((dimension.score or 0) for dimension in judge_result.dimensions)
-        judge_payload = judge_result.model_dump()
+        judge_payload = judge_result.model_dump(exclude={"call_group_id"})
+        judge_call_group_id = (
+            judge_result.call_group_id or judge_context.call_group_id
+            if schema.judge_dimensions
+            else None
+        )
 
         total = rule_total + judge_total
         grade = _grade_from(total, schema)
@@ -189,6 +213,7 @@ class ScoringPipeline:
             is_suspicious=False,
             llm_model_main=judge_result.model or None,
             llm_model_extract=extraction_model,
+            llm_judge_call_group_id=judge_call_group_id,
             cost_tokens=judge_result.tokens,
         )
         if created:

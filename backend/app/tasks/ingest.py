@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import structlog
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from backend.app.database import AsyncSessionLocal, engine
 from backend.app.models import JD, AuditLog, Candidate, IngestionJob
 from backend.app.scoring.pipeline import ScoringPipeline
 from backend.app.services.ingestion.states import IngestionState, InvalidTransitionError
+from backend.app.services.llm.usage import LLMCallContext
 from backend.app.services.parser.extractor import ExtractedResume, ResumeExtractor
 from backend.app.services.parser.mineru_client import MinerUClient
 from backend.app.services.parser.pii import compute_pii_hash, encrypt_pii
@@ -42,6 +44,7 @@ _CONTENT_TYPE_SUFFIXES = {
 RETRYABLE_ERRORS: dict[str, str] = {
     "MinerUUnavailableError": "resume_parser_unavailable",
     "LLMUnavailableError": "ai_service_unavailable",
+    "UsageLedgerUnavailable": "usage_ledger_unavailable",
 }
 TERMINAL_ERRORS: dict[str, str] = {
     "MinerUContractError": "resume_parser_contract_invalid",
@@ -49,6 +52,7 @@ TERMINAL_ERRORS: dict[str, str] = {
     "LLMConfigurationError": "ai_service_configuration_invalid",
     "LLMInvalidResponseError": "ai_invalid_output",
     "LLMInvalidOutputError": "ai_invalid_output",
+    "ModelPriceMissing": "model_price_missing",
 }
 _GENERIC_RETRYABLE_ERROR_CODE = "ingestion_worker_error"
 
@@ -177,10 +181,24 @@ async def run_parse_and_score(
 ) -> IngestionResult:
     owns_new_object = True
     try:
+        trace_id = structlog.contextvars.get_contextvars().get("trace_id")
+        jd = None
+        if jd_code:
+            jd = (
+                await db.execute(select(JD).where(JD.code == jd_code))
+            ).scalar_one_or_none()
         parser = MinerUClient()
         parsed = await parser.parse(Path(local_file_path))
         extractor = ResumeExtractor()
-        extracted = await extractor.extract(parsed.markdown)
+        extracted = await extractor.extract(
+            parsed.markdown,
+            context=LLMCallContext(
+                operation="extract",
+                call_group_id=uuid4(),
+                trace_id=trace_id,
+                jd_id=jd.id if jd is not None else None,
+            ),
+        )
 
         cand, status, object_deleted = await _insert_or_reuse_candidate(
             db,
@@ -194,14 +212,14 @@ async def run_parse_and_score(
         if object_deleted:
             owns_new_object = False
 
-        if jd_code:
-            jd = (
-                await db.execute(select(JD).where(JD.code == jd_code))
-            ).scalar_one_or_none()
-            if jd and jd.active_rule_version_id:
-                await ScoringPipeline(db=db).run(candidate_id=cand.id, jd_id=jd.id)
+        if jd and jd.active_rule_version_id:
+            await ScoringPipeline(db=db).run(
+                candidate_id=cand.id,
+                jd_id=jd.id,
+                ingestion_job_id=None,
+                trace_id=trace_id,
+            )
 
-        trace_id = structlog.contextvars.get_contextvars().get("trace_id")
         db.add(
             AuditLog(
                 event_type="candidate_upload" if status == "parsed" else "candidate_duplicate",
@@ -315,6 +333,12 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
 
     svc = IngestionJobService(db)
     candidate: Candidate
+    trace_id = job.trace_id or structlog.contextvars.get_contextvars().get("trace_id")
+    jd = None
+    if job.jd_code:
+        jd = (
+            await db.execute(select(JD).where(JD.code == job.jd_code))
+        ).scalar_one_or_none()
 
     if job.candidate_id is None:
         reference = _reference_from_job(job)
@@ -326,7 +350,16 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
             await svc.transition(job, IngestionState.EXTRACTING)
             await db.commit()
 
-            extracted = await ResumeExtractor().extract(parsed.markdown)
+            extracted = await ResumeExtractor().extract(
+                parsed.markdown,
+                context=LLMCallContext(
+                    operation="extract",
+                    call_group_id=uuid4(),
+                    trace_id=trace_id,
+                    ingestion_job_id=job.id,
+                    jd_id=jd.id if jd is not None else None,
+                ),
+            )
 
             candidate, _status, _object_deleted = await _insert_or_reuse_candidate(
                 db,
@@ -351,15 +384,16 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
             await svc.transition(job, IngestionState.EXTRACTING)
             await db.commit()
 
-    jd = None
-    if job.jd_code:
-        jd = (await db.execute(select(JD).where(JD.code == job.jd_code))).scalar_one_or_none()
-
     if jd is not None and jd.active_rule_version_id:
         await svc.transition(job, IngestionState.SCORING)
         await db.commit()
 
-        result = await ScoringPipeline(db=db).run(candidate_id=candidate.id, jd_id=jd.id)
+        result = await ScoringPipeline(db=db).run(
+            candidate_id=candidate.id,
+            jd_id=jd.id,
+            ingestion_job_id=job.id,
+            trace_id=trace_id,
+        )
         job.score_id = result.score_id
 
         await svc.transition(job, IngestionState.COMPLETED)

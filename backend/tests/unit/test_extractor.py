@@ -1,22 +1,34 @@
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
 
 import pytest
 
 from backend.app.services.llm.errors import LLMInvalidOutputError
 from backend.app.services.llm.schemas import LLMResponse
+from backend.app.services.llm.usage import LLMCallContext
 from backend.app.services.parser.extractor import ExtractedResume, ResumeExtractor
 
 SAMPLE = (Path(__file__).parents[1] / "fixtures" / "sample_resume.md").read_text(encoding="utf-8")
 
 
-def _response(payload: object, *, fallback: bool = False) -> LLMResponse:
+def _context() -> LLMCallContext:
+    return LLMCallContext(operation="extract", call_group_id=uuid4())
+
+
+def _response(
+    payload: object,
+    *,
+    fallback: bool = False,
+    call_group_id: UUID | None = None,
+) -> LLMResponse:
     return LLMResponse(
         content=json.dumps(payload, ensure_ascii=False),
         model="fallback" if fallback else "primary",
         input_tokens=100,
         output_tokens=50,
+        call_group_id=call_group_id or uuid4(),
         prompt_version="resume_extract_v1",
         used_fallback=fallback,
     )
@@ -28,6 +40,7 @@ def _raw_response(content: str, *, fallback: bool = False) -> LLMResponse:
         model="fallback" if fallback else "primary",
         input_tokens=100,
         output_tokens=50,
+        call_group_id=uuid4(),
         prompt_version="resume_extract_v1",
         used_fallback=fallback,
     )
@@ -55,9 +68,12 @@ def _valid_payload() -> dict:
 @pytest.mark.asyncio
 async def test_extract_returns_strict_structured_result_with_trusted_metadata() -> None:
     gateway = AsyncMock()
-    gateway.extract.return_value = _response(_valid_payload())
+    context = _context()
+    gateway.extract.return_value = _response(
+        _valid_payload(), call_group_id=context.call_group_id
+    )
 
-    result = await ResumeExtractor(gateway=gateway).extract(SAMPLE)
+    result = await ResumeExtractor(gateway=gateway).extract(SAMPLE, context=context)
 
     assert isinstance(result, ExtractedResume)
     assert result.name == "张三"
@@ -65,21 +81,27 @@ async def test_extract_returns_strict_structured_result_with_trusted_metadata() 
     assert result.raw_tokens == 150
     assert result.model == "primary"
     assert result.prompt_version == "resume_extract_v1"
+    assert result.call_group_id == context.call_group_id
 
 
 @pytest.mark.asyncio
 async def test_invalid_primary_output_uses_fallback_once() -> None:
     gateway = AsyncMock()
+    context = _context()
     gateway.extract.side_effect = [
         _response({"name": "张三", "experiences": [], "extra": True}),
-        _response(_valid_payload(), fallback=True),
+        _response(_valid_payload(), fallback=True, call_group_id=context.call_group_id),
     ]
 
-    result = await ResumeExtractor(gateway=gateway).extract(SAMPLE)
+    result = await ResumeExtractor(gateway=gateway).extract(SAMPLE, context=context)
 
     assert result.model == "fallback"
     assert gateway.extract.await_count == 2
+    assert all(
+        call.kwargs["context"] is context for call in gateway.extract.await_args_list
+    )
     assert gateway.extract.await_args_list[1].kwargs["fallback_only"] is True
+    assert result.call_group_id == context.call_group_id
 
 
 @pytest.mark.asyncio
@@ -89,7 +111,7 @@ async def test_optional_empty_strings_normalize_to_none() -> None:
     gateway = AsyncMock()
     gateway.extract.return_value = _response(payload)
 
-    result = await ResumeExtractor(gateway=gateway).extract(SAMPLE)
+    result = await ResumeExtractor(gateway=gateway).extract(SAMPLE, context=_context())
 
     assert result.name is None
     assert result.phone is None
@@ -128,7 +150,7 @@ async def test_invalid_payload_never_returns_result(change: dict) -> None:
     gateway.extract.side_effect = [_response(payload), _response(payload, fallback=True)]
 
     with pytest.raises(LLMInvalidOutputError):
-        await ResumeExtractor(gateway=gateway).extract(SAMPLE)
+        await ResumeExtractor(gateway=gateway).extract(SAMPLE, context=_context())
     assert gateway.extract.await_count == 2
 
 
@@ -139,7 +161,7 @@ async def test_wrong_top_level_type_is_rejected_after_two_attempts(payload: obje
     gateway.extract.side_effect = [_response(payload), _response(payload, fallback=True)]
 
     with pytest.raises(LLMInvalidOutputError):
-        await ResumeExtractor(gateway=gateway).extract(SAMPLE)
+        await ResumeExtractor(gateway=gateway).extract(SAMPLE, context=_context())
 
     assert gateway.extract.await_count == 2
 
@@ -153,7 +175,7 @@ async def test_invalid_json_is_rejected_after_two_attempts() -> None:
     ]
 
     with pytest.raises(LLMInvalidOutputError):
-        await ResumeExtractor(gateway=gateway).extract(SAMPLE)
+        await ResumeExtractor(gateway=gateway).extract(SAMPLE, context=_context())
 
     assert gateway.extract.await_count == 2
 
@@ -166,6 +188,6 @@ async def test_missing_required_key_is_rejected_after_two_attempts() -> None:
     gateway.extract.side_effect = [_response(payload), _response(payload, fallback=True)]
 
     with pytest.raises(LLMInvalidOutputError):
-        await ResumeExtractor(gateway=gateway).extract(SAMPLE)
+        await ResumeExtractor(gateway=gateway).extract(SAMPLE, context=_context())
 
     assert gateway.extract.await_count == 2

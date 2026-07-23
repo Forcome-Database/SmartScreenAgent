@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -16,6 +17,7 @@ from backend.app.services.llm.errors import LLMInvalidOutputError
 from backend.app.services.llm.gateway import EXTRACT_PROMPT_VERSION, LLMGateway
 from backend.app.services.llm.schemas import LLMResponse
 from backend.app.services.llm.structured_output import decode_json_object
+from backend.app.services.llm.usage import LLMCallContext
 
 _DATE_PATTERN = re.compile(r"^\d{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\d|3[01]))?)?$")
 
@@ -79,15 +81,20 @@ class ExtractedResume(ExtractedResumePayload):
     model: str = ""
     prompt_version: str = EXTRACT_PROMPT_VERSION
     schema_version: int = 1
+    call_group_id: UUID | None = None
 
 
 class ResumeExtractor:
     def __init__(self, gateway: LLMGateway | None = None) -> None:
         self._gateway = gateway or LLMGateway()
 
-    async def extract(self, markdown: str) -> ExtractedResume:
+    async def extract(
+        self, markdown: str, *, context: LLMCallContext
+    ) -> ExtractedResume:
         response = await self._gateway.extract(
-            markdown, schema=ExtractedResumePayload.model_json_schema()
+            markdown,
+            schema=ExtractedResumePayload.model_json_schema(),
+            context=context,
         )
         try:
             return self._validate(response)
@@ -97,6 +104,7 @@ class ResumeExtractor:
             fallback = await self._gateway.extract(
                 markdown,
                 schema=ExtractedResumePayload.model_json_schema(),
+                context=context,
                 fallback_only=True,
             )
             try:
@@ -113,7 +121,8 @@ class ResumeExtractor:
             raise LLMInvalidOutputError("resume extraction output is invalid") from exc
         return ExtractedResume(
             **extracted.model_dump(),
-            raw_tokens=response.input_tokens + response.output_tokens,
+            raw_tokens=(response.input_tokens or 0) + (response.output_tokens or 0),
             model=response.model,
             prompt_version=response.prompt_version or EXTRACT_PROMPT_VERSION,
+            call_group_id=response.call_group_id,
         )
