@@ -84,6 +84,55 @@ def test_enabled_cross_engine_model_must_differ_from_primary_judge(monkeypatch):
         get_settings()
 
 
+def test_all_configured_primary_models_must_have_prices(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_PRICE_CNY_PER_MILLION_JSON",
+        '{"test-extract":{"input":1.000000,"output":2.000000}}',
+    )
+
+    with pytest.raises(ValidationError, match="price"):
+        get_settings()
+
+
+def test_rate_overflow_is_a_settings_validation_error(monkeypatch):
+    price_json = TEST_ENV_DEFAULTS["LLM_PRICE_CNY_PER_MILLION_JSON"].replace(
+        "1.000000", "1e100", 1
+    )
+    monkeypatch.setenv("LLM_PRICE_CNY_PER_MILLION_JSON", price_json)
+
+    with pytest.raises(ValidationError, match="price"):
+        get_settings()
+
+
+def test_extreme_rate_exponent_is_a_settings_validation_error(monkeypatch):
+    price_json = TEST_ENV_DEFAULTS["LLM_PRICE_CNY_PER_MILLION_JSON"].replace(
+        "1.000000", "1e999999999999999999999999999999999999", 1
+    )
+    monkeypatch.setenv("LLM_PRICE_CNY_PER_MILLION_JSON", price_json)
+
+    with pytest.raises(ValidationError, match="price"):
+        get_settings()
+
+
+def test_enabled_secondary_model_must_have_a_price(monkeypatch):
+    primary_judge = "explicit-primary-judge"
+    monkeypatch.setenv("LLM_MODEL_JUDGE", primary_judge)
+    monkeypatch.setenv("CROSS_ENGINE_MODEL", "missing-secondary")
+    monkeypatch.setenv(
+        "LLM_PRICE_CNY_PER_MILLION_JSON",
+        (
+            '{"test-extract":{"input":1.000000,"output":2.000000},'
+            '"test-extract-fallback":{"input":1.000000,"output":2.000000},'
+            f'"{primary_judge}":{{"input":1.000000,"output":2.000000}},'
+            '"test-judge-fallback":{"input":1.000000,"output":2.000000},'
+            '"test-light":{"input":1.000000,"output":2.000000}}'
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="price"):
+        get_settings()
+
+
 def test_bootstrap_has_deterministic_wp7_environment():
     price = (
         '{"test-extract":{"input":1.000000,"output":2.000000},'

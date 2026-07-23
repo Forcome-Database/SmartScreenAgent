@@ -6,6 +6,12 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from backend.app.services.llm.pricing import (
+    InvalidPriceBook,
+    ModelPriceMissing,
+    parse_price_book,
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -121,6 +127,21 @@ class Settings(BaseSettings):
     def _cross_engine_model_differs_from_primary(self) -> Settings:
         if self.CROSS_ENGINE_MODEL and self.CROSS_ENGINE_MODEL == self.LLM_MODEL_JUDGE:
             raise ValueError("CROSS_ENGINE_MODEL must differ from LLM_MODEL_JUDGE")
+        try:
+            prices = parse_price_book(self.LLM_PRICE_CNY_PER_MILLION_JSON)
+            configured_models = (
+                self.LLM_MODEL_EXTRACT,
+                self.LLM_MODEL_EXTRACT_FALLBACK,
+                self.LLM_MODEL_JUDGE,
+                self.LLM_MODEL_JUDGE_FALLBACK,
+                self.LLM_MODEL_LIGHT,
+            )
+            for model in configured_models:
+                prices.require(model)
+            if self.CROSS_ENGINE_MODEL:
+                prices.require(self.CROSS_ENGINE_MODEL)
+        except (InvalidPriceBook, ModelPriceMissing) as exc:
+            raise ValueError(f"invalid LLM model price configuration: {exc}") from exc
         return self
 
     @property

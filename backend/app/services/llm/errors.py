@@ -10,6 +10,10 @@ class LLMConfigurationError(LLMError):
     """A non-retryable authentication, authorization, or request configuration failure."""
 
 
+class ModelPriceMissing(LLMConfigurationError):
+    """A configured model has no price in the active price book."""
+
+
 class LLMInvalidResponseError(LLMError):
     """The provider response is structurally incomplete before schema validation."""
 
