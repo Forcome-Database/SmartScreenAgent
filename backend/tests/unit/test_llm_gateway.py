@@ -360,6 +360,40 @@ async def test_malformed_response_preserves_reported_usage_in_ledger() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "choice",
+    [SimpleNamespace(message=None), SimpleNamespace()],
+    ids=["null-message", "missing-message"],
+)
+async def test_missing_choice_message_is_invalid_and_preserves_reported_usage(
+    choice: SimpleNamespace,
+) -> None:
+    recorder = _recorder()
+    gateway = LLMGateway(recorder=recorder)
+    provider = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[choice],
+            model="actual-model",
+            usage=SimpleNamespace(prompt_tokens=17, completion_tokens=6),
+        )
+    )
+    gateway._client.chat.completions.create = provider
+
+    with pytest.raises(LLMInvalidResponseError):
+        await _call_once(gateway)
+
+    provider.assert_awaited_once()
+    assert recorder.finalize.await_args.kwargs == {
+        "status": "invalid_response",
+        "actual_model": "actual-model",
+        "input_tokens": 17,
+        "output_tokens": 6,
+        "latency_ms": recorder.finalize.await_args.kwargs["latency_ms"],
+        "error_code": "invalid_response",
+    }
+
+
+@pytest.mark.asyncio
 async def test_missing_usage_records_null_tokens_and_safe_metadata(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

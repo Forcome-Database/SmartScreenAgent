@@ -240,7 +240,8 @@ class LLMGateway:
                 outcome="invalid_response",
             )
             raise LLMInvalidResponseError("LLM response has no choices")
-        content = response.choices[0].message.content
+        message = getattr(response.choices[0], "message", None)
+        content = getattr(message, "content", None)
         if not isinstance(content, str) or not content.strip():
             await self._finalize(
                 handle,
