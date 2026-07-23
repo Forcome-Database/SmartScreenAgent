@@ -6,6 +6,10 @@ class LLMUnavailableError(LLMError):
     """A retryable provider transport, rate-limit, or server failure."""
 
 
+class UsageLedgerUnavailable(LLMUnavailableError):
+    """The usage ledger could not durably record a pending paid attempt."""
+
+
 class LLMConfigurationError(LLMError):
     """A non-retryable authentication, authorization, or request configuration failure."""
 
