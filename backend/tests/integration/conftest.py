@@ -87,6 +87,22 @@ _CLEAN_TABLES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def no_real_budget_enqueue(monkeypatch):
+    """Keep `UsageRecorder` from publishing real Celery messages during tests.
+
+    Finalizing a usage attempt best-effort enqueues `wp7.evaluate_budget_attempt`.
+    That is correct in production, where each worker is its own process, but in
+    tests the in-thread worker started by `celery_worker` shares this process and
+    its task body would dispose the module-level engine out from under the
+    running test. Tests that care about the hook inject their own.
+    """
+    monkeypatch.setattr(
+        "backend.app.services.llm.usage._enqueue_budget_evaluation",
+        lambda _attempt_id: None,
+    )
+
+
 @pytest_asyncio.fixture
 async def db_session():
     """Function-scoped fresh AsyncSession; truncates P2 tables on teardown."""

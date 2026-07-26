@@ -30,6 +30,18 @@ TerminalStatus = Literal[
     "abandoned",
 ]
 SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+EnqueueHook = Callable[[int], None]
+
+
+def _enqueue_budget_evaluation(attempt_id: int) -> None:
+    """Ask a worker to re-evaluate budgets for the period containing this attempt.
+
+    Imported lazily: `tasks.celery_app` reads settings at import time and the
+    task module imports this one.
+    """
+    from backend.app.tasks.celery_app import celery_app
+
+    celery_app.send_task("wp7.evaluate_budget_attempt", args=[attempt_id])
 
 _TERMINAL_STATUSES = {
     "succeeded",
@@ -67,6 +79,7 @@ class UsageRecorder:
         session_factory: SessionFactory = AsyncSessionLocal,
         prices: PriceBook | None = None,
         finalize_retries: int | None = None,
+        enqueue: EnqueueHook | None = None,
     ) -> None:
         if prices is None or finalize_retries is None:
             from backend.app.config import get_settings
@@ -81,6 +94,7 @@ class UsageRecorder:
         self._session_factory = session_factory
         self._prices = prices
         self._finalize_retries = finalize_retries
+        self._enqueue = enqueue or _enqueue_budget_evaluation
 
     async def begin(
         self,
@@ -186,9 +200,13 @@ class UsageRecorder:
                         ),
                     )
                     await session.commit()
-                    return result.rowcount == 1
+                    updated = result.rowcount == 1
             except Exception as exc:
                 last_exception = exc
+                continue
+            if updated:
+                self._notify_budget_evaluation(handle)
+            return updated
 
         assert last_exception is not None
         self._log_finalization_failure(
@@ -197,6 +215,25 @@ class UsageRecorder:
             exc=last_exception,
         )
         return False
+
+    def _notify_budget_evaluation(self, handle: UsageAttemptHandle) -> None:
+        """Best-effort budget notification.
+
+        The call is already paid for and the ledger row is already terminal, so a
+        dead broker must not change what `finalize` reports. The cursor-based
+        reconciler is the durable path; this is only the low-latency one.
+        """
+        try:
+            self._enqueue(handle.attempt_id)
+        except Exception as exc:
+            logger.warning(
+                "llm budget evaluation enqueue failed",
+                extra={
+                    "attempt_id": handle.attempt_id,
+                    "trace_id": handle.trace_id,
+                    "exception_class": type(exc).__name__,
+                },
+            )
 
     @staticmethod
     def _validate_terminal_values(

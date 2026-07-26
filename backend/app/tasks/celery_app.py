@@ -8,7 +8,11 @@ celery_app = Celery(
     "smartscreen",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["backend.app.tasks.ingest", "backend.app.tasks.sweep"],
+    include=[
+        "backend.app.tasks.ingest",
+        "backend.app.tasks.sweep",
+        "backend.app.tasks.wp7",
+    ],
 )
 
 celery_app.conf.update(
@@ -29,7 +33,15 @@ celery_app.conf.beat_schedule = {
     "ingestion-sweep": {
         "task": "ingest.sweep",
         "schedule": float(settings.INGESTION_SWEEP_INTERVAL_SECONDS),
-    }
+    },
+    "wp7-reconcile-budgets": {
+        "task": "wp7.reconcile_budgets",
+        "schedule": 300.0,
+    },
+    "wp7-sweep-stale-usage": {
+        "task": "wp7.sweep_stale_usage",
+        "schedule": 60.0,
+    },
 }
 
 
