@@ -81,6 +81,15 @@ class Settings(BaseSettings):
     CROSS_ENGINE_SWEEP_INTERVAL_SECONDS: int = Field(default=60, ge=1)
     CROSS_ENGINE_BACKFILL_MAX: int = Field(default=500, ge=1)
 
+    # DingTalk recruitment sync (WP8)
+    DINGTALK_SYNC_ENABLED: bool = False
+    DINGTALK_SYNC_INTERVAL_SECONDS: int = Field(default=1800, ge=1)
+    DINGTALK_RECRUITMENT_BASE_URL: str = "https://api.dingtalk.com"
+    SYNC_OVERLAP_SECONDS: int = Field(default=300, ge=0)
+    SYNC_MAX_ITEMS_PER_RUN: int = Field(default=200, ge=1)
+    SYNC_MAX_ITEM_ATTEMPTS: int = Field(default=3, ge=1, le=10)
+    SYNC_REPLAY_INTERVAL_SECONDS: int = Field(default=3600, ge=1)
+
     # Resume parser (MinerU)
     MINERU_MODE: Literal["official", "stub"] = "official"
     MINERU_BASE_URL: str = "https://mineru.net"

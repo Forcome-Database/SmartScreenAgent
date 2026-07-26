@@ -67,6 +67,8 @@ def _apply_migrations():
 
 # Children before parents — FK-safe TRUNCATE order.
 _CLEAN_TABLES = [
+    "sync_source_items",
+    "sync_cursors",
     "quality_release_jds",
     "quality_releases",
     "golden_set_snapshot_entries",

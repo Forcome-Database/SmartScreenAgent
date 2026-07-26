@@ -16,6 +16,7 @@ from backend.app.models.quality_release import (
 )
 from backend.app.models.rule_version import RuleVersion
 from backend.app.models.score import Score
+from backend.app.models.sync import SyncCursor, SyncSourceItem
 from backend.app.models.user import User
 
 __all__ = [
@@ -38,4 +39,6 @@ __all__ = [
     "GoldenSetSnapshotEntry",
     "QualityRelease",
     "QualityReleaseJD",
+    "SyncCursor",
+    "SyncSourceItem",
 ]
