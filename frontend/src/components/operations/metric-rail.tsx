@@ -17,10 +17,14 @@ const TONE: Record<NonNullable<Metric["tone"]>, string> = {
 
 export function MetricRail({ metrics }: { metrics: Metric[] }) {
   return (
-    <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    // Each tile is its own <dl>: a single <dl> wrapping styled <div>s trips
+    // axe's `only-dlitems` rule, and the term/description pairing is per tile
+    // anyway.
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {metrics.map((metric) => (
-        <div
+        <dl
           key={metric.label}
+          data-testid="metric-tile"
           className={cn(
             "rounded-md border border-l-4 p-3",
             TONE[metric.tone ?? "normal"],
@@ -29,11 +33,11 @@ export function MetricRail({ metrics }: { metrics: Metric[] }) {
           <dt className="text-sm text-muted-foreground">{metric.label}</dt>
           <dd className="text-2xl font-semibold tabular-nums">{metric.value}</dd>
           {metric.hint && (
-            <p className="mt-1 text-xs text-muted-foreground">{metric.hint}</p>
+            <dd className="mt-1 text-xs text-muted-foreground">{metric.hint}</dd>
           )}
-        </div>
+        </dl>
       ))}
-    </dl>
+    </div>
   );
 }
 
