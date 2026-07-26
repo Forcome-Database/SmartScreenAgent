@@ -44,7 +44,11 @@ dev = [
 ]
 
 [tool.uv]
-required-version = "==0.9.6"
+# Lower bound, not an exact pin: CI already installs an exact uv via
+# `astral-sh/setup-uv` (version "0.9.6" in .github/workflows/verify.yml), and
+# reproducibility comes from `uv.lock` + `uv sync --locked`. Pinning here as
+# well only blocked every developer whose uv had moved on.
+required-version = ">=0.9.6"
 index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 [tool.pytest.ini_options]
