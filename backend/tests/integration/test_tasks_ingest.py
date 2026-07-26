@@ -53,39 +53,47 @@ async def test_run_parse_and_score_persists_candidate(
         metadata={"sha256": sha256},
     )
 
+    async def parse_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return ParseResult(markdown="# resume\n张三 13800001234", source="stub")
+
     parser_stub = SimpleNamespace(
-        parse=AsyncMock(
-            return_value=ParseResult(markdown="# resume\n张三 13800001234", source="stub")
-        )
+        parse=AsyncMock(side_effect=parse_without_business_transaction)
     )
-    extractor_stub = SimpleNamespace(
-        extract=AsyncMock(
-            return_value=ExtractedResume(
-                name="张三",
-                phone="13800001234",
-                email=None,
-                education="本科",
-                age=30,
-                raw_tokens=321,
-                model="extract-model",
-                prompt_version="resume_extract_v1",
-                experiences=[
-                    Experience(
-                        company="X",
-                        title="外贸",
-                        description="北美 五金",
-                        start="2020-01",
-                        end="2024-01",
-                    )
-                ],
+    extracted_resume = ExtractedResume(
+        name="张三",
+        phone="13800001234",
+        email=None,
+        education="本科",
+        age=30,
+        raw_tokens=321,
+        model="extract-model",
+        prompt_version="resume_extract_v1",
+        experiences=[
+            Experience(
+                company="X",
+                title="外贸",
+                description="北美 五金",
+                start="2020-01",
+                end="2024-01",
             )
-        )
+        ],
+    )
+
+    async def extract_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return extracted_resume
+
+    extractor_stub = SimpleNamespace(
+        extract=AsyncMock(side_effect=extract_without_business_transaction)
     )
     monkeypatch.setattr("backend.app.tasks.ingest.MinerUClient", lambda: parser_stub)
     monkeypatch.setattr("backend.app.tasks.ingest.ResumeExtractor", lambda: extractor_stub)
-    pipeline_run = AsyncMock(
-        return_value=SimpleNamespace(score_id=1, total_score=1, grade="L1", rejected=False)
-    )
+    async def run_pipeline_without_business_transaction(**_kwargs):
+        assert not db_session.in_transaction()
+        return SimpleNamespace(score_id=1, total_score=1, grade="L1", rejected=False)
+
+    pipeline_run = AsyncMock(side_effect=run_pipeline_without_business_transaction)
     monkeypatch.setattr(
         "backend.app.tasks.ingest.ScoringPipeline",
         lambda db: SimpleNamespace(run=pipeline_run),
@@ -487,31 +495,39 @@ async def test_run_job_propagates_job_trace_and_jd_context(
         content_type="application/pdf",
         metadata={"sha256": sha256},
     )
-    extractor = SimpleNamespace(
-        extract=AsyncMock(
-            return_value=ExtractedResume(
-                name="Context Candidate",
-                phone=None,
-                email=None,
-                education="本科",
-                age=30,
-                experiences=[],
-            )
+    async def parse_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return ParseResult(markdown="resume", source="stub")
+
+    async def extract_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return ExtractedResume(
+            name="Context Candidate",
+            phone=None,
+            email=None,
+            education="本科",
+            age=30,
+            experiences=[],
         )
-    )
-    judge_score = AsyncMock(
-        return_value=JudgeResult(
+
+    async def judge_without_business_transaction(**_kwargs):
+        assert not db_session.in_transaction()
+        return JudgeResult(
             dimensions=[],
             model="mock",
             tokens=0,
             prompt_version="resume_judge_v1",
             call_group_id=uuid4(),
         )
+
+    extractor = SimpleNamespace(
+        extract=AsyncMock(side_effect=extract_without_business_transaction)
     )
+    judge_score = AsyncMock(side_effect=judge_without_business_transaction)
     monkeypatch.setattr(
         "backend.app.tasks.ingest.MinerUClient",
         lambda: SimpleNamespace(
-            parse=AsyncMock(return_value=ParseResult(markdown="resume", source="stub"))
+            parse=AsyncMock(side_effect=parse_without_business_transaction)
         ),
     )
     monkeypatch.setattr("backend.app.tasks.ingest.ResumeExtractor", lambda: extractor)

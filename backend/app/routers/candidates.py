@@ -359,7 +359,6 @@ async def score_candidate(
             jd_id=jd.id,
             trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
         )
-        await db.commit()
     except (
         LLMUnavailableError,
         LLMConfigurationError,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -39,8 +40,9 @@ class ScoringPipeline:
     Stage B: deterministic rule engine over `rule_dimensions`.
     Stage C: LLM judge over `judge_dimensions`.
 
-    All stages flush one `Score` row plus audit entries. The application-service
-    caller owns commit/rollback so candidate ingestion can be atomic.
+    Database reads are snapshotted and committed before the LLM call so the
+    provider wait never holds a business transaction or checked-out connection.
+    Score and audit writes are committed in a fresh transaction before return.
     """
 
     def __init__(self, db: AsyncSession, judge: LLMJudge | None = None) -> None:
@@ -90,6 +92,7 @@ class ScoringPipeline:
         ).scalar_one()
         jd = (await self.db.execute(select(JD).where(JD.id == jd_id))).scalar_one()
         if not jd.active_rule_version_id:
+            await self.db.rollback()
             raise ValueError(f"JD {jd.code} has no active rule version")
         rv = (
             await self.db.execute(
@@ -107,15 +110,23 @@ class ScoringPipeline:
             )
         ).scalar_one_or_none()
         if existing is not None:
-            return PipelineResult(
+            result = PipelineResult(
                 score_id=existing.id,
                 total_score=float(existing.total_score),
                 grade=existing.grade,
                 rejected=existing.grade == "rejected",
             )
+            await self.db.commit()
+            return result
 
-        schema = RuleSchema.model_validate(rv.schema_json)
-        extracted: dict[str, Any] = candidate.extracted_json or {}
+        snapshot_candidate_id = candidate.id
+        snapshot_parsed_markdown = candidate.parsed_markdown or ""
+        extracted: dict[str, Any] = deepcopy(candidate.extracted_json or {})
+        snapshot_jd_id = jd.id
+        snapshot_jd_code = jd.code
+        snapshot_rule_version_id = rv.id
+        snapshot_rule_version = rv.version
+        schema = RuleSchema.model_validate(deepcopy(rv.schema_json))
         extraction_meta = extracted.get("_meta")
         extraction_model = (
             extraction_meta.get("model")
@@ -123,14 +134,15 @@ class ScoringPipeline:
             and isinstance(extraction_meta.get("model"), str)
             else None
         )
+        await self.db.commit()
 
         # Stage A — hard filter
         hf = run_hard_filters(candidate=extracted, filters=schema.hard_filters)
         if hf.rejected:
             score_id, created = await self._upsert_score(
-                candidate_id=candidate.id,
-                jd_id=jd.id,
-                rule_version_id=rv.id,
+                candidate_id=snapshot_candidate_id,
+                jd_id=snapshot_jd_id,
+                rule_version_id=snapshot_rule_version_id,
                 total_score=0,
                 grade="rejected",
                 hard_filter_result={
@@ -151,22 +163,26 @@ class ScoringPipeline:
                             event_type="hard_filter_reject",
                             actor="system",
                             target_type="candidate",
-                            target_id=candidate.id,
+                            target_id=snapshot_candidate_id,
                             payload={
                                 **entry,
-                                "jd_code": jd.code,
-                                "rule_version": rv.version,
+                                "jd_code": snapshot_jd_code,
+                                "rule_version": snapshot_rule_version,
                             },
-                            rule_version_id=rv.id,
+                            rule_version_id=snapshot_rule_version_id,
                         )
                     )
                 await self.db.flush()
-            return PipelineResult(
-                score_id=score_id,
-                total_score=0,
-                grade="rejected",
-                rejected=True,
+            persisted = await self.db.get(Score, score_id)
+            assert persisted is not None
+            result = PipelineResult(
+                score_id=persisted.id,
+                total_score=float(persisted.total_score),
+                grade=persisted.grade,
+                rejected=persisted.grade == "rejected",
             )
+            await self.db.commit()
+            return result
 
         # Stage B — deterministic rule engine
         rule_results = score_dimensions(extracted, schema.rule_dimensions)
@@ -178,11 +194,11 @@ class ScoringPipeline:
             call_group_id=uuid4(),
             trace_id=trace_id,
             ingestion_job_id=ingestion_job_id,
-            jd_id=jd.id,
-            rule_version_id=rv.id,
+            jd_id=snapshot_jd_id,
+            rule_version_id=snapshot_rule_version_id,
         )
         judge_result = await self.judge.score(
-            resume_text=candidate.parsed_markdown or "",
+            resume_text=snapshot_parsed_markdown,
             dims=schema.judge_dimensions,
             context=judge_context,
         )
@@ -198,9 +214,9 @@ class ScoringPipeline:
         grade = _grade_from(total, schema)
 
         score_id, created = await self._upsert_score(
-            candidate_id=candidate.id,
-            jd_id=jd.id,
-            rule_version_id=rv.id,
+            candidate_id=snapshot_candidate_id,
+            jd_id=snapshot_jd_id,
+            rule_version_id=snapshot_rule_version_id,
             total_score=total,
             grade=grade,
             hard_filter_result={
@@ -222,20 +238,24 @@ class ScoringPipeline:
                     event_type="score",
                     actor="system",
                     target_type="candidate",
-                    target_id=candidate.id,
+                    target_id=snapshot_candidate_id,
                     payload={
-                        "jd_code": jd.code,
-                        "rule_version": rv.version,
+                        "jd_code": snapshot_jd_code,
+                        "rule_version": snapshot_rule_version,
                         "total": total,
                         "grade": grade,
                     },
-                    rule_version_id=rv.id,
+                    rule_version_id=snapshot_rule_version_id,
                 )
             )
             await self.db.flush()
-        return PipelineResult(
-            score_id=score_id,
-            total_score=float(total),
-            grade=grade,
-            rejected=False,
+        persisted = await self.db.get(Score, score_id)
+        assert persisted is not None
+        result = PipelineResult(
+            score_id=persisted.id,
+            total_score=float(persisted.total_score),
+            grade=persisted.grade,
+            rejected=persisted.grade == "rejected",
         )
+        await self.db.commit()
+        return result

@@ -187,6 +187,10 @@ async def run_parse_and_score(
             jd = (
                 await db.execute(select(JD).where(JD.code == jd_code))
             ).scalar_one_or_none()
+        jd_id = jd.id if jd is not None else None
+        jd_has_active_rule = bool(jd and jd.active_rule_version_id)
+        if db.in_transaction():
+            await db.commit()
         parser = MinerUClient()
         parsed = await parser.parse(Path(local_file_path))
         extractor = ResumeExtractor()
@@ -196,7 +200,7 @@ async def run_parse_and_score(
                 operation="extract",
                 call_group_id=uuid4(),
                 trace_id=trace_id,
-                jd_id=jd.id if jd is not None else None,
+                jd_id=jd_id,
             ),
         )
 
@@ -212,10 +216,13 @@ async def run_parse_and_score(
         if object_deleted:
             owns_new_object = False
 
-        if jd and jd.active_rule_version_id:
+        if jd_has_active_rule:
+            await db.commit()
+            owns_new_object = False
+            assert jd_id is not None
             await ScoringPipeline(db=db).run(
                 candidate_id=cand.id,
-                jd_id=jd.id,
+                jd_id=jd_id,
                 ingestion_job_id=None,
                 trace_id=trace_id,
             )
@@ -339,6 +346,10 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
         jd = (
             await db.execute(select(JD).where(JD.code == job.jd_code))
         ).scalar_one_or_none()
+    jd_id = jd.id if jd is not None else None
+    jd_has_active_rule = bool(jd and jd.active_rule_version_id)
+    if db.in_transaction():
+        await db.commit()
 
     if job.candidate_id is None:
         reference = _reference_from_job(job)
@@ -357,7 +368,7 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
                     call_group_id=uuid4(),
                     trace_id=trace_id,
                     ingestion_job_id=job.id,
-                    jd_id=jd.id if jd is not None else None,
+                    jd_id=jd_id,
                 ),
             )
 
@@ -384,13 +395,14 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
             await svc.transition(job, IngestionState.EXTRACTING)
             await db.commit()
 
-    if jd is not None and jd.active_rule_version_id:
+    if jd_has_active_rule:
         await svc.transition(job, IngestionState.SCORING)
         await db.commit()
 
+        assert jd_id is not None
         result = await ScoringPipeline(db=db).run(
             candidate_id=candidate.id,
-            jd_id=jd.id,
+            jd_id=jd_id,
             ingestion_job_id=job.id,
             trace_id=trace_id,
         )

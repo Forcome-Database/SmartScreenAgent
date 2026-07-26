@@ -62,41 +62,35 @@ async def test_pipeline_happy_path(db_session):
     db_session.add(cand)
     await db_session.commit()
 
-    fake_judge = AsyncMock()
     call_group_id = uuid4()
-    fake_judge.score.return_value = JudgeResult(
-        dimensions=[
-            JudgeDimensionResult(
-                id="independence",
-                tier="high",
-                score=10,
-                evidence_quotes=[],
-                reasoning="ok",
-                confidence=0.9,
-                suggested_interview_questions=[],
-            )
-        ],
-        model="gpt-5.5",
-        tokens=100,
-        prompt_version="resume_judge_v1",
-        call_group_id=call_group_id,
-    )
+    async def score_without_business_transaction(**_kwargs):
+        assert not db_session.in_transaction()
+        return JudgeResult(
+            dimensions=[
+                JudgeDimensionResult(
+                    id="independence",
+                    tier="high",
+                    score=10,
+                    evidence_quotes=[],
+                    reasoning="ok",
+                    confidence=0.9,
+                    suggested_interview_questions=[],
+                )
+            ],
+            model="gpt-5.5",
+            tokens=100,
+            prompt_version="resume_judge_v1",
+            call_group_id=call_group_id,
+        )
+
+    fake_judge = AsyncMock()
+    fake_judge.score.side_effect = score_without_business_transaction
     pipeline = ScoringPipeline(db=db_session, judge=fake_judge)
     result = await pipeline.run(candidate_id=cand.id, jd_id=jd.id)
 
     assert result.total_score > 0
     assert result.score_id is not None
     assert not result.rejected
-
-    from backend.app.database import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as other_session:
-        not_committed = (
-            await other_session.execute(select(Score).where(Score.id == result.score_id))
-        ).scalar_one_or_none()
-        assert not_committed is None
-
-    await db_session.commit()
 
     async with AsyncSessionLocal() as other_session:
         committed = (
@@ -275,14 +269,22 @@ async def test_pipeline_correlates_terminal_attempts_without_mutating_them(db_se
             ),
         ]
     )
-    gateway = LLMGateway(recorder=UsageRecorder())
+    recorder = UsageRecorder()
+    real_begin = recorder.begin
+
+    async def begin_without_business_transaction(**kwargs):
+        assert not db_session.in_transaction()
+        return await real_begin(**kwargs)
+
+    recorder.begin = AsyncMock(side_effect=begin_without_business_transaction)
+    gateway = LLMGateway(recorder=recorder)
     gateway._client.chat.completions.create = provider
 
     result = await ScoringPipeline(
         db=db_session, judge=LLMJudge(gateway=gateway)
     ).run(candidate_id=cand.id, jd_id=jd.id, trace_id="pipeline-trace")
-    pending_score = await db_session.get(Score, result.score_id)
-    assert pending_score.llm_judge_call_group_id is not None
+    committed_score = await db_session.get(Score, result.score_id)
+    assert committed_score.llm_judge_call_group_id is not None
 
     async with AsyncSessionLocal() as verify_db:
         attempts = (
@@ -290,7 +292,7 @@ async def test_pipeline_correlates_terminal_attempts_without_mutating_them(db_se
                 select(LLMUsageAttempt)
                 .where(
                     LLMUsageAttempt.call_group_id
-                    == pending_score.llm_judge_call_group_id
+                    == committed_score.llm_judge_call_group_id
                 )
                 .order_by(LLMUsageAttempt.id)
             )
@@ -309,10 +311,9 @@ async def test_pipeline_correlates_terminal_attempts_without_mutating_them(db_se
             for row in attempts
         ]
 
-    await db_session.commit()
     async with AsyncSessionLocal() as verify_db:
-        committed_score = await verify_db.get(Score, result.score_id)
-        assert committed_score.llm_judge_call_group_id == attempts[0].call_group_id
+        reloaded_score = await verify_db.get(Score, result.score_id)
+        assert reloaded_score.llm_judge_call_group_id == attempts[0].call_group_id
         reloaded = (
             await verify_db.execute(
                 select(LLMUsageAttempt)
