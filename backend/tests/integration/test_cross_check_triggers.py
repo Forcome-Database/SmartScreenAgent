@@ -160,3 +160,76 @@ async def test_rescoring_the_same_configuration_is_idempotent(db_session) -> Non
         await db_session.execute(select(func.count()).select_from(ScoreCrossCheck))
     ).scalar_one()
     assert total == 1
+
+
+async def test_hr_disagreement_queues_a_check_in_the_feedback_transaction(
+    db_session,
+) -> None:
+    from backend.app.models import User
+    from backend.app.services.feedback import upsert_feedback
+
+    jd, candidate = await _seed(db_session)
+    result = await ScoringPipeline(db=db_session, judge=_judge(0.99)).run(
+        candidate_id=candidate.id, jd_id=jd.id
+    )
+    score = await db_session.get(Score, result.score_id)
+    assert score is not None
+    reviewer = User(
+        dingtalk_userid=f"rev-{uuid4().hex}", display_name="Reviewer", role="hr"
+    )
+    db_session.add(reviewer)
+    await db_session.flush()
+
+    # The AI advanced this candidate; the reviewer rejects it.
+    _feedback, queued = await upsert_feedback(
+        db_session,
+        score=score,
+        reviewer_id=reviewer.id,
+        decision="reject",
+        reason="经验不符",
+    )
+    await db_session.commit()
+
+    assert queued
+    row = (
+        await db_session.execute(
+            select(ScoreCrossCheck).where(ScoreCrossCheck.score_id == score.id)
+        )
+    ).scalar_one()
+    assert "ai_hr_disagreement" in row.sample_reasons
+
+
+async def test_feedback_rollback_removes_both_business_and_queue_writes(
+    db_session,
+) -> None:
+    from backend.app.models import Feedback, User
+    from backend.app.services.feedback import upsert_feedback
+
+    jd, candidate = await _seed(db_session)
+    result = await ScoringPipeline(db=db_session, judge=_judge(0.99)).run(
+        candidate_id=candidate.id, jd_id=jd.id
+    )
+    score = await db_session.get(Score, result.score_id)
+    assert score is not None
+    reviewer = User(
+        dingtalk_userid=f"rev-{uuid4().hex}", display_name="Reviewer", role="hr"
+    )
+    db_session.add(reviewer)
+    await db_session.flush()
+
+    await upsert_feedback(
+        db_session,
+        score=score,
+        reviewer_id=reviewer.id,
+        decision="reject",
+        reason="经验不符",
+    )
+    # The service no longer commits, so the caller can still take it all back.
+    await db_session.rollback()
+
+    assert (
+        await db_session.execute(select(func.count()).select_from(Feedback))
+    ).scalar_one() == 0
+    assert (
+        await db_session.execute(select(func.count()).select_from(ScoreCrossCheck))
+    ).scalar_one() == 0

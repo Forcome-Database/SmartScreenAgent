@@ -72,9 +72,14 @@ def parse_golden_csv(content: bytes, *, max_rows: int) -> tuple[list[ParsedRow],
 
 async def import_golden_set(
     db: AsyncSession, *, parsed: list[ParsedRow], importer_id: int
-) -> tuple[int, int, list[RowError]]:
+) -> tuple[int, int, list[RowError], list[int]]:
+    """Upsert authoritative labels and queue cross-checks for AI/label conflicts.
+
+    The caller owns the commit so labels and queued checks land together;
+    returns the queued row ids for post-commit Celery delivery.
+    """
     if not parsed:
-        return 0, 0, []
+        return 0, 0, [], []
     jd_codes = {r.jd_code for r in parsed}
     jd_rows = (await db.execute(select(JD.code, JD.id).where(JD.code.in_(jd_codes)))).all()
     jd_map: dict[str, int] = {code: jd_id for code, jd_id in jd_rows}
@@ -133,8 +138,26 @@ async def import_golden_set(
                 },
             )
         )
-    await db.commit()
-    return created, updated, errors
+    await db.flush()
+
+    from backend.app.services.cross_check.triggers import queue_cross_check_for_score
+
+    # A newly authoritative label can contradict a score the AI already made;
+    # `golden_error` is exactly that case.
+    queued: list[int] = []
+    touched = [(jd_map[r.jd_code], r.candidate_id) for r in parsed if r.jd_code in jd_map]
+    if touched:
+        scores = (
+            await db.execute(
+                select(Score).where(
+                    tuple_(Score.jd_id, Score.candidate_id).in_(touched),
+                    Score.judge_dimensions.isnot(None),
+                )
+            )
+        ).scalars()
+        for score in scores:
+            queued.extend(await queue_cross_check_for_score(db, score=score))
+    return created, updated, errors, queued
 
 
 async def list_golden_set(

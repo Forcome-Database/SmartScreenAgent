@@ -25,6 +25,7 @@ from backend.app.services.golden_set import (
     parse_golden_csv,
 )
 from backend.app.services.read.pagination import Page, page_params
+from backend.app.tasks.ingest import _send_cross_checks
 
 router = APIRouter(prefix="/api/v1", tags=["golden-set"])
 IMPORT_ROLES = ("hr_lead", "admin")
@@ -60,7 +61,11 @@ async def import_golden(
                 "message": f"单次导入不超过 {settings.GOLDEN_IMPORT_MAX_ROWS} 行",
             },
         ) from exc
-    created, updated, db_errors = await import_golden_set(db, parsed=parsed, importer_id=user.id)
+    created, updated, db_errors, queued = await import_golden_set(
+        db, parsed=parsed, importer_id=user.id
+    )
+    await db.commit()
+    _send_cross_checks(queued)
     all_errors = sorted([*fmt_errors, *db_errors], key=lambda e: e.row)
     return GoldenImportResult(
         total=len(parsed) + len(fmt_errors),

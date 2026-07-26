@@ -31,7 +31,12 @@ def derive_ai_agreed(grade: str, decision: str) -> bool | None:
 
 async def upsert_feedback(
     db: AsyncSession, *, score: Score, reviewer_id: int, decision: str, reason: str | None
-) -> Feedback:
+) -> tuple[Feedback, list[int]]:
+    """Record one reviewer's verdict and queue a cross-check on disagreement.
+
+    The caller owns the commit so the feedback row and the queued check land
+    together; returns the queued row ids for post-commit Celery delivery.
+    """
     ai_agreed = derive_ai_agreed(score.grade, decision)
     normalized_reason = (reason or "").strip() or None
     if ai_agreed is False and not normalized_reason:
@@ -57,10 +62,15 @@ async def upsert_feedback(
         .returning(Feedback.id)
     )
     feedback_id = (await db.execute(stmt)).scalar_one()
-    await db.commit()
-    return (
+    await db.flush()
+
+    from backend.app.services.cross_check.triggers import queue_cross_check_for_score
+
+    queued = await queue_cross_check_for_score(db, score=score)
+    feedback = (
         await db.execute(select(Feedback).where(Feedback.id == feedback_id))
     ).scalar_one()
+    return feedback, queued
 
 
 async def list_feedback(db: AsyncSession, score_id: int) -> list[tuple[Feedback, str]]:
