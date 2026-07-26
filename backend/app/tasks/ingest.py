@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import structlog
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from backend.app.database import AsyncSessionLocal, engine
 from backend.app.models import JD, AuditLog, Candidate, IngestionJob
 from backend.app.scoring.pipeline import ScoringPipeline
 from backend.app.services.ingestion.states import IngestionState, InvalidTransitionError
+from backend.app.services.llm.usage import LLMCallContext
 from backend.app.services.parser.extractor import ExtractedResume, ResumeExtractor
 from backend.app.services.parser.mineru_client import MinerUClient
 from backend.app.services.parser.pii import compute_pii_hash, encrypt_pii
@@ -42,6 +44,7 @@ _CONTENT_TYPE_SUFFIXES = {
 RETRYABLE_ERRORS: dict[str, str] = {
     "MinerUUnavailableError": "resume_parser_unavailable",
     "LLMUnavailableError": "ai_service_unavailable",
+    "UsageLedgerUnavailable": "usage_ledger_unavailable",
 }
 TERMINAL_ERRORS: dict[str, str] = {
     "MinerUContractError": "resume_parser_contract_invalid",
@@ -49,6 +52,7 @@ TERMINAL_ERRORS: dict[str, str] = {
     "LLMConfigurationError": "ai_service_configuration_invalid",
     "LLMInvalidResponseError": "ai_invalid_output",
     "LLMInvalidOutputError": "ai_invalid_output",
+    "ModelPriceMissing": "model_price_missing",
 }
 _GENERIC_RETRYABLE_ERROR_CODE = "ingestion_worker_error"
 
@@ -164,6 +168,19 @@ async def _insert_or_reuse_candidate(
     return cand, status, object_deleted
 
 
+def _send_cross_checks(row_ids: list[int]) -> None:
+    """Best-effort delivery. A lost message is recovered by the sweeper."""
+    if not row_ids:
+        return
+    from backend.app.tasks.celery_app import celery_app
+
+    for row_id in row_ids:
+        try:
+            celery_app.send_task("wp7.run_cross_check", args=[row_id])
+        except Exception:
+            logger.warning("cross check delivery failed", extra={"row_id": row_id})
+
+
 async def run_parse_and_score(
     *,
     db: AsyncSession,
@@ -177,10 +194,28 @@ async def run_parse_and_score(
 ) -> IngestionResult:
     owns_new_object = True
     try:
+        trace_id = structlog.contextvars.get_contextvars().get("trace_id")
+        jd = None
+        if jd_code:
+            jd = (
+                await db.execute(select(JD).where(JD.code == jd_code))
+            ).scalar_one_or_none()
+        jd_id = jd.id if jd is not None else None
+        jd_has_active_rule = bool(jd and jd.active_rule_version_id)
+        if db.in_transaction():
+            await db.commit()
         parser = MinerUClient()
         parsed = await parser.parse(Path(local_file_path))
         extractor = ResumeExtractor()
-        extracted = await extractor.extract(parsed.markdown)
+        extracted = await extractor.extract(
+            parsed.markdown,
+            context=LLMCallContext(
+                operation="extract",
+                call_group_id=uuid4(),
+                trace_id=trace_id,
+                jd_id=jd_id,
+            ),
+        )
 
         cand, status, object_deleted = await _insert_or_reuse_candidate(
             db,
@@ -194,14 +229,18 @@ async def run_parse_and_score(
         if object_deleted:
             owns_new_object = False
 
-        if jd_code:
-            jd = (
-                await db.execute(select(JD).where(JD.code == jd_code))
-            ).scalar_one_or_none()
-            if jd and jd.active_rule_version_id:
-                await ScoringPipeline(db=db).run(candidate_id=cand.id, jd_id=jd.id)
+        if jd_has_active_rule:
+            await db.commit()
+            owns_new_object = False
+            assert jd_id is not None
+            pipeline_result = await ScoringPipeline(db=db).run(
+                candidate_id=cand.id,
+                jd_id=jd_id,
+                ingestion_job_id=None,
+                trace_id=trace_id,
+            )
+            _send_cross_checks(pipeline_result.cross_check_ids)
 
-        trace_id = structlog.contextvars.get_contextvars().get("trace_id")
         db.add(
             AuditLog(
                 event_type="candidate_upload" if status == "parsed" else "candidate_duplicate",
@@ -315,6 +354,16 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
 
     svc = IngestionJobService(db)
     candidate: Candidate
+    trace_id = job.trace_id or structlog.contextvars.get_contextvars().get("trace_id")
+    jd = None
+    if job.jd_code:
+        jd = (
+            await db.execute(select(JD).where(JD.code == job.jd_code))
+        ).scalar_one_or_none()
+    jd_id = jd.id if jd is not None else None
+    jd_has_active_rule = bool(jd and jd.active_rule_version_id)
+    if db.in_transaction():
+        await db.commit()
 
     if job.candidate_id is None:
         reference = _reference_from_job(job)
@@ -326,7 +375,16 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
             await svc.transition(job, IngestionState.EXTRACTING)
             await db.commit()
 
-            extracted = await ResumeExtractor().extract(parsed.markdown)
+            extracted = await ResumeExtractor().extract(
+                parsed.markdown,
+                context=LLMCallContext(
+                    operation="extract",
+                    call_group_id=uuid4(),
+                    trace_id=trace_id,
+                    ingestion_job_id=job.id,
+                    jd_id=jd_id,
+                ),
+            )
 
             candidate, _status, _object_deleted = await _insert_or_reuse_candidate(
                 db,
@@ -351,19 +409,24 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
             await svc.transition(job, IngestionState.EXTRACTING)
             await db.commit()
 
-    jd = None
-    if job.jd_code:
-        jd = (await db.execute(select(JD).where(JD.code == job.jd_code))).scalar_one_or_none()
-
-    if jd is not None and jd.active_rule_version_id:
+    if jd_has_active_rule:
         await svc.transition(job, IngestionState.SCORING)
         await db.commit()
 
-        result = await ScoringPipeline(db=db).run(candidate_id=candidate.id, jd_id=jd.id)
+        assert jd_id is not None
+        result = await ScoringPipeline(db=db).run(
+            candidate_id=candidate.id,
+            jd_id=jd_id,
+            ingestion_job_id=job.id,
+            trace_id=trace_id,
+        )
         job.score_id = result.score_id
 
         await svc.transition(job, IngestionState.COMPLETED)
         await db.commit()
+        # Only after the score is durable: a message for a rolled-back score
+        # would point a worker at a row that never existed.
+        _send_cross_checks(result.cross_check_ids)
         return
 
     await svc.transition(job, IngestionState.READY)

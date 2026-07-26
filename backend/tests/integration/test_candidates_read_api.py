@@ -115,6 +115,53 @@ async def test_score_detail_and_unknown(client, db_session, auth_headers):
     assert missing.json()["detail"] == {"code": "not_found", "message": "score not found"}
 
 
+async def test_authorized_score_detail_read_is_audited(client, db_session, auth_headers):
+    jd, cand, score = await _seed(db_session)
+
+    resp = await client.get(
+        f"/api/v1/candidates/{cand.id}/scores/{score.id}",
+        headers=await auth_headers("hr"),
+    )
+    assert resp.status_code == 200
+
+    rows = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "score_detail_read")
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].actor.startswith("user:")
+    assert rows[0].target_type == "score"
+    assert rows[0].target_id == score.id
+    # A scorecard carries evidence quotes and reasoning, so the audit records
+    # who opened it — but the audit row itself stays PII-free.
+    assert rows[0].payload == {"candidate_id": cand.id, "jd_code": jd.code}
+
+
+async def test_unaudited_reads_leave_no_score_detail_trace(
+    client, db_session, auth_headers
+):
+    jd, cand, score = await _seed(db_session)
+
+    # A list read is not a scorecard read.
+    await client.get("/api/v1/candidates", headers=await auth_headers("hr"))
+    # A missing score never resolves, so nothing is recorded.
+    await client.get(
+        f"/api/v1/candidates/{cand.id}/scores/999999", headers=await auth_headers("hr")
+    )
+    # An unauthenticated read is rejected before the service runs.
+    await client.get(f"/api/v1/candidates/{cand.id}/scores/{score.id}")
+
+    count = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.event_type == "score_detail_read")
+        )
+    ).scalar_one()
+    assert count == 0
+
+
 async def test_score_detail_rejects_score_not_owned_by_candidate(
     client, db_session, auth_headers
 ):

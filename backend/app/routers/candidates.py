@@ -20,6 +20,8 @@ from backend.app.services.llm.errors import (
     LLMInvalidOutputError,
     LLMInvalidResponseError,
     LLMUnavailableError,
+    ModelPriceMissing,
+    UsageLedgerUnavailable,
 )
 from backend.app.services.parser.errors import (
     MinerUContractError,
@@ -60,6 +62,18 @@ def _external_service_error(exc: Exception) -> HTTPException | None:
         )
     if isinstance(exc, MinerUTaskError):
         return _upload_error(502, "resume_parser_failed", "Resume parser failed")
+    if isinstance(exc, UsageLedgerUnavailable):
+        return _upload_error(
+            503,
+            "usage_ledger_unavailable",
+            "LLM usage ledger unavailable",
+        )
+    if isinstance(exc, ModelPriceMissing):
+        return _upload_error(
+            503,
+            "model_price_missing",
+            "Configured LLM model price is unavailable",
+        )
     if isinstance(exc, LLMUnavailableError):
         return _upload_error(503, "ai_service_unavailable", "AI service is unavailable")
     if isinstance(exc, LLMConfigurationError):
@@ -340,8 +354,11 @@ async def score_candidate(
     if not jd:
         raise HTTPException(status_code=404, detail=f"JD {payload.jd_code} not found")
     try:
-        result = await ScoringPipeline(db=db).run(candidate_id=candidate_id, jd_id=jd.id)
-        await db.commit()
+        result = await ScoringPipeline(db=db).run(
+            candidate_id=candidate_id,
+            jd_id=jd.id,
+            trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
+        )
     except (
         LLMUnavailableError,
         LLMConfigurationError,
@@ -355,6 +372,9 @@ async def score_candidate(
     except Exception:
         await db.rollback()
         raise
+    from backend.app.tasks.ingest import _send_cross_checks
+
+    _send_cross_checks(result.cross_check_ids)
     return ScoreResponse(
         score_id=result.score_id,
         total_score=result.total_score,

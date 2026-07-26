@@ -157,3 +157,48 @@ export const GoldenMetricsReport = z.object({
   overall: MetricStats,
   by_jd: z.array(MetricStats.extend({ jd_code: z.string() })),
 });
+
+export const RuleMetrics = z.object({
+  confusion: z.object({
+    tp: z.number(),
+    fp: z.number(),
+    tn: z.number(),
+    fn: z.number(),
+  }),
+  precision: z.number().nullable(),
+  recall: z.number().nullable(),
+  f1: z.number().nullable(),
+  accuracy: z.number().nullable(),
+  evaluated: z.number(),
+  indeterminate: z.number(),
+  borderline_excluded: z.number(),
+  uncovered: z.number(),
+});
+export const EvaluateResponse = z.object({
+  draft: RuleMetrics,
+  baseline: RuleMetrics.nullable(),
+  judge_dimensions_changed: z.boolean(),
+});
+export const RuleVersionList = z.object({
+  items: z.array(
+    z.object({
+      id: z.number(),
+      version: z.string(),
+      status: z.string(),
+      published_at: z.string().nullable(),
+      published_by_user_id: z.number().nullable(),
+      notes: z.string().nullable(),
+      golden_set_metrics: z.record(z.string(), z.unknown()).nullable(),
+      is_active: z.boolean(),
+    }),
+  ),
+  page: z.number(),
+  page_size: z.number(),
+  total: z.number(),
+});
+export const RuleVersionRef = z.object({
+  id: z.number(),
+  version: z.string(),
+  status: z.string(),
+  notes: z.string().nullable(),
+});

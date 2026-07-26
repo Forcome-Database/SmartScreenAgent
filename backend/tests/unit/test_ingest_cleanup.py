@@ -11,7 +11,9 @@ from backend.app.tasks.ingest import RawFileReference, run_parse_and_score
 async def test_cancellation_rolls_back_and_deletes_owned_object(monkeypatch) -> None:
     parser = SimpleNamespace(parse=AsyncMock(side_effect=asyncio.CancelledError()))
     monkeypatch.setattr("backend.app.tasks.ingest.MinerUClient", lambda: parser)
-    db = SimpleNamespace(rollback=AsyncMock())
+    # `jd_code=None` means no JD lookup runs, so a real session would have no
+    # autobegun transaction to release before the parser call.
+    db = SimpleNamespace(rollback=AsyncMock(), commit=AsyncMock(), in_transaction=lambda: False)
     storage = SimpleNamespace(delete=AsyncMock())
     raw_file = RawFileReference(
         object_key="resumes/opaque-object",
@@ -32,6 +34,7 @@ async def test_cancellation_rolls_back_and_deletes_owned_object(monkeypatch) -> 
             jd_code=None,
         )
 
+    db.commit.assert_not_awaited()
     db.rollback.assert_awaited_once_with()
     storage.delete.assert_awaited_once_with(raw_file.object_key)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlparse
@@ -53,7 +54,7 @@ def _apply_migrations():
     """Run `alembic upgrade head` once per session; skip session if DB unreachable."""
     require_service("PostgreSQL", reachable=_db_reachable())
     result = subprocess.run(
-        ["uv", "run", "alembic", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
@@ -66,6 +67,13 @@ def _apply_migrations():
 
 # Children before parents — FK-safe TRUNCATE order.
 _CLEAN_TABLES = [
+    "quality_release_jds",
+    "quality_releases",
+    "golden_set_snapshot_entries",
+    "golden_set_snapshots",
+    "score_cross_checks",
+    "llm_usage_attempts",
+    "operations_reconciliation_state",
     "ingestion_jobs",
     "audit_logs",
     "feedback",
@@ -77,6 +85,22 @@ _CLEAN_TABLES = [
     "golden_set",
     "users",
 ]
+
+
+@pytest.fixture(autouse=True)
+def no_real_budget_enqueue(monkeypatch):
+    """Keep `UsageRecorder` from publishing real Celery messages during tests.
+
+    Finalizing a usage attempt best-effort enqueues `wp7.evaluate_budget_attempt`.
+    That is correct in production, where each worker is its own process, but in
+    tests the in-thread worker started by `celery_worker` shares this process and
+    its task body would dispose the module-level engine out from under the
+    running test. Tests that care about the hook inject their own.
+    """
+    monkeypatch.setattr(
+        "backend.app.services.llm.usage._enqueue_budget_evaluation",
+        lambda _attempt_id: None,
+    )
 
 
 @pytest_asyncio.fixture

@@ -152,8 +152,14 @@ async def get_candidate_detail(
 
 
 async def get_score_detail(
-    db: AsyncSession, candidate_id: int, score_id: int
+    db: AsyncSession, candidate_id: int, score_id: int, *, actor: str | None = None
 ) -> ScoreDetail | None:
+    """Read one scorecard, recording who opened it.
+
+    Evidence quotes and judge reasoning live in this payload, so an authorized
+    read is itself an auditable event. The row is added only after the score
+    resolves, so a 404 leaves no trace.
+    """
     row = (
         await db.execute(
             select(Score, JD.code, RuleVersion.version)
@@ -165,6 +171,16 @@ async def get_score_detail(
     if row is None:
         return None
     score, jd_code, version = row
+    if actor is not None:
+        db.add(
+            AuditLog(
+                event_type="score_detail_read",
+                actor=actor,
+                target_type="score",
+                target_id=score.id,
+                payload={"candidate_id": score.candidate_id, "jd_code": jd_code},
+            )
+        )
     return ScoreDetail(
         score_id=score.id,
         candidate_id=score.candidate_id,

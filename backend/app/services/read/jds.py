@@ -59,7 +59,9 @@ async def get_jd_detail(db: AsyncSession, code: str) -> JDDetail | None:
             {
                 "id": active.id,
                 "version": active.version,
-                "published_at": active.published_at.isoformat(),
+                "published_at": (
+                    active.published_at.isoformat() if active.published_at is not None else None
+                ),
             }
             if active
             else None
@@ -84,6 +86,7 @@ async def list_rule_versions(
         RuleVersionItem(
             id=v.id,
             version=v.version,
+            status=v.status,
             published_at=v.published_at,
             published_by_user_id=v.published_by_user_id,
             notes=v.notes,

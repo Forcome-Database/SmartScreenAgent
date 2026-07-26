@@ -17,6 +17,18 @@ TEST_ENV_DEFAULTS = {
     "LLM_MODEL_JUDGE_FALLBACK": "test-judge-fallback",
     "LLM_MODEL_LIGHT": "test-light",
     "LLM_STRUCTURED_OUTPUT_MODE": "json_schema",
+    "LLM_PRICE_CNY_PER_MILLION_JSON": (
+        '{"test-extract":{"input":1.000000,"output":2.000000},'
+        '"test-extract-fallback":{"input":1.000000,"output":2.000000},'
+        '"test-judge":{"input":1.000000,"output":2.000000},'
+        '"test-judge-fallback":{"input":1.000000,"output":2.000000},'
+        '"test-light":{"input":1.000000,"output":2.000000},'
+        '"test-secondary":{"input":1.000000,"output":2.000000}}'
+    ),
+    "LLM_BUDGET_WARN_RATIO": "0.80",
+    "LLM_BUDGET_RECONCILE_MAX_PERIODS_PER_RUN": "31",
+    "LLM_USAGE_PENDING_TIMEOUT_SECONDS": "600",
+    "LLM_USAGE_FINALIZE_MAX_RETRIES": "3",
     "DINGTALK_APP_KEY": "",
     "DINGTALK_APP_SECRET": "",
     "DINGTALK_CORP_ID": "",
@@ -26,6 +38,17 @@ TEST_ENV_DEFAULTS = {
     "PII_ENCRYPTION_KEY": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
     "DAILY_LLM_BUDGET_CNY": "100",
     "MONTHLY_LLM_BUDGET_CNY": "1500",
+    "QUALITY_F1_TARGET": "0.75",
+    "QUALITY_EVIDENCE_COVERAGE_TARGET": "0.95",
+    "QUALITY_CONFIDENCE_MIN_BUCKET_SIZE": "10",
+    "CROSS_ENGINE_MODEL": "test-secondary",
+    "CROSS_ENGINE_SAMPLE_PERCENT": "10",
+    "CROSS_ENGINE_LOW_CONFIDENCE": "0.60",
+    "CROSS_ENGINE_DIFF_THRESHOLD": "10",
+    "CROSS_ENGINE_MAX_ATTEMPTS": "3",
+    "CROSS_ENGINE_LEASE_SECONDS": "900",
+    "CROSS_ENGINE_SWEEP_INTERVAL_SECONDS": "60",
+    "CROSS_ENGINE_BACKFILL_MAX": "500",
     "MINERU_MODE": "stub",
     "MINERU_BASE_URL": "",
     "MINERU_API_KEY": "",
@@ -55,6 +78,15 @@ TEST_ENV_DEFAULTS = {
     "CORS_ORIGINS": "http://localhost:3000",
 }
 
+# Test-harness switches that are deliberately NOT `Settings` fields. Consumed
+# directly from the environment at import time, before configuration is built.
+TEST_ONLY_ENV = {
+    # `database.py` drops connection pooling: asyncpg connections are bound to
+    # the event loop that opened them, and tests span several loops (one per
+    # pytest-asyncio test, plus the in-thread Celery worker's own).
+    "SMARTSCREEN_DB_NULLPOOL": "1",
+}
+
 TEST_INFRA_OVERRIDE_KEYS = frozenset(
     {
         "DATABASE_URL",
@@ -70,6 +102,9 @@ TEST_INFRA_OVERRIDE_KEYS = frozenset(
 
 
 def apply_test_environment(environ: MutableMapping[str, str]) -> None:
+    for key, value in TEST_ONLY_ENV.items():
+        environ.setdefault(key, value)
+
     external_contract = environ.get("SMARTSCREEN_EXTERNAL_CONTRACT") == "1"
     for key, value in TEST_ENV_DEFAULTS.items():
         if external_contract or key in TEST_INFRA_OVERRIDE_KEYS:

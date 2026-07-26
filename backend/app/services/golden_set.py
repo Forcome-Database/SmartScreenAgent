@@ -187,8 +187,13 @@ def _empty_counts() -> dict[str, int]:
     return {"labeled_total": 0, "borderline_excluded": 0, "tp": 0, "fp": 0, "tn": 0, "fn": 0}
 
 
-async def golden_metrics(db: AsyncSession, jd_code: str | None) -> GoldenMetricsReport:
-    latest = (
+async def golden_metrics(
+    db: AsyncSession,
+    jd_code: str | None,
+    *,
+    rule_version_id: int | None = None,
+) -> GoldenMetricsReport:
+    latest_query = (
         select(
             Score.candidate_id,
             Score.jd_id,
@@ -200,8 +205,10 @@ async def golden_metrics(db: AsyncSession, jd_code: str | None) -> GoldenMetrics
             )
             .label("rn"),
         )
-        .subquery()
     )
+    if rule_version_id is not None:
+        latest_query = latest_query.where(Score.rule_version_id == rule_version_id)
+    latest = latest_query.subquery()
     q = (
         select(JD.code, GoldenSet.label, latest.c.grade)
         .select_from(GoldenSet)

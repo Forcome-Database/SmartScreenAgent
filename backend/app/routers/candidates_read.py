@@ -80,11 +80,12 @@ async def score_detail(
     candidate_id: int,
     score_id: int,
     db: AsyncSession = Depends(get_db),
-    _u: User = Depends(require_roles(*READ_ROLES)),
+    user: User = Depends(require_roles(*READ_ROLES)),
 ) -> ScoreDetail:
-    detail = await get_score_detail(db, candidate_id, score_id)
+    detail = await get_score_detail(db, candidate_id, score_id, actor=f"user:{user.id}")
     if detail is None:
         raise _not_found("score")
+    await db.commit()
     return detail
 
 

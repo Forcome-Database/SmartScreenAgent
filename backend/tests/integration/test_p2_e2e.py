@@ -104,7 +104,16 @@ async def test_full_p2_flow(
     ingestion_svc = IngestionJobService(db_session)
     claimed = await ingestion_svc.claim(job_id, lease_seconds=900)
     await db_session.commit()
-    await run_job(db=db_session, job=claimed, storage=ResumeStorageService(storage=minio_storage))
+    if claimed is not None:
+        await run_job(
+            db=db_session, job=claimed, storage=ResumeStorageService(storage=minio_storage)
+        )
+    else:
+        # A real Celery worker is running (scripts/verify.py starts one in CI)
+        # and claimed the job first. The assertions below are about the stored
+        # outcome, not about who produced it, so wait for that worker instead of
+        # racing it.
+        await _await_terminal_job(db_session, job_id)
 
     refreshed_job = await db_session.get(IngestionJob, job_id)
     assert refreshed_job.candidate_id is not None
@@ -122,6 +131,28 @@ async def test_full_p2_flow(
     assert data["total_score"] > 0
     assert data["grade"] == "L1"
     assert data["rejected"] is False
+
+
+async def _await_terminal_job(db_session, job_id: int, *, timeout_seconds: float = 30.0):
+    """Block until an out-of-process worker finishes the job."""
+    import asyncio
+
+    from backend.app.models import IngestionJob
+    from backend.app.services.ingestion.states import IngestionState
+
+    terminal = {
+        IngestionState.COMPLETED.value,
+        IngestionState.READY.value,
+        IngestionState.TERMINAL_FAILED.value,
+    }
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        db_session.expire_all()
+        job = await db_session.get(IngestionJob, job_id)
+        if job is not None and job.state in terminal:
+            return job
+        await asyncio.sleep(0.25)
+    raise AssertionError(f"ingestion job {job_id} never reached a terminal state")
 
 
 @pytest.mark.integration
@@ -204,7 +235,14 @@ async def test_p2_hard_filter_rejection(
     ingestion_svc = IngestionJobService(db_session)
     claimed = await ingestion_svc.claim(job_id, lease_seconds=900)
     await db_session.commit()
-    await run_job(db=db_session, job=claimed, storage=ResumeStorageService(storage=minio_storage))
+    if claimed is not None:
+        await run_job(
+            db=db_session, job=claimed, storage=ResumeStorageService(storage=minio_storage)
+        )
+    else:
+        # A real Celery worker claimed it first; wait for its result instead of
+        # racing it. The assertions are about the stored outcome, not the actor.
+        await _await_terminal_job(db_session, job_id)
 
     # The upload route (and the worker) use their own session lifecycle via
     # `get_db`/`AsyncSessionLocal` and commit there. Expire our session so

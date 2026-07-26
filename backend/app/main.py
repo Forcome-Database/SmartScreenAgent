@@ -5,12 +5,17 @@ from backend.app.config import get_settings
 from backend.app.logging_config import configure_logging
 from backend.app.middleware import AccessLogMiddleware
 from backend.app.routers import auth as auth_router
+from backend.app.routers import batch_report as batch_report_router
 from backend.app.routers import candidates as candidates_router
 from backend.app.routers import candidates_read as candidates_read_router
+from backend.app.routers import cross_check as cross_check_router
 from backend.app.routers import feedback as feedback_router
 from backend.app.routers import golden_set as golden_set_router
 from backend.app.routers import health as health_router
 from backend.app.routers import jds as jds_router
+from backend.app.routers import operations as operations_router
+from backend.app.routers import quality as quality_router
+from backend.app.routers import rule_publication as rule_publication_router
 
 
 def create_app() -> FastAPI:
@@ -36,6 +41,11 @@ def create_app() -> FastAPI:
     app.include_router(jds_router.router)
     app.include_router(feedback_router.router)
     app.include_router(golden_set_router.router)
+    app.include_router(rule_publication_router.router)
+    app.include_router(operations_router.router)
+    app.include_router(quality_router.router)
+    app.include_router(batch_report_router.router)
+    app.include_router(cross_check_router.router)
 
     @app.get("/")
     async def root() -> dict[str, str]:

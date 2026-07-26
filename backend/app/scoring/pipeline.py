@@ -1,17 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score
+from backend.app.config import get_settings
+from backend.app.models import JD, AuditLog, Candidate, GoldenSet, RuleVersion, Score
 from backend.app.rules.schema import RuleSchema
 from backend.app.scoring.hard_filter import run_hard_filters
 from backend.app.scoring.llm_judge import LLMJudge
 from backend.app.scoring.rule_engine import score_dimensions
+from backend.app.services.cross_check.sampling import (
+    CrossCheckContext,
+    eligible,
+    trigger_reasons,
+)
+from backend.app.services.cross_check.state import ensure_cross_check
+from backend.app.services.llm.gateway import JUDGE_PROMPT_VERSION
+from backend.app.services.llm.usage import LLMCallContext
 
 
 @dataclass
@@ -20,6 +32,7 @@ class PipelineResult:
     total_score: float
     grade: str
     rejected: bool
+    cross_check_ids: list[int] = field(default_factory=list)
 
 
 def _grade_from(score: float, schema: RuleSchema) -> str:
@@ -37,8 +50,9 @@ class ScoringPipeline:
     Stage B: deterministic rule engine over `rule_dimensions`.
     Stage C: LLM judge over `judge_dimensions`.
 
-    All stages flush one `Score` row plus audit entries. The application-service
-    caller owns commit/rollback so candidate ingestion can be atomic.
+    Database reads are snapshotted and committed before the LLM call so the
+    provider wait never holds a business transaction or checked-out connection.
+    Score and audit writes are committed in a fresh transaction before return.
     """
 
     def __init__(self, db: AsyncSession, judge: LLMJudge | None = None) -> None:
@@ -75,12 +89,20 @@ class ScoringPipeline:
         ).scalar_one()
         return score_id, False
 
-    async def run(self, *, candidate_id: int, jd_id: int) -> PipelineResult:
+    async def run(
+        self,
+        *,
+        candidate_id: int,
+        jd_id: int,
+        ingestion_job_id: int | None = None,
+        trace_id: str | None = None,
+    ) -> PipelineResult:
         candidate = (
             await self.db.execute(select(Candidate).where(Candidate.id == candidate_id))
         ).scalar_one()
         jd = (await self.db.execute(select(JD).where(JD.id == jd_id))).scalar_one()
         if not jd.active_rule_version_id:
+            await self.db.rollback()
             raise ValueError(f"JD {jd.code} has no active rule version")
         rv = (
             await self.db.execute(
@@ -98,15 +120,23 @@ class ScoringPipeline:
             )
         ).scalar_one_or_none()
         if existing is not None:
-            return PipelineResult(
+            result = PipelineResult(
                 score_id=existing.id,
                 total_score=float(existing.total_score),
                 grade=existing.grade,
                 rejected=existing.grade == "rejected",
             )
+            await self.db.commit()
+            return result
 
-        schema = RuleSchema.model_validate(rv.schema_json)
-        extracted: dict[str, Any] = candidate.extracted_json or {}
+        snapshot_candidate_id = candidate.id
+        snapshot_parsed_markdown = candidate.parsed_markdown or ""
+        extracted: dict[str, Any] = deepcopy(candidate.extracted_json or {})
+        snapshot_jd_id = jd.id
+        snapshot_jd_code = jd.code
+        snapshot_rule_version_id = rv.id
+        snapshot_rule_version = rv.version
+        schema = RuleSchema.model_validate(deepcopy(rv.schema_json))
         extraction_meta = extracted.get("_meta")
         extraction_model = (
             extraction_meta.get("model")
@@ -114,14 +144,15 @@ class ScoringPipeline:
             and isinstance(extraction_meta.get("model"), str)
             else None
         )
+        await self.db.commit()
 
         # Stage A — hard filter
         hf = run_hard_filters(candidate=extracted, filters=schema.hard_filters)
         if hf.rejected:
             score_id, created = await self._upsert_score(
-                candidate_id=candidate.id,
-                jd_id=jd.id,
-                rule_version_id=rv.id,
+                candidate_id=snapshot_candidate_id,
+                jd_id=snapshot_jd_id,
+                rule_version_id=snapshot_rule_version_id,
                 total_score=0,
                 grade="rejected",
                 hard_filter_result={
@@ -133,6 +164,7 @@ class ScoringPipeline:
                 judge_dimensions=None,
                 is_suspicious=False,
                 llm_model_extract=extraction_model,
+                llm_judge_call_group_id=None,
             )
             if created:
                 for entry in hf.audit_entries:
@@ -141,42 +173,60 @@ class ScoringPipeline:
                             event_type="hard_filter_reject",
                             actor="system",
                             target_type="candidate",
-                            target_id=candidate.id,
+                            target_id=snapshot_candidate_id,
                             payload={
                                 **entry,
-                                "jd_code": jd.code,
-                                "rule_version": rv.version,
+                                "jd_code": snapshot_jd_code,
+                                "rule_version": snapshot_rule_version,
                             },
-                            rule_version_id=rv.id,
+                            rule_version_id=snapshot_rule_version_id,
                         )
                     )
                 await self.db.flush()
-            return PipelineResult(
-                score_id=score_id,
-                total_score=0,
-                grade="rejected",
-                rejected=True,
+            persisted = await self.db.get(Score, score_id)
+            assert persisted is not None
+            result = PipelineResult(
+                score_id=persisted.id,
+                total_score=float(persisted.total_score),
+                grade=persisted.grade,
+                rejected=persisted.grade == "rejected",
             )
+            await self.db.commit()
+            return result
 
         # Stage B — deterministic rule engine
         rule_results = score_dimensions(extracted, schema.rule_dimensions)
         rule_total = sum((r.get("score") or 0) for r in rule_results)
 
         # Stage C — LLM judge
+        judge_context = LLMCallContext(
+            operation="judge",
+            call_group_id=uuid4(),
+            trace_id=trace_id,
+            ingestion_job_id=ingestion_job_id,
+            jd_id=snapshot_jd_id,
+            rule_version_id=snapshot_rule_version_id,
+        )
         judge_result = await self.judge.score(
-            resume_text=candidate.parsed_markdown or "",
+            resume_text=snapshot_parsed_markdown,
             dims=schema.judge_dimensions,
+            context=judge_context,
         )
         judge_total = sum((dimension.score or 0) for dimension in judge_result.dimensions)
-        judge_payload = judge_result.model_dump()
+        judge_payload = judge_result.model_dump(exclude={"call_group_id"})
+        judge_call_group_id = (
+            judge_result.call_group_id or judge_context.call_group_id
+            if schema.judge_dimensions
+            else None
+        )
 
         total = rule_total + judge_total
         grade = _grade_from(total, schema)
 
         score_id, created = await self._upsert_score(
-            candidate_id=candidate.id,
-            jd_id=jd.id,
-            rule_version_id=rv.id,
+            candidate_id=snapshot_candidate_id,
+            jd_id=snapshot_jd_id,
+            rule_version_id=snapshot_rule_version_id,
             total_score=total,
             grade=grade,
             hard_filter_result={
@@ -189,6 +239,7 @@ class ScoringPipeline:
             is_suspicious=False,
             llm_model_main=judge_result.model or None,
             llm_model_extract=extraction_model,
+            llm_judge_call_group_id=judge_call_group_id,
             cost_tokens=judge_result.tokens,
         )
         if created:
@@ -197,20 +248,89 @@ class ScoringPipeline:
                     event_type="score",
                     actor="system",
                     target_type="candidate",
-                    target_id=candidate.id,
+                    target_id=snapshot_candidate_id,
                     payload={
-                        "jd_code": jd.code,
-                        "rule_version": rv.version,
+                        "jd_code": snapshot_jd_code,
+                        "rule_version": snapshot_rule_version,
                         "total": total,
                         "grade": grade,
                     },
-                    rule_version_id=rv.id,
+                    rule_version_id=snapshot_rule_version_id,
                 )
             )
             await self.db.flush()
-        return PipelineResult(
-            score_id=score_id,
-            total_score=float(total),
-            grade=grade,
-            rejected=False,
+        persisted = await self.db.get(Score, score_id)
+        assert persisted is not None
+        cross_check_ids = await self._maybe_queue_cross_check(
+            score=persisted,
+            schema=schema,
+            judge_result=judge_result,
         )
+        result = PipelineResult(
+            score_id=persisted.id,
+            total_score=float(persisted.total_score),
+            grade=persisted.grade,
+            rejected=persisted.grade == "rejected",
+            cross_check_ids=cross_check_ids,
+        )
+        await self.db.commit()
+        return result
+
+    async def _maybe_queue_cross_check(
+        self, *, score: Score, schema: RuleSchema, judge_result: Any
+    ) -> list[int]:
+        """Queue a second opinion in the SAME transaction as the score.
+
+        Queueing here rather than after the commit means a rolled-back score can
+        never leave an orphaned check pointing at a row that does not exist.
+        """
+        settings = get_settings()
+        persisted_dimensions = [
+            {
+                "id": item.id,
+                "tier": item.tier,
+                "score": item.score,
+                "confidence": item.confidence,
+            }
+            for item in judge_result.dimensions
+        ]
+        golden_label = (
+            await self.db.execute(
+                select(GoldenSet.label).where(
+                    GoldenSet.candidate_id == score.candidate_id,
+                    GoldenSet.jd_id == score.jd_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        context = CrossCheckContext(
+            score_id=score.id,
+            jd_id=score.jd_id,
+            prompt_version=judge_result.prompt_version or JUDGE_PROMPT_VERSION,
+            secondary_model=settings.CROSS_ENGINE_MODEL,
+            primary_model=settings.LLM_MODEL_JUDGE,
+            schema_dimension_ids=[dim.id for dim in schema.judge_dimensions],
+            judge_dimensions=persisted_dimensions,
+            grade=score.grade,
+            sample_percent=settings.CROSS_ENGINE_SAMPLE_PERCENT,
+            low_confidence=Decimal(str(settings.CROSS_ENGINE_LOW_CONFIDENCE)),
+            golden_label=golden_label,
+            weights={
+                (score.jd_id, dim.id): Decimal(str(dim.weight))
+                for dim in schema.judge_dimensions
+            },
+        )
+        if not eligible(context):
+            return []
+        reasons = trigger_reasons(context)
+        if not reasons:
+            return []
+        row = await ensure_cross_check(
+            self.db,
+            score_id=score.id,
+            secondary_model=settings.CROSS_ENGINE_MODEL,
+            prompt_version=context.prompt_version,
+            reasons=reasons,
+            threshold=Decimal(str(settings.CROSS_ENGINE_DIFF_THRESHOLD)),
+        )
+        return [row.id]

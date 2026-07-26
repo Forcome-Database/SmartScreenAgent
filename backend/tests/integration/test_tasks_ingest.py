@@ -3,6 +3,7 @@ import io
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -35,6 +36,7 @@ async def _drive_job_to_failure(*, db_session, claimed_job, storage) -> BaseExce
 async def test_run_parse_and_score_persists_candidate(
     db_session, minio_storage, monkeypatch, tmp_path
 ):
+    from backend.app.models import JD, RuleVersion
     from backend.app.security.crypto import encrypt_pii
     from backend.app.services.storage.resume_storage import ResumeStorageService
     from backend.app.tasks.ingest import RawFileReference, run_parse_and_score
@@ -51,36 +53,64 @@ async def test_run_parse_and_score_persists_candidate(
         metadata={"sha256": sha256},
     )
 
+    async def parse_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return ParseResult(markdown="# resume\n张三 13800001234", source="stub")
+
     parser_stub = SimpleNamespace(
-        parse=AsyncMock(
-            return_value=ParseResult(markdown="# resume\n张三 13800001234", source="stub")
-        )
+        parse=AsyncMock(side_effect=parse_without_business_transaction)
     )
-    extractor_stub = SimpleNamespace(
-        extract=AsyncMock(
-            return_value=ExtractedResume(
-                name="张三",
-                phone="13800001234",
-                email=None,
-                education="本科",
-                age=30,
-                raw_tokens=321,
-                model="extract-model",
-                prompt_version="resume_extract_v1",
-                experiences=[
-                    Experience(
-                        company="X",
-                        title="外贸",
-                        description="北美 五金",
-                        start="2020-01",
-                        end="2024-01",
-                    )
-                ],
+    extracted_resume = ExtractedResume(
+        name="张三",
+        phone="13800001234",
+        email=None,
+        education="本科",
+        age=30,
+        raw_tokens=321,
+        model="extract-model",
+        prompt_version="resume_extract_v1",
+        experiences=[
+            Experience(
+                company="X",
+                title="外贸",
+                description="北美 五金",
+                start="2020-01",
+                end="2024-01",
             )
-        )
+        ],
+    )
+
+    async def extract_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return extracted_resume
+
+    extractor_stub = SimpleNamespace(
+        extract=AsyncMock(side_effect=extract_without_business_transaction)
     )
     monkeypatch.setattr("backend.app.tasks.ingest.MinerUClient", lambda: parser_stub)
     monkeypatch.setattr("backend.app.tasks.ingest.ResumeExtractor", lambda: extractor_stub)
+    async def run_pipeline_without_business_transaction(**_kwargs):
+        assert not db_session.in_transaction()
+        return SimpleNamespace(
+            score_id=1, total_score=1, grade="L1", rejected=False, cross_check_ids=[]
+        )
+
+    pipeline_run = AsyncMock(side_effect=run_pipeline_without_business_transaction)
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.ScoringPipeline",
+        lambda db: SimpleNamespace(run=pipeline_run),
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.structlog.contextvars.get_contextvars",
+        lambda: {"trace_id": "legacy-trace"},
+    )
+    jd = JD(code="LEGACY", name="Legacy", description="", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    rv = RuleVersion(jd_id=jd.id, version="v1", schema_json={})
+    db_session.add(rv)
+    await db_session.flush()
+    jd.active_rule_version_id = rv.id
 
     result = await run_parse_and_score(
         db=db_session,
@@ -95,7 +125,7 @@ async def test_run_parse_and_score_persists_candidate(
         storage=ResumeStorageService(storage=minio_storage),
         source="upload",
         source_external_id=None,
-        jd_code=None,
+        jd_code=jd.code,
     )
     c = (
         await db_session.execute(select(Candidate).where(Candidate.id == result.candidate_id))
@@ -113,6 +143,17 @@ async def test_run_parse_and_score_persists_candidate(
     assert c.pii_hash and len(c.pii_hash) == 64
     assert c.raw_file_key == object_key
     assert c.raw_file_sha256 == sha256
+    extract_context = extractor_stub.extract.await_args.kwargs["context"]
+    assert extract_context.operation == "extract"
+    assert extract_context.ingestion_job_id is None
+    assert extract_context.trace_id == "legacy-trace"
+    assert extract_context.jd_id == jd.id
+    assert pipeline_run.await_args.kwargs == {
+        "candidate_id": result.candidate_id,
+        "jd_id": jd.id,
+        "ingestion_job_id": None,
+        "trace_id": "legacy-trace",
+    }
 
 
 @pytest.mark.integration
@@ -399,6 +440,7 @@ async def test_run_job_completes_scoring_when_jd_has_active_rule_version(
         source_external_id=None,
         jd_code="FOREIGN_TRADE",
         actor="user:1",
+        trace_id="job-trace",
     )
     await db_session.commit()
     claimed = await svc.claim(job.id, lease_seconds=900)
@@ -410,6 +452,125 @@ async def test_run_job_completes_scoring_when_jd_has_active_rule_version(
     assert refreshed.state == IngestionState.COMPLETED.value
     assert refreshed.candidate_id is not None
     assert refreshed.score_id is not None
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_run_job_propagates_job_trace_and_jd_context(
+    db_session, minio_storage, monkeypatch
+):
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from backend.app.models import JD, RuleVersion
+    from backend.app.scoring.llm_judge import JudgeResult
+    from backend.app.security.crypto import encrypt_pii
+    from backend.app.services.ingestion.jobs import IngestionJobService
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+    from backend.app.tasks.ingest import RawFileReference, run_job
+
+    rule_data = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    jd = JD(code="CONTEXT", name="Context", description="", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    rv = RuleVersion(
+        jd_id=jd.id,
+        version="v1",
+        schema_json=rule_data,
+        published_at=datetime.now(tz=timezone.utc),
+    )
+    db_session.add(rv)
+    await db_session.flush()
+    jd.active_rule_version_id = rv.id
+    await db_session.commit()
+
+    body = b"%PDF-context"
+    sha256 = hashlib.sha256(body).hexdigest()
+    object_key = "resumes/2026/07/context"
+    minio_storage.put_object(
+        object_key,
+        io.BytesIO(body),
+        len(body),
+        content_type="application/pdf",
+        metadata={"sha256": sha256},
+    )
+    async def parse_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return ParseResult(markdown="resume", source="stub")
+
+    async def extract_without_business_transaction(*_args, **_kwargs):
+        assert not db_session.in_transaction()
+        return ExtractedResume(
+            name="Context Candidate",
+            phone=None,
+            email=None,
+            education="本科",
+            age=30,
+            experiences=[],
+        )
+
+    async def judge_without_business_transaction(**_kwargs):
+        assert not db_session.in_transaction()
+        return JudgeResult(
+            dimensions=[],
+            model="mock",
+            tokens=0,
+            prompt_version="resume_judge_v1",
+            call_group_id=uuid4(),
+        )
+
+    extractor = SimpleNamespace(
+        extract=AsyncMock(side_effect=extract_without_business_transaction)
+    )
+    judge_score = AsyncMock(side_effect=judge_without_business_transaction)
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(side_effect=parse_without_business_transaction)
+        ),
+    )
+    monkeypatch.setattr("backend.app.tasks.ingest.ResumeExtractor", lambda: extractor)
+    monkeypatch.setattr("backend.app.scoring.pipeline.LLMJudge.score", judge_score)
+    reference = RawFileReference(
+        object_key=object_key,
+        sha256=sha256,
+        size_bytes=len(body),
+        content_type="application/pdf",
+        original_name_cipher=encrypt_pii("context.pdf"),
+    )
+    svc = IngestionJobService(db_session)
+    job, _ = await svc.create_or_reuse(
+        raw_file=reference,
+        source="upload",
+        source_external_id=None,
+        jd_code=jd.code,
+        actor="user:1",
+        trace_id="job-trace",
+    )
+    await db_session.commit()
+    claimed = await svc.claim(job.id, lease_seconds=900)
+    await db_session.commit()
+
+    await run_job(
+        db=db_session,
+        job=claimed,
+        storage=ResumeStorageService(storage=minio_storage),
+    )
+
+    extract_context = extractor.extract.await_args.kwargs["context"]
+    judge_context = judge_score.await_args.kwargs["context"]
+    assert extract_context.operation == "extract"
+    assert extract_context.ingestion_job_id == job.id
+    assert extract_context.trace_id == "job-trace"
+    assert extract_context.jd_id == jd.id
+    assert judge_context.operation == "judge"
+    assert judge_context.ingestion_job_id == job.id
+    assert judge_context.trace_id == "job-trace"
+    assert judge_context.jd_id == jd.id
+    assert judge_context.rule_version_id == rv.id
 
 
 @pytest.mark.integration
@@ -684,6 +845,76 @@ async def test_run_job_terminal_llm_invalid_output_leaves_job_terminal_failed(
         assert refreshed.state == IngestionState.TERMINAL_FAILED.value
         assert refreshed.last_error_code == "ai_invalid_output"
         assert pii_secret not in refreshed.last_error_code
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_state", "expected_code"),
+    [
+        (
+            pytest.param(
+                "model_price_missing",
+                "terminal_failed",
+                "model_price_missing",
+                id="missing-price-terminal",
+            )
+        ),
+        (
+            pytest.param(
+                "usage_ledger_unavailable",
+                "retryable_failed",
+                "usage_ledger_unavailable",
+                id="ledger-unavailable-retryable",
+            )
+        ),
+    ],
+)
+async def test_run_job_classifies_accounting_failures(
+    db_session,
+    minio_storage,
+    monkeypatch,
+    error,
+    expected_state,
+    expected_code,
+):
+    from backend.app.database import AsyncSessionLocal
+    from backend.app.services.llm.errors import ModelPriceMissing, UsageLedgerUnavailable
+    from backend.app.services.storage.resume_storage import ResumeStorageService
+
+    exception = (
+        ModelPriceMissing("private model")
+        if error == "model_price_missing"
+        else UsageLedgerUnavailable("private ledger")
+    )
+    claimed = await _stored_and_claimed_job(
+        db_session,
+        minio_storage,
+        body=f"%PDF-{error}".encode(),
+        object_key=f"resumes/2026/07/{error}",
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.MinerUClient",
+        lambda: SimpleNamespace(
+            parse=AsyncMock(return_value=ParseResult(markdown="resume", source="stub"))
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.app.tasks.ingest.ResumeExtractor",
+        lambda: SimpleNamespace(extract=AsyncMock(side_effect=exception)),
+    )
+
+    caught = await _drive_job_to_failure(
+        db_session=db_session,
+        claimed_job=claimed,
+        storage=ResumeStorageService(storage=minio_storage),
+    )
+    assert caught is exception
+
+    async with AsyncSessionLocal() as verify_db:
+        refreshed = await verify_db.get(IngestionJob, claimed.id)
+        assert refreshed.state == expected_state
+        assert refreshed.last_error_code == expected_code
 
 
 @pytest.mark.integration

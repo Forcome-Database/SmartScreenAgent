@@ -4,6 +4,7 @@ import math
 import re
 import unicodedata
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -12,6 +13,7 @@ from backend.app.services.llm.errors import LLMInvalidOutputError
 from backend.app.services.llm.gateway import JUDGE_PROMPT_VERSION, LLMGateway
 from backend.app.services.llm.schemas import LLMResponse
 from backend.app.services.llm.structured_output import decode_json_object
+from backend.app.services.llm.usage import LLMCallContext
 
 
 class _JudgeModel(BaseModel):
@@ -53,6 +55,7 @@ class JudgeResult(_JudgeModel):
     model: str
     tokens: int = Field(ge=0)
     prompt_version: str
+    call_group_id: UUID | None = None
 
 
 def _normalize_evidence(value: str) -> str:
@@ -65,10 +68,21 @@ class LLMJudge:
         self._gateway = gateway or LLMGateway()
 
     async def score(
-        self, *, resume_text: str, dims: list[JudgeDimension]
+        self,
+        *,
+        resume_text: str,
+        dims: list[JudgeDimension],
+        context: LLMCallContext,
+        model_override: str | None = None,
     ) -> JudgeResult:
         if not dims:
-            return JudgeResult(dimensions=[], model="", tokens=0, prompt_version="")
+            return JudgeResult(
+                dimensions=[],
+                model="",
+                tokens=0,
+                prompt_version="",
+                call_group_id=None,
+            )
         request_payload = {
             "resume_markdown": resume_text,
             "dimensions": [
@@ -82,16 +96,36 @@ class LLMJudge:
             ],
         }
         response = await self._gateway.judge(
-            request_payload, schema=JudgeOutput.model_json_schema()
+            request_payload,
+            schema=JudgeOutput.model_json_schema(),
+            context=context,
+            model_override=model_override,
+            attempt_role="secondary" if model_override else "primary",
         )
         try:
             return self._validate(response, resume_text=resume_text, dims=dims)
         except LLMInvalidOutputError as primary_error:
+            if model_override is not None:
+                # Secondary mode: retry the SAME override once. Falling back to
+                # the configured fallback model would silently turn a
+                # cross-engine check into another primary-engine opinion.
+                retry = await self._gateway.judge(
+                    request_payload,
+                    schema=JudgeOutput.model_json_schema(),
+                    context=context,
+                    model_override=model_override,
+                    attempt_role="secondary",
+                )
+                try:
+                    return self._validate(retry, resume_text=resume_text, dims=dims)
+                except LLMInvalidOutputError as retry_error:
+                    raise retry_error from primary_error
             if response.used_fallback:
                 raise
             fallback = await self._gateway.judge(
                 request_payload,
                 schema=JudgeOutput.model_json_schema(),
+                context=context,
                 fallback_only=True,
             )
             try:
@@ -145,6 +179,7 @@ class LLMJudge:
         return JudgeResult(
             dimensions=ordered,
             model=response.model,
-            tokens=response.input_tokens + response.output_tokens,
+            tokens=(response.input_tokens or 0) + (response.output_tokens or 0),
             prompt_version=response.prompt_version or JUDGE_PROMPT_VERSION,
+            call_group_id=response.call_group_id,
         )
