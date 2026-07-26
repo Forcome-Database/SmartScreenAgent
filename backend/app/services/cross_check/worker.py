@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import uuid4
@@ -127,7 +127,7 @@ async def run_cross_check(row_id: int, *, judge: LLMJudge | None = None) -> dict
     holds a transaction, matching the rule the rest of WP7 follows.
     """
     settings = get_settings()
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
 
     async with AsyncSessionLocal() as session:
         claimed = await claim_cross_check(
@@ -184,7 +184,7 @@ async def run_cross_check(row_id: int, *, judge: LLMJudge | None = None) -> dict
             lease_token=claimed.lease_token,
             secondary_total=secondary_total,
             secondary_dimensions=_sanitize(result.dimensions),
-            now=datetime.now(UTC),
+            now=datetime.now(timezone.utc),
         )
         await session.commit()
     return {"row_id": row_id, "claimed": True, "completed": completed}

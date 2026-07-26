@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.integration
 
 REPORT = "/api/v1/reports/batch"
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json"
-NOW = datetime.now(UTC)
+NOW = datetime.now(timezone.utc)
 IN_WINDOW = NOW - timedelta(days=1)
 
 

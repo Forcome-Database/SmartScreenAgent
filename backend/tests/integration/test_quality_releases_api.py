@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -32,7 +32,7 @@ PREVIEW = "/api/v1/quality/releases/preview"
 RELEASES = "/api/v1/quality/releases"
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json"
-NOW = datetime.now(UTC)
+NOW = datetime.now(timezone.utc)
 IN_WINDOW = NOW - timedelta(days=1)
 
 
@@ -329,10 +329,10 @@ async def test_malformed_active_rule_is_refused(client, db_session, auth_headers
     "window",
     [
         {"window_start": "2026-07-01T00:00:00"},
-        {"window_end": (datetime.now(UTC) + timedelta(days=1)).isoformat()},
+        {"window_end": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()},
         {
-            "window_start": datetime.now(UTC).isoformat(),
-            "window_end": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            "window_start": datetime.now(timezone.utc).isoformat(),
+            "window_end": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
         },
     ],
 )

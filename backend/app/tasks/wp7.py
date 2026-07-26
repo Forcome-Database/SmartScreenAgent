@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from backend.app.config import get_settings
 from backend.app.database import AsyncSessionLocal, engine
@@ -47,7 +47,7 @@ def reconcile_budgets_task() -> dict:
             async with AsyncSessionLocal() as db:
                 report = await reconcile_budgets(
                     db,
-                    now=datetime.now(UTC),
+                    now=datetime.now(timezone.utc),
                     max_periods=settings.LLM_BUDGET_RECONCILE_MAX_PERIODS_PER_RUN,
                 )
                 await db.commit()
@@ -88,7 +88,7 @@ def sweep_cross_checks_task() -> dict:
             async with AsyncSessionLocal() as db:
                 requeued = await sweep_cross_checks(
                     db,
-                    now=datetime.now(UTC),
+                    now=datetime.now(timezone.utc),
                     max_attempts=settings.CROSS_ENGINE_MAX_ATTEMPTS,
                 )
                 # Commit before delivery: a message for an uncommitted requeue
@@ -111,7 +111,7 @@ def sweep_stale_usage() -> dict:
         settings = get_settings()
         try:
             async with AsyncSessionLocal() as db:
-                cutoff = datetime.now(UTC) - timedelta(
+                cutoff = datetime.now(timezone.utc) - timedelta(
                     seconds=settings.LLM_USAGE_PENDING_TIMEOUT_SECONDS
                 )
                 abandoned = await abandon_stale_attempts(db, older_than=cutoff)

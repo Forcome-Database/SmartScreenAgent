@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -25,7 +25,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 # 2026-07-26T05:00Z is 13:00 in Shanghai — mid-day, so the local day/month
 # boundaries are unambiguous and the current period is genuinely partial.
-NOW = datetime(2026, 7, 26, 5, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 26, 5, 0, tzinfo=timezone.utc)
 
 # From TEST_ENV_DEFAULTS: daily 100, monthly 1500, warn ratio 0.80.
 DAILY_WARNING_SPEND = Decimal("85")

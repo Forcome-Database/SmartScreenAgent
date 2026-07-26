@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -64,7 +64,7 @@ async def batch_rejection_report(
     if batch_id is None and jd_code is None and not explicit_window:
         raise HTTPException(status_code=422, detail=_FILTER_REQUIRED)
 
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     resolved_end = end or now
     resolved_start = start or (resolved_end - DEFAULT_BATCH_WINDOW)
     if resolved_start >= resolved_end:

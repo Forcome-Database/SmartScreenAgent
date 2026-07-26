@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -94,7 +94,7 @@ async def preview(
     _user: User = Depends(require_roles(*READ_ROLES)),
 ) -> QualityReleasePreview:
     try:
-        payload = await preview_release(db, body.to_request(), datetime.now(UTC))
+        payload = await preview_release(db, body.to_request(), datetime.now(timezone.utc))
     except Exception as exc:
         raise _translate(exc) from exc
     return QualityReleasePreview.model_validate(payload)
@@ -107,7 +107,7 @@ async def create(
 ) -> QualityReleaseDetail:
     try:
         payload = await create_release(
-            AsyncSessionLocal, body.to_request(), user.id, datetime.now(UTC)
+            AsyncSessionLocal, body.to_request(), user.id, datetime.now(timezone.utc)
         )
     except Exception as exc:
         raise _translate(exc) from exc

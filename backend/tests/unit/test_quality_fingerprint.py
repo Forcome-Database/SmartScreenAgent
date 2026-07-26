@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -22,7 +22,7 @@ from backend.app.services.quality.releases import (
     targets_for_persistence,
 )
 
-NOW = datetime(2026, 7, 26, 5, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 26, 5, 0, tzinfo=timezone.utc)
 WINDOW_START = NOW - timedelta(days=30)
 
 

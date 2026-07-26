@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from backend.app.schemas.quality import (
@@ -22,7 +22,7 @@ from backend.app.schemas.quality import (
     TargetResult,
 )
 
-MOMENT = datetime(2026, 7, 26, 5, 0, tzinfo=UTC)
+MOMENT = datetime(2026, 7, 26, 5, 0, tzinfo=timezone.utc)
 
 
 def _classification(**overrides) -> ClassificationMetrics:

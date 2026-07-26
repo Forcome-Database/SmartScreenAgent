@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,7 +53,7 @@ async def operations_summary(
     _user: User = Depends(require_roles(*OPERATIONS_ROLES)),
 ) -> OperationsSummary:
     try:
-        return await summarize(db, window=window, now=datetime.now(UTC))
+        return await summarize(db, window=window, now=datetime.now(timezone.utc))
     except InvalidOperationsWindow as exc:
         raise HTTPException(
             status_code=422,
@@ -81,7 +81,7 @@ async def operations_usage(
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(require_roles(*OPERATIONS_ROLES)),
 ) -> UsagePage:
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     start = _parse_bound(from_, now - DEFAULT_USAGE_SPAN)
     end = _parse_bound(to, now)
 

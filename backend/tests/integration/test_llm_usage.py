@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -306,7 +306,7 @@ async def test_abandon_stale_attempts_only_marks_old_pending_rows(db_session):
     recorder, stale = await _begin()
     _, fresh = await _begin(recorder)
     _, terminal = await _begin(recorder)
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     async with AsyncSessionLocal() as session:
         await session.execute(
             update(LLMUsageAttempt)

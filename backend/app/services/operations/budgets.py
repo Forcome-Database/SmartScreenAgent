@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -29,7 +29,7 @@ SCOPES: tuple[Scope, ...] = ("daily", "monthly")
 
 @dataclass(frozen=True)
 class Period:
-    """A half-open `[start, end)` window in UTC, derived from local calendar boundaries."""
+    """A half-open `[start, end)` window in timezone.utc, derived from local calendar boundaries."""
 
     scope: Scope
     start: datetime
@@ -46,7 +46,7 @@ def _local_midnight(moment: datetime) -> datetime:
 
 
 def local_periods(now: datetime) -> tuple[Period, Period]:
-    """Return the `(daily, monthly)` UTC periods containing `now` in `Asia/Shanghai`."""
+    """Return the `(daily, monthly)` timezone.utc periods containing `now` in `Asia/Shanghai`."""
     if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
         raise ValueError("now must be timezone-aware")
 
@@ -57,8 +57,8 @@ def local_periods(now: datetime) -> tuple[Period, Period]:
     month_end = _local_midnight((month_start + timedelta(days=32)).replace(day=1))
 
     return (
-        Period("daily", day_start.astimezone(UTC), day_end.astimezone(UTC)),
-        Period("monthly", month_start.astimezone(UTC), month_end.astimezone(UTC)),
+        Period("daily", day_start.astimezone(timezone.utc), day_end.astimezone(timezone.utc)),
+        Period("monthly", month_start.astimezone(timezone.utc), month_end.astimezone(timezone.utc)),
     )
 
 
@@ -263,7 +263,7 @@ async def reconcile_budget_scope(
         .values(
             key=scope,
             next_period_start=await _initial_cursor_start(db, scope, now),
-            updated_at=datetime.now(UTC),
+            updated_at=datetime.now(timezone.utc),
         )
         .on_conflict_do_nothing(index_elements=["key"])
     )
@@ -281,7 +281,7 @@ async def reconcile_budget_scope(
         await _evaluate_period(db, period, settings=settings)
         period = period_for(scope, period.end)
         cursor.next_period_start = period.start
-        cursor.updated_at = datetime.now(UTC)
+        cursor.updated_at = datetime.now(timezone.utc)
         processed += 1
         await db.flush()
 

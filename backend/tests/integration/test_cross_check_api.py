@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -15,7 +15,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 SUSPICIOUS = "/api/v1/cross-checks/suspicious"
 BACKFILL = "/api/v1/cross-checks/backfill"
-NOW = datetime.now(UTC)
+NOW = datetime.now(timezone.utc)
 
 
 async def _seed_score(db: AsyncSession, *, total: float = 70) -> tuple[Score, JD]:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -19,7 +19,7 @@ from backend.app.security.crypto import encrypt_pii
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_rule_v1.json"
-NOW = datetime.now(UTC)
+NOW = datetime.now(timezone.utc)
 
 
 async def _seed(db: AsyncSession) -> tuple[JD, Candidate]:

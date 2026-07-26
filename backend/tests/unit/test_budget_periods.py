@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -15,12 +15,12 @@ SHANGHAI_OFFSET = timedelta(hours=8)
 
 
 def _utc(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> datetime:
-    return datetime(year, month, day, hour, minute, tzinfo=UTC)
+    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
 
 
 def _shanghai_midnight_as_utc(year: int, month: int, day: int) -> datetime:
-    """Local Shanghai midnight expressed in UTC (Shanghai is a fixed UTC+8)."""
-    return datetime(year, month, day, tzinfo=UTC) - SHANGHAI_OFFSET
+    """Local Shanghai midnight expressed in timezone.utc (Shanghai is a fixed timezone.utc+8)."""
+    return datetime(year, month, day, tzinfo=timezone.utc) - SHANGHAI_OFFSET
 
 
 def test_local_periods_are_half_open_utc_ranges_around_shanghai_midnight() -> None:

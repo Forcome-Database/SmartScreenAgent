@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Literal, cast
 from uuid import UUID
 
@@ -105,7 +105,7 @@ class UsageRecorder:
         prompt_version: str,
     ) -> UsageAttemptHandle:
         price = self._prices.require(requested_model)
-        started_at = datetime.now(UTC)
+        started_at = datetime.now(timezone.utc)
         attempt = LLMUsageAttempt(
             call_group_id=context.call_group_id,
             trace_id=context.trace_id,

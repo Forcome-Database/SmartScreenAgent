@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import Any
@@ -224,8 +224,8 @@ def input_fingerprint(
             }
             for binding in sorted(bindings, key=lambda item: item.jd_id)
         ],
-        "window_start": window_start.astimezone(UTC).isoformat(),
-        "window_end": window_end.astimezone(UTC).isoformat(),
+        "window_start": window_start.astimezone(timezone.utc).isoformat(),
+        "window_end": window_end.astimezone(timezone.utc).isoformat(),
         "targets": targets,
     }
     return sha256(canonical_json(payload).encode()).hexdigest()

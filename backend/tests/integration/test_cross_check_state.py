@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -22,7 +22,7 @@ from backend.app.services.cross_check.state import (
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-NOW = datetime.now(UTC)
+NOW = datetime.now(timezone.utc)
 MODEL = "test-secondary"
 PROMPT = "resume_judge_v1"
 THRESHOLD = Decimal("10")

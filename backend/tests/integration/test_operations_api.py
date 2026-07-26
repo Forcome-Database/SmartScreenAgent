@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -18,7 +18,7 @@ USAGE = "/api/v1/operations/usage"
 # `now`, so it cannot go flaky when the suite happens to run just after local
 # midnight (which would leave `today` almost empty). `today`'s boundary maths is
 # covered deterministically in `test_operations_windows.py`.
-NOW = datetime.now(UTC)
+NOW = datetime.now(timezone.utc)
 IN_CURRENT = NOW - timedelta(days=1)
 IN_PREVIOUS = NOW - timedelta(days=8)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -14,8 +14,8 @@ from backend.app.services.operations.reporting import (
 )
 
 # 13:00 in Shanghai, so 13 hours have elapsed since local midnight.
-NOW = datetime(2026, 7, 26, 5, 0, tzinfo=UTC)
-LOCAL_MIDNIGHT = datetime(2026, 7, 25, 16, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 26, 5, 0, tzinfo=timezone.utc)
+LOCAL_MIDNIGHT = datetime(2026, 7, 25, 16, 0, tzinfo=timezone.utc)
 
 
 def test_today_compares_the_same_elapsed_duration_of_the_previous_local_day() -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -14,7 +14,7 @@ from backend.app.schemas.operations import (
     UsagePage,
 )
 
-STARTED_AT = datetime(2026, 7, 26, 5, 0, tzinfo=UTC)
+STARTED_AT = datetime(2026, 7, 26, 5, 0, tzinfo=timezone.utc)
 
 
 def _totals() -> OperationsTotals:

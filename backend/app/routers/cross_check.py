@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -155,7 +155,7 @@ async def backfill(
     if not 1 <= limit <= settings.CROSS_ENGINE_BACKFILL_MAX:
         raise HTTPException(status_code=422, detail=_INVALID_LIMIT)
 
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     end = _parse(to) or now
     start = _parse(from_) or (end - timedelta(days=30))
     if start >= end:
