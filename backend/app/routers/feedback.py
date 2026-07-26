@@ -16,6 +16,7 @@ from backend.app.services.feedback import (
     upsert_feedback,
 )
 from backend.app.services.read.pagination import Page, page_params
+from backend.app.tasks.ingest import _send_cross_checks
 
 router = APIRouter(prefix="/api/v1", tags=["feedback"])
 ROLES = ("hr", "hr_lead", "admin")
@@ -49,14 +50,18 @@ async def upsert(
 ) -> FeedbackItem:
     score = await _load_score(db, candidate_id, score_id)
     try:
-        fb = await upsert_feedback(
+        fb, queued = await upsert_feedback(
             db, score=score, reviewer_id=user.id, decision=payload.decision, reason=payload.reason
         )
     except FeedbackReasonRequired as exc:
+        await db.rollback()
         raise HTTPException(
             status_code=422,
             detail={"code": "feedback_reason_required", "message": "与 AI 不一致时必须填写理由"},
         ) from exc
+    # Commit the feedback and its queued cross-check together, then deliver.
+    await db.commit()
+    _send_cross_checks(queued)
     return _serialize(fb, user.display_name)
 
 
