@@ -5,6 +5,7 @@ from backend.app.config import get_settings
 from backend.app.logging_config import configure_logging
 from backend.app.middleware import AccessLogMiddleware
 from backend.app.routers import auth as auth_router
+from backend.app.routers import batch_report as batch_report_router
 from backend.app.routers import candidates as candidates_router
 from backend.app.routers import candidates_read as candidates_read_router
 from backend.app.routers import feedback as feedback_router
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(rule_publication_router.router)
     app.include_router(operations_router.router)
     app.include_router(quality_router.router)
+    app.include_router(batch_report_router.router)
 
     @app.get("/")
     async def root() -> dict[str, str]:
