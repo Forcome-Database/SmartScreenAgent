@@ -32,11 +32,17 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 
+import httpx
 import pytest
 
+from backend.app.config import get_settings
 from backend.app.services.sync.dingtalk import (
     ACCEPTED_SUFFIXES,
+    ACCESS_TOKEN_HEADER,
+    CANDIDATES_PATH,
+    REQUEST_TIMEOUT_SECONDS,
     DingTalkRecruitmentAdapter,
+    parse_candidates_page,
 )
 
 pytestmark = pytest.mark.external_contract
@@ -62,6 +68,53 @@ async def test_the_recruitment_endpoint_exists_and_matches_our_parser() -> None:
         # The sync path validates on the suffix alone; an item arriving without
         # one would be rejected as `unsupported_attachment` on every run.
         assert PurePosixPath(item.filename).suffix.lower() in ACCEPTED_SUFFIXES
+
+
+@pytest.mark.skipif(not TOKEN, reason="requires a real corp access token")
+@pytest.mark.asyncio
+async def test_the_raw_page_arrives_oldest_first() -> None:
+    """Settle the ordering assumption the cap depends on.
+
+    `list_changed` sorts ascending before it truncates, which is correct under
+    either server ordering — but only because of that sort. The runner
+    truncates by position and advances the cursor by value, so a newest-first
+    feed consumed unsorted would drop the oldest items and then move the cursor
+    past them. The raw order is therefore a fact worth pinning the first time a
+    real response exists, and this assertion is written to fail loudly and
+    NAME the order it saw.
+
+    The request is issued here rather than through `list_changed` precisely
+    because `list_changed` sorts; the endpoint constants still come from the
+    adapter module, which remains the only place that knows them.
+    """
+    settings = get_settings()
+    url = f"{settings.DINGTALK_RECRUITMENT_BASE_URL}{CANDIDATES_PATH}"
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+        response = await client.get(
+            url,
+            params={"since": since.isoformat(), "maxResults": 20},
+            headers={ACCESS_TOKEN_HEADER: TOKEN or ""},
+        )
+    response.raise_for_status()
+    items, _ = parse_candidates_page(response.json())
+    if len(items) < 2:
+        pytest.skip("need at least two changed candidates to observe an order")
+
+    stamps = [item.updated_at for item in items]
+    observed = (
+        "ASCENDING (oldest first)"
+        if stamps == sorted(stamps)
+        else "DESCENDING (newest first)"
+        if stamps == sorted(stamps, reverse=True)
+        else "UNORDERED"
+    )
+    assert stamps == sorted(stamps), (
+        f"RAW PAGE ORDER OBSERVED: {observed}. Record it as behavioural"
+        " assumption G in the task report and KEEP the ascending sort in"
+        " `list_changed`: the cap must retain the OLDEST window or the cursor"
+        " advances past the items the run dropped."
+    )
 
 
 @pytest.mark.skipif(not TOKEN, reason="requires a real corp access token")

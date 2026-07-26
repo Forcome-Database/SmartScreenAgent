@@ -49,6 +49,13 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 # content-type header, so it decides on the filename suffix ALONE.
 ACCEPTED_SUFFIXES = frozenset({".pdf", ".docx", ".png", ".jpg", ".jpeg"})
 
+# A candidate row can name a person without attaching a resume — an ordinary
+# ATS state, not a malformed response. Such an item is still emitted so the
+# cursor moves past it, wearing this stand-in name. It holds nothing the
+# candidate supplied, and it is never used: the item has no recorded download
+# URL, so `fetch` refuses it before the name can reach storage.
+MISSING_ATTACHMENT_FILENAME = "attachment-unavailable"
+
 _SUFFIX_BY_CONTENT_TYPE = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
@@ -62,6 +69,26 @@ def _require(row: dict, key: str) -> object:
     if value is None or (isinstance(value, str) and not value.strip()):
         raise ValueError(f"recruitment row is missing {key}")
     return value
+
+
+def _optional_text(value: object) -> str:
+    """One field the source is allowed to omit, as blank when it does."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _comparable_host(url: str) -> str:
+    """The host of a URL, normalised so two spellings of it compare equal.
+
+    `hostname` rather than `netloc`: it is already lowercased and carries
+    neither the port nor any userinfo, both of which a URL taken from an
+    unverified response can carry — enough to make an on-origin URL look
+    foreign (`api.dingtalk.com:443`) or a foreign one look on-origin
+    (`api.dingtalk.com@evil.example`). The DNS root dot is dropped as well,
+    because `api.dingtalk.com.` names the same host.
+    """
+    return (urlsplit(url).hostname or "").rstrip(".")
 
 
 def _suffix_of(name: str) -> str:
@@ -128,14 +155,28 @@ def parse_candidates_page(payload: dict) -> tuple[list[SourceItem], dict[str, st
 
     UNVERIFIED shape (design §8.2): `list[]` of rows carrying `candidateId`,
     `updateTime`, `jobCode`, and `resume{fileName, fileType, downloadUrl}`.
-    `hasMore` and `nextCursor` are documented but deliberately unread — the
-    runner caps a run and the cursor picks up the remainder next time.
+    `hasMore` and `nextCursor` are documented but deliberately unread: the
+    runner caps a run and the cursor picks up the remainder next time — which
+    is true *because* `list_changed` sorts oldest-first before it truncates.
+    Without that sort a newest-first feed would lose every item the cap
+    dropped, permanently and silently. With it, an unread `hasMore` costs
+    observability only (`SyncReport.truncated` under-reports a server-paged
+    run), never data.
 
     The URLs are returned separately so `SourceItem` carries no transport
     detail; the adapter keeps them and the runner never sees them.
 
-    A missing field raises. Yielding `None` would produce a candidate with no
-    external id, which breaks deduplication for every subsequent run.
+    Identity is required, the attachment is not:
+
+    - A row missing `candidateId` or `updateTime` **raises**. An item with no
+      external id breaks deduplication for every later run, and one with no
+      timestamp cannot move the cursor; skipping either silently would corrupt
+      both.
+    - A row with no `resume`, no `downloadUrl`, or no `fileName` is emitted
+      anyway, with no recorded URL — so `fetch` fails that ONE item and the
+      cursor still advances past it (design §9). A candidate with no resume
+      attached is an ordinary ATS state; raising here would wedge every future
+      run behind the first one, over a window that grows without bound.
     """
     rows = payload.get("list")
     if not isinstance(rows, list):
@@ -146,24 +187,35 @@ def parse_candidates_page(payload: dict) -> tuple[list[SourceItem], dict[str, st
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("recruitment row is not an object")
-        resume = row.get("resume")
-        if not isinstance(resume, dict):
-            raise ValueError("recruitment row is missing resume")
         external_id = str(_require(row, "candidateId"))
-        download_url = str(_require(resume, "downloadUrl"))
-        content_type = str(_require(resume, "fileType"))
+        updated_at = _parse_updated_at(_require(row, "updateTime"))
+        resume = row.get("resume")
+        attachment = resume if isinstance(resume, dict) else {}
+        download_url = _optional_text(attachment.get("downloadUrl"))
+        raw_name = _optional_text(attachment.get("fileName"))
+        # `fileType` is optional: a `fileName` that already carries an accepted
+        # suffix needs no declared type, and the upload gate reads the suffix
+        # alone anyway.
+        content_type = _optional_text(attachment.get("fileType"))
+        if download_url and raw_name:
+            filename = _resolve_filename(raw_name, content_type, download_url)
+            urls[external_id] = download_url
+        else:
+            # Recording no URL is what makes `fetch` raise `ItemUnavailable`
+            # for this item and this item only.
+            filename = MISSING_ATTACHMENT_FILENAME
+        job_code = row.get("jobCode")
         items.append(
             SourceItem(
                 external_id=external_id,
-                updated_at=_parse_updated_at(_require(row, "updateTime")),
-                filename=_resolve_filename(
-                    str(_require(resume, "fileName")), content_type, download_url
-                ),
+                updated_at=updated_at,
+                filename=filename,
                 content_type=content_type,
-                jd_code=row.get("jobCode") or None,
+                # Coerced: a numeric `jobCode` would otherwise reach
+                # `ingest_upload(jd_code=...)`, and a string column, as an int.
+                jd_code=str(job_code) if job_code else None,
             )
         )
-        urls[external_id] = download_url
     return items, urls
 
 
@@ -179,7 +231,13 @@ class DingTalkRecruitmentAdapter:
     identity. Failures carry a fixed string and chain the cause.
     """
 
-    source_name = "dingtalk"
+    # The primary key of `sync_cursors`, and what lands in
+    # `sync_source_items.source` and `IngestionJob.source`. Settled as
+    # `dingtalk_recruitment` in commit d7b531f: DingTalk may later be a source
+    # through a different channel, and changing this after a production run
+    # orphans every cursor and every ledger row. Every consumer reads
+    # `adapter.source_name`; nothing hardcodes a second copy.
+    source_name = "dingtalk_recruitment"
 
     def __init__(
         self,
@@ -222,11 +280,32 @@ class DingTalkRecruitmentAdapter:
             # than raise `ValueError` out of the port.
             raise SourceUnavailable("recruitment listing failed") from exc
         self._download_urls.update(urls)
+        # Oldest first, ALWAYS, and before the cap bites.
+        #
+        # The runner truncates by POSITION (`offered[:max_items]`) and then
+        # advances the cursor by VALUE (`max(updated_at for ... in processed)`).
+        # Those two agree only on an ascending list. Served newest-first — the
+        # more common convention for a "changed since" feed, and UNVERIFIED
+        # here — the run would keep the newest items, drop the oldest, and then
+        # jump the cursor to the global maximum: the next `overlap_start` opens
+        # *after* the dropped items and they are never listed again. When the
+        # page is shorter than the cap that loss is completely silent, because
+        # `truncated` reads false.
+        #
+        # Sorting ascending makes the kept window the oldest one and the cursor
+        # advance minimally, which is correct under either server ordering. The
+        # live probe records which one the real endpoint uses.
+        items.sort(key=lambda item: item.updated_at)
         return items[:limit]
 
     async def fetch(self, item: SourceItem) -> FetchedResume:
         download_url = self._download_urls.get(item.external_id)
         if not download_url:
+            # Either the item did not come from this adapter's own listing, or
+            # its row carried no usable attachment — `parse_candidates_page`
+            # deliberately emits that row and records no URL for it, so the
+            # failure lands on this ONE item and the cursor still moves past
+            # it. The message names neither the item nor its file.
             raise ItemUnavailable("no download url for item")
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
@@ -256,15 +335,29 @@ class DingTalkRecruitmentAdapter:
         return await self._token_client.get_token()
 
     async def _download_headers(self, download_url: str) -> dict[str, str]:
-        """Credential the download only while it stays on the API origin.
+        """Credential the download only over HTTPS to the API host.
 
         Whether a recruitment `downloadUrl` points at DingTalk or at a
         pre-signed object-store link on a host we do not control is UNVERIFIED.
         Sending the corp access token to the latter would hand our application
-        credential to a third party, so it is sent only on a same-origin URL.
-        Same precedent as `MinerUClient`'s upload/result host split.
+        credential to a third party, so it goes out only when the URL is on the
+        API host AND uses HTTPS.
+
+        The scheme is half the guard, not a formality: this URL comes out of
+        the very response the host check exists to distrust, so an
+        `http://api.dingtalk.com/...` would otherwise put the corp credential
+        on the wire in cleartext.
+
+        Hosts are compared through `_comparable_host` rather than `netloc`,
+        which carries the port and any userinfo. `netloc` withholds the token
+        from `https://api.dingtalk.com:443/...` — i.e. exactly where it is
+        required — and every item then reports `item_unavailable` on every run:
+        a total outage wearing a per-item error code. Same precedent as
+        `MinerUClient`'s upload/result host split.
         """
-        api_host = urlsplit(self._settings.DINGTALK_RECRUITMENT_BASE_URL).netloc.lower()
-        if urlsplit(download_url).netloc.lower() != api_host:
+        api_host = _comparable_host(self._settings.DINGTALK_RECRUITMENT_BASE_URL)
+        if not api_host or urlsplit(download_url).scheme != "https":
+            return {}
+        if _comparable_host(download_url) != api_host:
             return {}
         return {ACCESS_TOKEN_HEADER: await self._token()}

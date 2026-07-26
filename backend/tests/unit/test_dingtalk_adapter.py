@@ -12,6 +12,7 @@ import respx
 
 from backend.app.services.sync.adapter import ItemUnavailable, SourceItem, SourceUnavailable
 from backend.app.services.sync.dingtalk import (
+    MISSING_ATTACHMENT_FILENAME,
     DingTalkRecruitmentAdapter,
     parse_candidates_page,
 )
@@ -19,6 +20,7 @@ from backend.app.services.sync.dingtalk import (
 FIXTURES = Path(__file__).parents[1] / "contracts" / "dingtalk-recruitment" / "v1.0"
 CANDIDATES_URL = "https://api.dingtalk.com/v1.0/recruitment/candidates"
 DOWNLOAD_URL = "https://example.invalid/d/1001"
+SINCE = datetime(2026, 7, 27, tzinfo=timezone.utc)
 
 
 def _load(name: str) -> dict:
@@ -41,6 +43,25 @@ def _row(**overrides: Any) -> dict:
         "resume": resume,
     }
     return {"hasMore": False, "nextCursor": None, "list": [row]}
+
+
+def _page(*rows: dict) -> dict:
+    """A page holding exactly these rows, in exactly this order."""
+    return {"hasMore": False, "nextCursor": None, "list": list(rows)}
+
+
+def _candidate(external_id: str, update_time: str) -> dict:
+    """One well-formed row, for tests that care only about ordering."""
+    return {
+        "candidateId": external_id,
+        "updateTime": update_time,
+        "jobCode": None,
+        "resume": {
+            "fileName": f"{external_id}.pdf",
+            "fileType": "application/pdf",
+            "downloadUrl": f"https://example.invalid/d/{external_id}",
+        },
+    }
 
 
 # --------------------------------------------------------------------------
@@ -71,8 +92,164 @@ def test_a_missing_required_field_raises_rather_than_yielding_none() -> None:
         parse_candidates_page(_load("candidates-malformed"))
 
 
+def test_a_row_without_a_timestamp_raises_because_the_cursor_needs_it() -> None:
+    # Skipping it silently would let the cursor advance past a row whose
+    # position in the window is unknown.
+    with pytest.raises(ValueError, match="updateTime"):
+        parse_candidates_page(_page({"candidateId": "cand-1", "resume": {}}))
+
+
 def test_the_adapter_declares_its_source_name() -> None:
-    assert DingTalkRecruitmentAdapter.source_name == "dingtalk"
+    # The primary key of `sync_cursors`, settled in d7b531f. Changing it after
+    # a production run orphans every cursor and every ledger row.
+    assert DingTalkRecruitmentAdapter.source_name == "dingtalk_recruitment"
+
+
+def test_a_numeric_job_code_reaches_the_pipeline_as_a_string() -> None:
+    # `jd_code` is a string column and `ingest_upload(jd_code=...)` passes it
+    # straight through; an int would only fail at the database boundary.
+    items, _ = parse_candidates_page(_row(jobCode=8801))
+
+    assert items[0].jd_code == "8801"
+
+
+# --------------------------------------------------------------------------
+# The cap must keep the OLDEST window, because the cursor advances by value
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_newest_first_page_is_sorted_before_the_limit_truncates_it() -> None:
+    # The runner truncates by POSITION and then advances the cursor by VALUE
+    # (`max(updated_at)`). If the newest items survived the cap, the cursor
+    # would jump past the oldest ones this run dropped and `overlap_start`
+    # would open after them: they are never listed again. Server ordering is
+    # UNVERIFIED, so the adapter must not depend on it.
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_page(
+                _candidate("cand-newest", "2026-07-27T06:00:00Z"),
+                _candidate("cand-middle", "2026-07-27T05:00:00Z"),
+                _candidate("cand-oldest", "2026-07-27T04:00:00Z"),
+            ),
+        )
+    )
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 2)
+
+    assert [i.external_id for i in items] == ["cand-oldest", "cand-middle"]
+
+
+@respx.mock
+async def test_an_unordered_page_is_returned_oldest_first() -> None:
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_page(
+                _candidate("cand-b", "2026-07-27T05:00:00Z"),
+                _candidate("cand-c", "2026-07-27T06:00:00Z"),
+                _candidate("cand-a", "2026-07-27T04:00:00Z"),
+            ),
+        )
+    )
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+
+    assert [i.updated_at for i in items] == sorted(i.updated_at for i in items)
+    assert [i.external_id for i in items] == ["cand-a", "cand-b", "cand-c"]
+
+
+# --------------------------------------------------------------------------
+# A candidate with no attachment must fail alone, not wedge every future run
+# --------------------------------------------------------------------------
+
+
+def test_a_candidate_with_no_resume_object_is_emitted_rather_than_aborting() -> None:
+    # A row with no resume attached is an ordinary ATS state. Raising would
+    # make `list_changed` SourceUnavailable, which leaves the cursor untouched
+    # — so every later run fails identically, forever, over a growing window.
+    items, urls = parse_candidates_page(
+        _page(
+            {"candidateId": "cand-1", "updateTime": "2026-07-27T04:30:00Z"},
+            _candidate("cand-2", "2026-07-27T04:45:00Z"),
+        )
+    )
+
+    assert [i.external_id for i in items] == ["cand-1", "cand-2"]
+    # No URL recorded for it, which is what makes `fetch` refuse it alone.
+    assert "cand-1" not in urls
+    assert items[0].filename == MISSING_ATTACHMENT_FILENAME
+
+
+def test_a_row_with_no_download_url_is_emitted_with_a_pii_free_placeholder() -> None:
+    items, urls = parse_candidates_page(
+        _page(
+            {
+                "candidateId": "cand-1",
+                "updateTime": "2026-07-27T04:30:00Z",
+                "resume": {"fileName": "zhang-san-13800138000.pdf", "fileType": "application/pdf"},
+            }
+        )
+    )
+
+    assert urls == {}
+    assert items[0].filename == MISSING_ATTACHMENT_FILENAME
+    assert "zhang" not in items[0].filename
+    assert "13800138000" not in items[0].filename
+
+
+def test_a_row_with_no_filename_is_emitted_without_a_url() -> None:
+    items, urls = parse_candidates_page(
+        _page(
+            {
+                "candidateId": "cand-1",
+                "updateTime": "2026-07-27T04:30:00Z",
+                "resume": {"fileType": "application/pdf", "downloadUrl": DOWNLOAD_URL},
+            }
+        )
+    )
+
+    assert urls == {}
+    assert items[0].filename == MISSING_ATTACHMENT_FILENAME
+
+
+def test_an_undeclared_file_type_does_not_abort_the_page() -> None:
+    # The upload gate reads the suffix alone, so a name that already carries
+    # one needs no declared type.
+    items, urls = parse_candidates_page(_row(resume={"fileType": None}))
+
+    assert items[0].filename == "zhang.pdf"
+    assert urls["cand-1001"] == DOWNLOAD_URL
+
+
+@respx.mock
+async def test_an_attachment_less_item_fails_alone_so_the_cursor_can_advance() -> None:
+    # Design §9: the run records one `failed` ledger row, appends the item to
+    # `processed`, and the cursor moves past it.
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_page(
+                {"candidateId": "cand-1", "updateTime": "2026-07-27T04:30:00Z"},
+                _candidate("cand-2", "2026-07-27T04:45:00Z"),
+            ),
+        )
+    )
+    respx.get("https://example.invalid/d/cand-2").mock(
+        return_value=httpx.Response(200, content=b"%PDF-1.4 fake")
+    )
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+
+    assert len(items) == 2
+    with pytest.raises(ItemUnavailable):
+        await adapter.fetch(items[0])
+    # The rest of the run is unaffected.
+    assert (await adapter.fetch(items[1])).content == b"%PDF-1.4 fake"
 
 
 # --------------------------------------------------------------------------
@@ -323,3 +500,106 @@ async def test_the_access_token_is_sent_when_the_download_stays_on_the_api_origi
     await adapter.fetch(items[0])
 
     assert route.calls[0].request.headers["x-acs-dingtalk-access-token"] == "corp-token-1"
+
+
+@respx.mock
+async def test_the_access_token_is_never_sent_over_plain_http() -> None:
+    # The URL comes out of the very response the host check exists to
+    # distrust, so a downgraded scheme would otherwise put the corp
+    # credential on the wire in cleartext.
+    downgraded = "http://api.dingtalk.com/v1.0/recruitment/attachments/1001"
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(200, json=_row(resume={"downloadUrl": downgraded}))
+    )
+    route = respx.get(downgraded).mock(return_value=httpx.Response(200, content=b"%PDF-1.4 x"))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+    await adapter.fetch(items[0])
+
+    assert "x-acs-dingtalk-access-token" not in route.calls[0].request.headers
+
+
+@respx.mock
+async def test_the_access_token_is_sent_when_the_url_spells_out_the_default_port() -> None:
+    # `netloc` carries the port, so comparing it would withhold the token from
+    # the API host itself: every item would report `item_unavailable` on every
+    # run — a total outage wearing a per-item error code.
+    on_origin = "https://api.dingtalk.com:443/v1.0/recruitment/attachments/1001"
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(200, json=_row(resume={"downloadUrl": on_origin}))
+    )
+    route = respx.get(on_origin).mock(return_value=httpx.Response(200, content=b"%PDF-1.4 x"))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+    await adapter.fetch(items[0])
+
+    assert route.calls[0].request.headers["x-acs-dingtalk-access-token"] == "corp-token-1"
+
+
+@respx.mock
+async def test_a_foreign_host_wearing_the_api_host_as_userinfo_gets_no_token() -> None:
+    # Moving from `netloc` to `hostname` must not open the other direction:
+    # `hostname` reads past the userinfo, so this URL is `evil.example`.
+    spoofed = "https://api.dingtalk.com@example.invalid/d/1001"
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(200, json=_row(resume={"downloadUrl": spoofed}))
+    )
+    route = respx.get(spoofed).mock(return_value=httpx.Response(200, content=b"%PDF-1.4 x"))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+    await adapter.fetch(items[0])
+
+    assert "x-acs-dingtalk-access-token" not in route.calls[0].request.headers
+
+
+# --------------------------------------------------------------------------
+# No candidate-supplied string may reach an exception message
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_download_failure_names_neither_the_url_nor_the_filename() -> None:
+    # A `fileName` and a signed `downloadUrl` both carry a real person's
+    # identity. An `ItemUnavailable` message is read by whoever debugs the run.
+    signed = "https://example.invalid/d/1001?name=zhang-san&sig=deadbeef"
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_row(resume={"fileName": "zhang-san-13800138000.pdf", "downloadUrl": signed}),
+        )
+    )
+    respx.get(signed).mock(side_effect=httpx.ConnectError("no route"))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+
+    with pytest.raises(ItemUnavailable) as caught:
+        await adapter.fetch(items[0])
+
+    message = str(caught.value)
+    assert "zhang-san" not in message
+    assert "13800138000" not in message
+    assert "example.invalid" not in message
+    assert "sig=" not in message
+    assert "corp-token-1" not in message
+
+
+async def test_a_missing_url_failure_names_neither_the_item_nor_its_file() -> None:
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+    item = SourceItem(
+        external_id="cand-9999",
+        updated_at=SINCE,
+        filename="zhang-san-13800138000.pdf",
+        content_type="application/pdf",
+        jd_code=None,
+    )
+
+    with pytest.raises(ItemUnavailable) as caught:
+        await adapter.fetch(item)
+
+    message = str(caught.value)
+    assert "zhang-san" not in message
+    assert "cand-9999" not in message
