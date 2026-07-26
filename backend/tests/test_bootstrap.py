@@ -78,6 +78,15 @@ TEST_ENV_DEFAULTS = {
     "CORS_ORIGINS": "http://localhost:3000",
 }
 
+# Test-harness switches that are deliberately NOT `Settings` fields. Consumed
+# directly from the environment at import time, before configuration is built.
+TEST_ONLY_ENV = {
+    # `database.py` drops connection pooling: asyncpg connections are bound to
+    # the event loop that opened them, and tests span several loops (one per
+    # pytest-asyncio test, plus the in-thread Celery worker's own).
+    "SMARTSCREEN_DB_NULLPOOL": "1",
+}
+
 TEST_INFRA_OVERRIDE_KEYS = frozenset(
     {
         "DATABASE_URL",
@@ -93,6 +102,9 @@ TEST_INFRA_OVERRIDE_KEYS = frozenset(
 
 
 def apply_test_environment(environ: MutableMapping[str, str]) -> None:
+    for key, value in TEST_ONLY_ENV.items():
+        environ.setdefault(key, value)
+
     external_contract = environ.get("SMARTSCREEN_EXTERNAL_CONTRACT") == "1"
     for key, value in TEST_ENV_DEFAULTS.items():
         if external_contract or key in TEST_INFRA_OVERRIDE_KEYS:

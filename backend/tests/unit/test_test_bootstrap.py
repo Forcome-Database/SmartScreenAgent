@@ -1,15 +1,25 @@
 from backend.app.config import Settings
-from backend.tests.test_bootstrap import TEST_ENV_DEFAULTS, apply_test_environment
+from backend.tests.test_bootstrap import (
+    TEST_ENV_DEFAULTS,
+    TEST_ONLY_ENV,
+    apply_test_environment,
+)
 
 
 def test_defaults_cover_every_settings_field() -> None:
     assert set(TEST_ENV_DEFAULTS) == set(Settings.model_fields)
 
 
+def test_test_only_env_is_disjoint_from_settings() -> None:
+    # These are read straight from the environment, so they must never collide
+    # with a real setting name.
+    assert not set(TEST_ONLY_ENV) & set(Settings.model_fields)
+
+
 def test_apply_test_environment_populates_missing_values() -> None:
     environ: dict[str, str] = {}
     apply_test_environment(environ)
-    assert environ == TEST_ENV_DEFAULTS
+    assert environ == {**TEST_ENV_DEFAULTS, **TEST_ONLY_ENV}
 
 
 def test_apply_test_environment_preserves_explicit_ci_values() -> None:
