@@ -34,7 +34,11 @@ deliberately thin in this package.
 - `ingestion_jobs` carries a partial unique index on `raw_file_sha256`
   restricted to non-terminal states; `candidates.pii_hash` is unique.
 - `Candidate.source` already anticipates `"dingtalk"`, `"boss"`, and
-  `"zhilian"` values.
+  `"zhilian"` values. WP8 writes the more specific `"dingtalk_recruitment"`,
+  because DingTalk may later be a source through a different channel and the
+  same string is the primary key of `sync_cursors` (§6). The column is
+  `String(32)` with no CHECK constraint and nothing reads it today, so the
+  narrower value costs nothing.
 - WP4 exposes role-gated read services; WP7 added `score_detail_read` auditing
   for the one read that decrypts evidence.
 - `DingTalkOAuthClient` exists for login only. It reads `unionId` into
@@ -97,7 +101,7 @@ future: Boss / Zhilian ────┘              │
                                           │
                                           ▼
                           IngestionJobService.create_or_reuse
-                            source='dingtalk', source_external_id=<id>
+                            source='dingtalk_recruitment', source_external_id=<id>
                                           │
                                           ▼
                           existing WP3 state machine → web workspace
