@@ -119,6 +119,7 @@ async def read_cursor(db: AsyncSession, source: str, *, default: datetime) -> da
 async def write_cursor(
     db: AsyncSession, source: str, *, value: datetime, now: datetime
 ) -> None:
+    _require_aware(value)
     row = await db.get(SyncCursor, source)
     stored = value.astimezone(timezone.utc).isoformat()
     if row is None:

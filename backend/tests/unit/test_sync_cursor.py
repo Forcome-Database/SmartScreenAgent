@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.app.services.sync.adapter import SourceItem
-from backend.app.services.sync.ledger import next_cursor, overlap_start
+from backend.app.services.sync.ledger import next_cursor, overlap_start, write_cursor
 
 NOW = datetime(2026, 7, 27, 5, 0, tzinfo=timezone.utc)
 
@@ -61,3 +61,21 @@ def test_cursor_never_moves_backwards() -> None:
 
 def test_empty_run_leaves_the_cursor_untouched() -> None:
     assert next_cursor(NOW, []) == NOW
+
+
+def test_naive_current_cursor_is_rejected() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        next_cursor(datetime(2026, 7, 27, 5, 0), [])
+
+
+async def test_write_cursor_rejects_a_naive_value_before_touching_the_db() -> None:
+    # `db=None` proves the guard fires before any DB access: a naive value
+    # must never reach `.astimezone()`, which would silently misinterpret it
+    # as local system time and corrupt the stored UTC instant.
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await write_cursor(
+            None,  # type: ignore[arg-type]
+            "dingtalk",
+            value=datetime(2026, 7, 27, 5, 0),
+            now=NOW,
+        )
