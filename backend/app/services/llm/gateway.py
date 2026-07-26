@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from time import monotonic
-from typing import Any
+from typing import Any, TypeGuard
 
 from openai import (
     APIConnectionError,
@@ -40,6 +41,92 @@ logger = logging.getLogger(__name__)
 
 EXTRACT_PROMPT_VERSION = "resume_extract_v1"
 JUDGE_PROMPT_VERSION = "resume_judge_v1"
+_MAX_LEDGER_INTEGER = 2_147_483_647
+
+
+def _valid_usage_token(value: object) -> TypeGuard[int]:
+    return type(value) is int and 0 <= value <= _MAX_LEDGER_INTEGER
+
+
+def _read_attr(value: object, name: str) -> object:
+    return getattr(value, name)
+
+
+def _normalize_provider_response(
+    response: object,
+) -> tuple[bool, str | None, int | None, int | None, str | None]:
+    valid = True
+
+    try:
+        raw_usage = _read_attr(response, "usage")
+    except Exception:
+        raw_usage = None
+        valid = False
+    if raw_usage is None:
+        input_tokens = None
+        output_tokens = None
+    else:
+        try:
+            raw_input_tokens = _read_attr(raw_usage, "prompt_tokens")
+            raw_output_tokens = _read_attr(raw_usage, "completion_tokens")
+        except Exception:
+            input_tokens = None
+            output_tokens = None
+            valid = False
+        else:
+            if _valid_usage_token(raw_input_tokens) and _valid_usage_token(
+                raw_output_tokens
+            ):
+                input_tokens = raw_input_tokens
+                output_tokens = raw_output_tokens
+            else:
+                input_tokens = None
+                output_tokens = None
+                valid = False
+
+    try:
+        raw_model = _read_attr(response, "model")
+    except Exception:
+        actual_model = None
+        valid = False
+    else:
+        if isinstance(raw_model, str) and raw_model.strip():
+            actual_model = raw_model
+        else:
+            actual_model = None
+            valid = False
+
+    try:
+        raw_choices = _read_attr(response, "choices")
+    except Exception:
+        raw_choices = None
+        valid = False
+    if not isinstance(raw_choices, Sequence) or isinstance(
+        raw_choices, (str, bytes, bytearray)
+    ):
+        choice = None
+        valid = False
+    else:
+        try:
+            choice = raw_choices[0]
+        except Exception:
+            choice = None
+            valid = False
+
+    try:
+        message = _read_attr(choice, "message")
+        raw_content = _read_attr(message, "content")
+    except Exception:
+        content = None
+        valid = False
+    else:
+        if isinstance(raw_content, str) and raw_content.strip():
+            content = raw_content
+        else:
+            content = None
+            valid = False
+
+    return valid, actual_model, input_tokens, output_tokens, content
 
 
 class LLMGateway:
@@ -217,12 +304,15 @@ class LLMGateway:
             )
             raise LLMUnavailableError("LLM provider failed unexpectedly") from exc
 
-        actual_model = response.model or model
         latency_ms = max(0, round((monotonic() - started) * 1000))
-        usage = response.usage
-        input_tokens = usage.prompt_tokens if usage else None
-        output_tokens = usage.completion_tokens if usage else None
-        if not response.choices:
+        (
+            response_is_valid,
+            actual_model,
+            input_tokens,
+            output_tokens,
+            content,
+        ) = _normalize_provider_response(response)
+        if not response_is_valid:
             await self._finalize(
                 handle,
                 status="invalid_response",
@@ -236,31 +326,13 @@ class LLMGateway:
                 context=context,
                 prompt_version=prompt_version,
                 attempt=attempt,
-                model=actual_model,
+                model=actual_model or model,
                 outcome="invalid_response",
             )
-            raise LLMInvalidResponseError("LLM response has no choices")
-        message = getattr(response.choices[0], "message", None)
-        content = getattr(message, "content", None)
-        if not isinstance(content, str) or not content.strip():
-            await self._finalize(
-                handle,
-                status="invalid_response",
-                actual_model=actual_model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                latency_ms=latency_ms,
-                error_code="invalid_response",
-            )
-            self._log_failure(
-                context=context,
-                prompt_version=prompt_version,
-                attempt=attempt,
-                model=actual_model,
-                outcome="invalid_response",
-            )
-            raise LLMInvalidResponseError("LLM response content is empty")
+            raise LLMInvalidResponseError("LLM provider response is invalid")
 
+        assert actual_model is not None
+        assert content is not None
         await self._finalize(
             handle,
             status="succeeded",

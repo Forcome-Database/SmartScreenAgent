@@ -68,6 +68,31 @@ def _provider_success(*, usage: object = ...) -> SimpleNamespace:
     )
 
 
+class _ExplodingAccessor:
+    def __init__(self, field: str, **values: object) -> None:
+        object.__setattr__(self, "_field", field)
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+
+    def __getattribute__(self, name: str) -> object:
+        if name == object.__getattribute__(self, "_field"):
+            raise RuntimeError("private provider accessor failure")
+        return object.__getattribute__(self, name)
+
+
+class _ExplodingIndex(list[object]):
+    def __getitem__(self, index: int) -> object:
+        raise RuntimeError("private provider index failure")
+
+
+def _valid_choice() -> SimpleNamespace:
+    return SimpleNamespace(message=SimpleNamespace(content='{"ok":true}'))
+
+
+def _valid_usage() -> SimpleNamespace:
+    return SimpleNamespace(prompt_tokens=17, completion_tokens=6)
+
+
 async def _call_once(gateway: LLMGateway) -> LLMResponse:
     return await gateway._call_once(
         "test-model",
@@ -391,6 +416,199 @@ async def test_missing_choice_message_is_invalid_and_preserves_reported_usage(
         "latency_ms": recorder.finalize.await_args.kwargs["latency_ms"],
         "error_code": "invalid_response",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected_tokens"),
+    [
+        (
+            SimpleNamespace(
+                choices=SimpleNamespace(), model="actual-model", usage=_valid_usage()
+            ),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(choices=None, model="actual-model", usage=_valid_usage()),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(
+                choices={0: _valid_choice()},
+                model="actual-model",
+                usage=_valid_usage(),
+            ),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(
+                choices=_ExplodingIndex([_valid_choice()]),
+                model="actual-model",
+                usage=_valid_usage(),
+            ),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(choices=[_valid_choice()], model=None, usage=_valid_usage()),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(choices=[_valid_choice()], model=" ", usage=_valid_usage()),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(
+                choices=[_valid_choice()],
+                model="actual-model",
+                usage=SimpleNamespace(prompt_tokens=True, completion_tokens=6),
+            ),
+            (None, None),
+        ),
+        (
+            SimpleNamespace(
+                choices=[_valid_choice()],
+                model="actual-model",
+                usage=SimpleNamespace(prompt_tokens=-1, completion_tokens=6),
+            ),
+            (None, None),
+        ),
+        (
+            SimpleNamespace(
+                choices=[_valid_choice()],
+                model="actual-model",
+                usage=SimpleNamespace(
+                    prompt_tokens=2_147_483_648, completion_tokens=6
+                ),
+            ),
+            (None, None),
+        ),
+        (
+            SimpleNamespace(
+                choices=[_valid_choice()],
+                model="actual-model",
+                usage=SimpleNamespace(prompt_tokens=17, completion_tokens="6"),
+            ),
+            (None, None),
+        ),
+        (
+            _ExplodingAccessor("choices", model="actual-model", usage=_valid_usage()),
+            (17, 6),
+        ),
+        (
+            _ExplodingAccessor(
+                "model", choices=[_valid_choice()], usage=_valid_usage()
+            ),
+            (17, 6),
+        ),
+        (
+            _ExplodingAccessor(
+                "usage", choices=[_valid_choice()], model="actual-model"
+            ),
+            (None, None),
+        ),
+        (
+            SimpleNamespace(
+                choices=[
+                    _ExplodingAccessor(
+                        "message", message=SimpleNamespace(content='{"ok":true}')
+                    )
+                ],
+                model="actual-model",
+                usage=_valid_usage(),
+            ),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=_ExplodingAccessor("content", content='{"ok":true}')
+                    )
+                ],
+                model="actual-model",
+                usage=_valid_usage(),
+            ),
+            (17, 6),
+        ),
+        (
+            SimpleNamespace(
+                choices=[_valid_choice()],
+                model="actual-model",
+                usage=_ExplodingAccessor(
+                    "prompt_tokens", prompt_tokens=17, completion_tokens=6
+                ),
+            ),
+            (None, None),
+        ),
+    ],
+    ids=[
+        "choices-object",
+        "choices-none",
+        "choices-mapping",
+        "choices-index-accessor",
+        "model-none",
+        "model-empty",
+        "token-bool",
+        "token-negative",
+        "token-overflow",
+        "token-string",
+        "choices-accessor",
+        "model-accessor",
+        "usage-accessor",
+        "message-accessor",
+        "content-accessor",
+        "token-accessor",
+    ],
+)
+async def test_malformed_http_success_finalizes_once_with_safe_usage(
+    response: object,
+    expected_tokens: tuple[int | None, int | None],
+) -> None:
+    recorder = _recorder()
+    gateway = LLMGateway(recorder=recorder)
+    provider = AsyncMock(return_value=response)
+    gateway._client.chat.completions.create = provider
+
+    with pytest.raises(LLMInvalidResponseError):
+        await _call_once(gateway)
+
+    provider.assert_awaited_once()
+    recorder.finalize.assert_awaited_once()
+    kwargs = recorder.finalize.await_args.kwargs
+    assert (kwargs["status"], kwargs["error_code"]) == (
+        "invalid_response",
+        "invalid_response",
+    )
+    assert (kwargs["input_tokens"], kwargs["output_tokens"]) == expected_tokens
+
+
+@pytest.mark.asyncio
+async def test_malformed_http_success_can_fallback_after_finalization() -> None:
+    recorder = SimpleNamespace(
+        begin=AsyncMock(side_effect=[_handle(1), _handle(2)]),
+        finalize=AsyncMock(return_value=True),
+    )
+    gateway = LLMGateway(recorder=recorder)
+    provider = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                choices=SimpleNamespace(),
+                model="actual-primary",
+                usage=_valid_usage(),
+            ),
+            _provider_success(),
+        ]
+    )
+    gateway._client.chat.completions.create = provider
+
+    result = await gateway.judge({}, schema={}, context=_context())
+
+    assert result.used_fallback is True
+    assert provider.await_count == 2
+    assert [call.kwargs["status"] for call in recorder.finalize.await_args_list] == [
+        "invalid_response",
+        "succeeded",
+    ]
 
 
 @pytest.mark.asyncio
