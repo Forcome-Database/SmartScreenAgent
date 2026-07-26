@@ -580,4 +580,6 @@ WP7 让 LLM 运行成本与评分质量可以从一手记录中被度量。
 设计与计划见
 [`WP7 design`](docs/superpowers/specs/2026-07-23-wp7-cost-calibration-operational-reporting-design.md)
 和 [`WP7 plan`](docs/superpowers/plans/2026-07-23-wp7-cost-calibration-operational-reporting.md)。
-WP7 当前为 **In progress**，待托管 CI 通过后标记 Complete。
+托管 CI（[verify run 30209777661](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/30209777661)，PR #8）三个作业全绿：Python 3.10、Python 3.14、strict integration。
+托管 CI 还抓到两个本地门禁无法发现的缺陷并已修复：`from datetime import UTC` 需要 Python 3.11 而项目支持 3.10；
+p2 端到端测试与 `scripts/verify.py` 启动的真实 Celery worker 抢认领。WP7 现为 **Complete**，WP8 与 WP9 已解除阻塞。
