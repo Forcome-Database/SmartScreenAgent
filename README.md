@@ -531,3 +531,53 @@ active 版本，原 active 版本归档，并记录发布时间和发布者。�
 [`WP6c design`](docs/superpowers/specs/2026-07-23-wp6c-rule-publication-design.md) 和
 [`WP6c plan`](docs/superpowers/plans/2026-07-23-wp6c-rule-publication.md)。WP6c 与 WP6 当前为
 **Complete**；WP7 已解除阻塞并进入 **Ready for planning**。
+
+
+## WP7 — 成本、校准与运营报表
+
+WP7 让 LLM 运行成本与评分质量可以从一手记录中被度量。
+
+**用量账本与成本**：每一次 provider 调用（含主/备/次引擎、失败与配置错误）都在
+`llm_usage_attempts` 留下一行 PII-free 记录，携带**不可变的价格快照**与估算 CNY 成本。
+计费是 fail-closed 的——待记录行写不进去、或模型没有配置价格，就**不发起付费调用**；
+而预算超标只染色告警，**绝不拦截调用**。`UsageRecorder` 用独立 session 写账本，
+业务事务回滚不会抹掉已付费调用的记录。
+
+**预算告警**：日/月预算按 `Asia/Shanghai` 日历边界折算为 UTC 半开区间；
+`normal`/`warning`/`exceeded` 三态，每个「范围:周期:阈值」最多产生一条审计事件
+（事务级 advisory lock 串行化「检查+插入」）。游标式对账保证宕机期间错过的跨越
+会被后续补齐，且每次运行的工作量有上界。
+
+- `GET /api/v1/operations/summary?window=today|7d|30d` —— 角色 `hr_lead`/`admin`；
+  当前与前一等长窗口对比、按上海日历日的成本序列、五类维度拆分、预算快照、
+  PostgreSQL `percentile_cont` 连续 p50/p95。
+- `GET /api/v1/operations/usage` —— 分页调用明细，支持 operation/模型/状态/角色/
+  trace/job/score/JD 共 9 个过滤器。
+
+**不可变质量发布**：`POST /api/v1/quality/releases` 把一份**内容寻址**的黄金集快照
+与各 JD 当时的 active 规则版本原子绑定，并冻结当时的指标定义与目标值。
+创建走最多 3 次的 REPEATABLE READ 重试事务，只重试快照哈希冲突与 PostgreSQL
+序列化/死锁错误。发布后**不可变**：`metrics_json` 存下计算结果并原样读回，
+后续新增黄金标签不会改变历史发布的数字。`/quality/releases/preview` 只读，
+返回 `input_fingerprint`；create 回显它，输入变化则 `409 release_input_changed`。
+
+**批量淘汰分析**：`GET /api/v1/reports/batch` 给出确定性的淘汰原因聚合
+（硬过滤 audit_tag、规则/判官维度偏低、判官无法判定），不把任何理由文本交给 LLM。
+各项占比之和可能超过 100%（一人可触发多条原因），响应显式带 `percentages_may_overlap`。
+
+**交叉校验**：对 `sha256("wp7:{score_id}:{prompt_version}")` 派生的确定性抽样
+加上低置信度/与金标不符/与 HR 不一致等风险触发，异步用次引擎重新评分。
+队列有租约、重试与 sweeper 恢复；次引擎结果**只存四个可比字段**
+（id/tier/score/confidence），不保留其证据与推理；且**永不替换主评分**，
+只投影 `cross_engine_diff`/`is_suspicious`，并且只有最新配置的那一行有权投影。
+
+**前端**：新增响应式分组外壳（`lg` 以上固定侧边栏，以下为 Base UI Sheet 抽屉）
+与四个工作台 `/reports/{operations,quality,batch,cross-checks}`。运营成本页仅
+`hr_lead`/`admin` 可见。金额在前端**不经过浮点**——按字符串裁剪显示。
+
+本地门禁于 2026-07-26 通过：后端 offline 541、集成 208、Ruff/mypy（113 个源文件）；
+前端 lint/typecheck、Vitest 71、Playwright e2e 16（desktop + mobile）、生产 build。
+设计与计划见
+[`WP7 design`](docs/superpowers/specs/2026-07-23-wp7-cost-calibration-operational-reporting-design.md)
+和 [`WP7 plan`](docs/superpowers/plans/2026-07-23-wp7-cost-calibration-operational-reporting.md)。
+WP7 当前为 **In progress**，待托管 CI 通过后标记 Complete。
