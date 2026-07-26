@@ -105,7 +105,22 @@ class LLMJudge:
         try:
             return self._validate(response, resume_text=resume_text, dims=dims)
         except LLMInvalidOutputError as primary_error:
-            if response.used_fallback or model_override is not None:
+            if model_override is not None:
+                # Secondary mode: retry the SAME override once. Falling back to
+                # the configured fallback model would silently turn a
+                # cross-engine check into another primary-engine opinion.
+                retry = await self._gateway.judge(
+                    request_payload,
+                    schema=JudgeOutput.model_json_schema(),
+                    context=context,
+                    model_override=model_override,
+                    attempt_role="secondary",
+                )
+                try:
+                    return self._validate(retry, resume_text=resume_text, dims=dims)
+                except LLMInvalidOutputError as retry_error:
+                    raise retry_error from primary_error
+            if response.used_fallback:
                 raise
             fallback = await self._gateway.judge(
                 request_payload,

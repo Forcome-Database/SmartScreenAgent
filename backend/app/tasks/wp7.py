@@ -61,6 +61,48 @@ def reconcile_budgets_task() -> dict:
     return asyncio.run(_runner())
 
 
+@celery_app.task(name="wp7.run_cross_check")
+def run_cross_check_task(row_id: int) -> dict:
+    """Execute one queued cross-engine check."""
+
+    async def _runner() -> dict:
+        from backend.app.services.cross_check.worker import run_cross_check
+
+        try:
+            return await run_cross_check(row_id)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_runner())
+
+
+@celery_app.task(name="wp7.sweep_cross_checks")
+def sweep_cross_checks_task() -> dict:
+    """Recover checks whose delivery was lost or whose lease expired."""
+
+    async def _runner() -> dict:
+        from backend.app.services.cross_check.state import sweep_cross_checks
+
+        settings = get_settings()
+        try:
+            async with AsyncSessionLocal() as db:
+                requeued = await sweep_cross_checks(
+                    db,
+                    now=datetime.now(UTC),
+                    max_attempts=settings.CROSS_ENGINE_MAX_ATTEMPTS,
+                )
+                # Commit before delivery: a message for an uncommitted requeue
+                # would find the row still failed and drop the work.
+                await db.commit()
+        finally:
+            await engine.dispose()
+        for row_id in requeued:
+            celery_app.send_task("wp7.run_cross_check", args=[row_id])
+        return {"requeued": len(requeued)}
+
+    return asyncio.run(_runner())
+
+
 @celery_app.task(name="wp7.sweep_stale_usage")
 def sweep_stale_usage() -> dict:
     """Close out pending ledger rows whose finalization never arrived."""

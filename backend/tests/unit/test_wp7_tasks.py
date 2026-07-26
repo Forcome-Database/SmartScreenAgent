@@ -11,6 +11,8 @@ def test_wp7_tasks_are_registered_under_their_published_names() -> None:
         "wp7.evaluate_budget_attempt",
         "wp7.reconcile_budgets",
         "wp7.sweep_stale_usage",
+        "wp7.run_cross_check",
+        "wp7.sweep_cross_checks",
     } <= set(celery_app.tasks)
 
 
@@ -25,5 +27,6 @@ def test_wp7_periodic_schedules_are_configured() -> None:
     assert schedule["wp7-reconcile-budgets"]["schedule"] == 300.0
     assert schedule["wp7-sweep-stale-usage"]["task"] == "wp7.sweep_stale_usage"
     assert schedule["wp7-sweep-stale-usage"]["schedule"] == 60.0
+    assert schedule["wp7-sweep-cross-checks"]["task"] == "wp7.sweep_cross_checks"
     # The pre-existing ingestion sweep must survive the WP7 additions.
     assert schedule["ingestion-sweep"]["task"] == "ingest.sweep"

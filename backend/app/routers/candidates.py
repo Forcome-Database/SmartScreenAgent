@@ -372,6 +372,9 @@ async def score_candidate(
     except Exception:
         await db.rollback()
         raise
+    from backend.app.tasks.ingest import _send_cross_checks
+
+    _send_cross_checks(result.cross_check_ids)
     return ScoreResponse(
         score_id=result.score_id,
         total_score=result.total_score,

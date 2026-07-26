@@ -168,6 +168,19 @@ async def _insert_or_reuse_candidate(
     return cand, status, object_deleted
 
 
+def _send_cross_checks(row_ids: list[int]) -> None:
+    """Best-effort delivery. A lost message is recovered by the sweeper."""
+    if not row_ids:
+        return
+    from backend.app.tasks.celery_app import celery_app
+
+    for row_id in row_ids:
+        try:
+            celery_app.send_task("wp7.run_cross_check", args=[row_id])
+        except Exception:
+            logger.warning("cross check delivery failed", extra={"row_id": row_id})
+
+
 async def run_parse_and_score(
     *,
     db: AsyncSession,
@@ -220,12 +233,13 @@ async def run_parse_and_score(
             await db.commit()
             owns_new_object = False
             assert jd_id is not None
-            await ScoringPipeline(db=db).run(
+            pipeline_result = await ScoringPipeline(db=db).run(
                 candidate_id=cand.id,
                 jd_id=jd_id,
                 ingestion_job_id=None,
                 trace_id=trace_id,
             )
+            _send_cross_checks(pipeline_result.cross_check_ids)
 
         db.add(
             AuditLog(
@@ -410,6 +424,9 @@ async def run_job(*, db: AsyncSession, job: IngestionJob, storage: ResumeStorage
 
         await svc.transition(job, IngestionState.COMPLETED)
         await db.commit()
+        # Only after the score is durable: a message for a rolled-back score
+        # would point a worker at a row that never existed.
+        _send_cross_checks(result.cross_check_ids)
         return
 
     await svc.transition(job, IngestionState.READY)

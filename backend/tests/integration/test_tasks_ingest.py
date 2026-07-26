@@ -91,7 +91,9 @@ async def test_run_parse_and_score_persists_candidate(
     monkeypatch.setattr("backend.app.tasks.ingest.ResumeExtractor", lambda: extractor_stub)
     async def run_pipeline_without_business_transaction(**_kwargs):
         assert not db_session.in_transaction()
-        return SimpleNamespace(score_id=1, total_score=1, grade="L1", rejected=False)
+        return SimpleNamespace(
+            score_id=1, total_score=1, grade="L1", rejected=False, cross_check_ids=[]
+        )
 
     pipeline_run = AsyncMock(side_effect=run_pipeline_without_business_transaction)
     monkeypatch.setattr(

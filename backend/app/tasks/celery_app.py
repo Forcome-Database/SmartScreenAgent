@@ -42,6 +42,10 @@ celery_app.conf.beat_schedule = {
         "task": "wp7.sweep_stale_usage",
         "schedule": 60.0,
     },
+    "wp7-sweep-cross-checks": {
+        "task": "wp7.sweep_cross_checks",
+        "schedule": float(settings.CROSS_ENGINE_SWEEP_INTERVAL_SECONDS),
+    },
 }
 
 
