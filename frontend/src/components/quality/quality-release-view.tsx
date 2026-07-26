@@ -12,6 +12,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import Link from "next/link";
+
 import { ReleaseCreate } from "@/components/quality/release-create";
 import { apiGet } from "@/lib/api-client";
 import { QualityReleaseList } from "@/lib/wp7-schemas";
@@ -67,7 +69,14 @@ export function QualityReleasesView({ canCreate }: { canCreate: boolean }) {
               <TableBody>
                 {query.data.items.map((item) => (
                   <TableRow key={item.id}>
-                    <TableCell>#{item.id}</TableCell>
+                    <TableCell>
+                      <Link
+                        href={`/reports/quality/${item.id}`}
+                        className="underline underline-offset-2"
+                      >
+                        #{item.id}
+                      </Link>
+                    </TableCell>
                     <TableCell>
                       <span
                         className={
