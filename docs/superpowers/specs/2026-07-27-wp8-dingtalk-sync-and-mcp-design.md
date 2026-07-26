@@ -239,7 +239,13 @@ plus LLM extraction and scoring downstream.
 - `SYNC_MAX_ITEMS_PER_RUN` (default 200) bounds a run.
 - On hitting the cap the run **must log and audit the dropped count**. Silent
   truncation would read as "sync finished" while thousands remain.
-- The §7 ledger is the largest saving: a repeat never even downloads.
+- The §7 ledger is the largest saving: a repeat still downloads, but it never
+  parses, extracts, or scores. That is where the money is. The dedupe key
+  includes the content hash, which cannot be known before the transfer, so the
+  check is necessarily made after the download and deliberately so — a
+  pre-download guard could only key on `(source, source_external_id)` plus a
+  timestamp, which is precisely the "permanently ignore a revised resume"
+  failure §7 rules out.
 
 ### 9.2 No transaction across a network call
 
