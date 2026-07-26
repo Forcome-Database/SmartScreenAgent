@@ -22,7 +22,6 @@ from backend.app.services.sync.adapter import (
 )
 from backend.app.services.sync.ledger import (
     already_ingested,
-    already_ingested_since,
     next_cursor,
     overlap_start,
     read_cursor,
@@ -48,18 +47,24 @@ SessionFactory = Callable[[], AsyncSession]
 class SyncReport:
     """What one run took in.
 
-    `dropped_by_cap` counts items the run listed but refused to take because of
-    `max_items`. The run asks the source for one item more than it will
-    process, so this is non-zero whenever the cap bit and a truncated run can
-    never be mistaken for a finished one. It is a floor, not a census: how many
-    more the source still holds cannot be known without paging all of it.
+    `truncated` is the answer to "did the cap bite?" — the only question about
+    the cap that can be answered exactly. The run asks the source for one item
+    more than it will process, so a truncated run can never be mistaken for a
+    finished one.
+
+    `dropped_at_least` is a floor on how many items were left behind, never a
+    census: how many more the source still holds cannot be known without paging
+    all of it, which is precisely what the cap exists to prevent. With the
+    `+1` probe it is 1 on any truncated run, whether one resume or ten thousand
+    are waiting. Alert on `truncated`, not on this magnitude.
     """
 
     listed: int
     ingested: int
     skipped: int
     failed: int
-    dropped_by_cap: int
+    dropped_at_least: int
+    truncated: bool
     cursor_from: datetime
     cursor_to: datetime
 
@@ -82,6 +87,10 @@ async def run_sync(
     source = adapter.source_name
     actor = f"system:sync:{source}"
     settings = get_settings()
+    # Built once, before anything is listed: a misconfigured scan mode is one
+    # loud configuration error, not N `ingestion_failed` ledger rows under a
+    # report that claims the run completed.
+    scanner = get_malware_scanner(settings.MALWARE_SCAN_MODE)
 
     async with session_factory() as session:
         cursor = await read_cursor(session, source, default=now - FIRST_RUN_LOOKBACK)
@@ -110,13 +119,15 @@ async def run_sync(
         raise
 
     items = offered[:max_items]
-    dropped = len(offered) - len(items)
-    if dropped:
+    dropped_at_least = len(offered) - len(items)
+    truncated = dropped_at_least > 0
+    if truncated:
         logger.warning(
             "resume_sync_capped",
             source=source,
             listed=len(items),
-            dropped_by_cap=dropped,
+            truncated=True,
+            dropped_at_least=dropped_at_least,
             max_items=max_items,
         )
 
@@ -124,21 +135,6 @@ async def run_sync(
     ingested = skipped = failed = 0
 
     for item in items:
-        async with session_factory() as session:
-            seen = await already_ingested_since(
-                session,
-                source=source,
-                external_id=item.external_id,
-                # Source clocks skew, so allow the same window the cursor does
-                # before believing an item is unchanged.
-                seen_since=item.updated_at + timedelta(seconds=overlap_seconds),
-            )
-            await session.commit()
-        if seen:
-            skipped += 1
-            processed.append(item)
-            continue
-
         try:
             fetched = await adapter.fetch(item)
         except ItemUnavailable:
@@ -154,28 +150,25 @@ async def run_sync(
             logger.warning(
                 "sync_item_unavailable", source=source, external_id=item.external_id
             )
+            # Design §9: the cursor moves past every item the run looked at,
+            # failures included. Recovering them is the bounded replay
+            # sweeper's job. Holding the cursor back for a permanently failing
+            # item would re-list and re-download it on every run forever, over
+            # a window that grows until it truncates at the cap.
+            processed.append(item)
             continue
 
         async with session_factory() as session:
+            # The dedupe key is the exact triple (design §7), so the content
+            # hash has to be in hand: this is checked after the transfer and
+            # before the job, and what it saves is the MinerU parse and the LLM
+            # spend that the job would trigger.
             seen = await already_ingested(
                 session,
                 source=source,
                 external_id=item.external_id,
                 sha256=fetched.sha256,
             )
-            if seen:
-                # Seen again, byte-for-byte unchanged. Recording the sighting
-                # is what lets the pre-download guard skip it outright next
-                # run; without it an item first seen inside the overlap window
-                # would re-download itself on every run forever.
-                await record_item(
-                    session,
-                    source=source,
-                    external_id=item.external_id,
-                    sha256=fetched.sha256,
-                    outcome="ingested",
-                    now=now,
-                )
             await session.commit()
         if seen:
             skipped += 1
@@ -192,7 +185,7 @@ async def run_sync(
                     ),
                     db=session,
                     validator=UploadValidator(),
-                    scanner=get_malware_scanner(settings.MALWARE_SCAN_MODE),
+                    scanner=scanner,
                     storage=ResumeStorageService(),
                     jobs=IngestionJobService(session),
                     source=source,
@@ -226,6 +219,8 @@ async def run_sync(
                 error_code="unsupported_attachment",
                 now=now,
             )
+            # Design §9: see the `item_unavailable` branch above.
+            processed.append(item)
             continue
         except Exception as exc:
             failed += 1
@@ -243,6 +238,8 @@ async def run_sync(
                 external_id=item.external_id,
                 error_type=type(exc).__name__,
             )
+            # Design §9: see the `item_unavailable` branch above.
+            processed.append(item)
             continue
 
         if created:
@@ -269,7 +266,8 @@ async def run_sync(
                     "ingested": ingested,
                     "skipped": skipped,
                     "failed": failed,
-                    "dropped_by_cap": dropped,
+                    "truncated": truncated,
+                    "dropped_at_least": dropped_at_least,
                 },
             )
         )
@@ -282,14 +280,16 @@ async def run_sync(
         ingested=ingested,
         skipped=skipped,
         failed=failed,
-        dropped_by_cap=dropped,
+        truncated=truncated,
+        dropped_at_least=dropped_at_least,
     )
     return SyncReport(
         listed=len(items),
         ingested=ingested,
         skipped=skipped,
         failed=failed,
-        dropped_by_cap=dropped,
+        dropped_at_least=dropped_at_least,
+        truncated=truncated,
         cursor_from=cursor,
         cursor_to=advanced,
     )

@@ -21,8 +21,11 @@ def enqueue_job(job_id: int) -> None:
     """Hand a queued ingestion job off to the Celery worker.
 
     A thin, module-level wrapper so every caller enqueues through one name that
-    tests can neutralise without touching Celery. The import stays deferred so
-    that importing this module never depends on task registration order.
+    tests can neutralise without touching Celery: patching this symbol stops a
+    message being published without any task ever being registered. The local
+    import is not an independence from task registration order — line 15 already
+    imports `backend.app.tasks.ingest` eagerly for `RawFileReference` — it only
+    keeps the task symbol out of this module's namespace.
     """
     from backend.app.tasks.ingest import parse_and_score_task
 

@@ -38,17 +38,24 @@ def _pdf(marker: str) -> bytes:
     return stream.getvalue()
 
 
+# Deliberately not "dingtalk": a runner that hardcoded the only source we plan
+# to build would still pass every test below if the stub agreed with it.
+STUB_SOURCE = "stub-source"
+
+
 class StubAdapter:
-    source_name = "dingtalk"
+    source_name = STUB_SOURCE
 
     def __init__(self, items: list[SourceItem], *, fail_ids: set[str] | None = None):
         self.items = items
         self.fail_ids = fail_ids or set()
         self.fetched: list[str] = []
         self.listed = 0
+        self.since_values: list[datetime] = []
 
     async def list_changed(self, since: datetime, limit: int) -> list[SourceItem]:
         self.listed += 1
+        self.since_values.append(since)
         return [i for i in self.items if i.updated_at >= since][:limit]
 
     async def fetch(self, item: SourceItem) -> FetchedResume:
@@ -65,7 +72,7 @@ class StubAdapter:
 
 
 class BrokenAdapter:
-    source_name = "dingtalk"
+    source_name = STUB_SOURCE
 
     async def list_changed(self, since: datetime, limit: int) -> list[SourceItem]:
         raise SourceUnavailable("permission revoked")
@@ -119,7 +126,16 @@ def enqueued(monkeypatch) -> list[int]:
     return recorded
 
 
-async def test_a_repeat_run_ingests_nothing_and_fetches_nothing(db_session, minio_storage):
+async def test_a_repeat_run_creates_no_job_and_costs_no_parse(
+    db_session, minio_storage, enqueued
+):
+    """What design §7 promises a repeat costs: no MinerU parse, no LLM spend.
+
+    The dedupe key is the exact triple, so the answer needs the content hash
+    and the download is what buys it. Re-transferring bytes is the price of
+    never permanently ignoring a revised resume — the transfer is not what the
+    ledger is there to save.
+    """
     adapter = StubAdapter([_item("c1"), _item("c2")])
 
     first = await run_sync(
@@ -133,51 +149,22 @@ async def test_a_repeat_run_ingests_nothing_and_fetches_nothing(db_session, mini
     )
 
     assert (second.ingested, second.skipped) == (0, 2)
-    # The saving is money, not just rows: no second download happened.
-    assert adapter.fetched == ["c1", "c2"]
     jobs = (
         await db_session.execute(select(func.count()).select_from(IngestionJob))
     ).scalar_one()
+    # No new job, so no second parse and no second extraction: the whole
+    # downstream cost of the repeat is zero.
     assert jobs == 2
-
-
-async def test_a_recently_updated_item_stops_being_downloaded(db_session, minio_storage):
-    """An item first seen inside the overlap window must converge on skipping.
-
-    Its source timestamp sits too close to the sighting for the pre-download
-    guard to trust it, so it is re-downloaded once — and then never again.
-    """
-    adapter = StubAdapter([_item("c1", minutes_ago=1)])
-
-    await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
-    assert adapter.fetched == ["c1"]
-
-    # Half an hour on, it is still the newest thing the source has to offer.
-    await run_sync(
-        AsyncSessionLocal,
-        adapter,
-        now=NOW + timedelta(minutes=30),
-        overlap_seconds=300,
-        max_items=200,
-    )
-    assert adapter.fetched == ["c1", "c1"]
-
-    await run_sync(
-        AsyncSessionLocal,
-        adapter,
-        now=NOW + timedelta(minutes=60),
-        overlap_seconds=300,
-        max_items=200,
-    )
-    assert adapter.fetched == ["c1", "c1"]
-    jobs = (
-        await db_session.execute(select(func.count()).select_from(IngestionJob))
+    assert len(enqueued) == 2
+    # And no new candidate can appear, because no new job was ever queued.
+    ledger = (
+        await db_session.execute(select(func.count()).select_from(SyncSourceItem))
     ).scalar_one()
-    assert jobs == 1
+    assert ledger == 2
 
 
-async def test_a_changed_resume_is_downloaded_again(db_session, minio_storage):
-    """The pre-download guard must not permanently ignore a revised resume."""
+async def test_a_changed_resume_is_ingested_again(db_session, minio_storage):
+    """Design §7: keying on (source, external_id) alone would ignore this."""
 
     class Revising(StubAdapter):
         marker = "v1"
@@ -245,6 +232,42 @@ async def test_one_bad_item_does_not_abort_the_run(db_session, minio_storage):
     ).scalar_one()
     assert failed.source_external_id == "bad"
     assert failed.error_code == "item_unavailable"
+
+
+async def test_the_cursor_advances_past_a_failed_item(db_session, minio_storage):
+    """Design §9: a failed item is the replay sweeper's job, not the cursor's.
+
+    If the newest item in the window always fails and the cursor waits for it,
+    the cursor never moves: every run re-lists and re-downloads a window that
+    grows without bound until it truncates at `max_items` and starts starving
+    new candidates.
+    """
+    good = _item("good", minutes_ago=30)
+    poison = _item("poison", minutes_ago=1)
+    adapter = StubAdapter([good, poison], fail_ids={"poison"})
+
+    first = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert (first.ingested, first.failed) == (1, 1)
+    # Not `good.updated_at`: the run looked at the failure and moved past it.
+    assert first.cursor_to == poison.updated_at
+    stored = (await db_session.execute(select(SyncCursor))).scalar_one()
+    assert datetime.fromisoformat(stored.cursor_value) == poison.updated_at
+
+    second = await run_sync(
+        AsyncSessionLocal,
+        adapter,
+        now=NOW + timedelta(minutes=30),
+        overlap_seconds=0,
+        max_items=200,
+    )
+
+    # The next window opens at the failure, so nothing before it is re-listed.
+    assert adapter.since_values[-1] == poison.updated_at
+    assert second.listed == 1
+    assert adapter.fetched == ["good"], "an already-ingested item was re-downloaded"
 
 
 async def test_an_unsupported_attachment_is_one_failed_item(db_session, minio_storage):
@@ -336,15 +359,36 @@ async def test_the_per_run_cap_is_reported_not_silent(db_session, minio_storage)
     )
 
     assert report.ingested == 2
-    # Silent truncation would read as "sync finished".
-    assert report.dropped_by_cap >= 1
+    # Silent truncation would read as "sync finished". `truncated` is the fact
+    # the run can state exactly; `dropped_at_least` is only a floor, so an
+    # operator alerting on the magnitude would never fire.
+    assert report.truncated is True
+    assert report.dropped_at_least >= 1
     assert report.listed == 2
     audit = (
         await db_session.execute(
             select(AuditLog).where(AuditLog.event_type == "resume_sync_completed")
         )
     ).scalar_one()
-    assert audit.payload["dropped_by_cap"] == report.dropped_by_cap
+    assert audit.payload["truncated"] is True
+    assert audit.payload["dropped_at_least"] == report.dropped_at_least
+
+
+async def test_a_run_inside_the_cap_is_not_reported_as_truncated(db_session, minio_storage):
+    adapter = StubAdapter([_item("c1"), _item("c2")])
+
+    report = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert report.truncated is False
+    assert report.dropped_at_least == 0
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_completed")
+        )
+    ).scalar_one()
+    assert audit.payload["truncated"] is False
 
 
 async def test_no_business_transaction_is_held_across_the_fetch(db_session, minio_storage):
@@ -388,7 +432,9 @@ async def test_ingested_candidates_carry_their_source(db_session, minio_storage)
     await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
 
     job = (await db_session.execute(select(IngestionJob))).scalar_one()
-    assert job.source == "dingtalk"
+    # The stub's source name is not the provider the runner was written for, so
+    # this can only pass if the value flowed from the adapter.
+    assert job.source == STUB_SOURCE
     assert job.source_external_id == "cand-42"
 
 
@@ -426,7 +472,8 @@ async def test_the_completed_audit_carries_counts_not_candidate_data(db_session,
         "ingested",
         "skipped",
         "failed",
-        "dropped_by_cap",
+        "truncated",
+        "dropped_at_least",
     }
     assert audit.payload["ingested"] == 1
     assert audit.payload["cursor_to"] == report.cursor_to.isoformat()

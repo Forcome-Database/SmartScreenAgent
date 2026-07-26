@@ -15,6 +15,14 @@ class SourceItem:
     content_type: str
     jd_code: str | None
 
+    def __post_init__(self) -> None:
+        # The cursor compares `updated_at` against a timezone-aware instant. A
+        # naive one raises TypeError there — after the whole run has already
+        # committed its items, leaving no cursor and no completed audit. The
+        # port rejects it here instead, before a single item is processed.
+        if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
+            raise ValueError("SourceItem.updated_at must be timezone-aware")
+
 
 @dataclass(frozen=True)
 class FetchedResume:
