@@ -16,6 +16,9 @@ from backend.app.schemas.quality import (
     QualityReleasePreview,
     ReleaseCreator,
     ReleaseJDSelection,
+    ReleaseOperationDelta,
+    ReleaseOperations,
+    ReleaseOperationTotals,
     TargetResult,
 )
 
@@ -36,6 +39,27 @@ def _classification(**overrides) -> ClassificationMetrics:
     }
     payload.update(overrides)
     return ClassificationMetrics(**payload)
+
+
+def _operations() -> ReleaseOperations:
+    totals = ReleaseOperationTotals(
+        attempt_count=0,
+        succeeded_count=0,
+        failed_count=0,
+        abandoned_count=0,
+        unknown_usage_count=0,
+        known_cost_cny=Decimal("0"),
+        p50_latency_ms=None,
+        p95_latency_ms=None,
+        scored_count=0,
+        scores_per_day=None,
+    )
+    return ReleaseOperations(
+        current=totals,
+        previous=totals,
+        cost_delta=ReleaseOperationDelta(absolute=Decimal("0"), percentage=None),
+        attempt_delta=ReleaseOperationDelta(absolute=Decimal("0"), percentage=None),
+    )
 
 
 def test_ratios_serialize_as_json_numbers_without_binary_float_drift() -> None:
@@ -127,8 +151,40 @@ def test_detail_exposes_exactly_its_declared_fields() -> None:
         "agreement",
         "f1_target_result",
         "evidence_target_result",
+        "operations",
         "by_jd",
     }
+
+
+def test_release_operation_totals_carry_counts_and_continuous_latency() -> None:
+    body = json.loads(
+        ReleaseOperationTotals(
+            attempt_count=4,
+            succeeded_count=2,
+            failed_count=1,
+            abandoned_count=0,
+            unknown_usage_count=1,
+            known_cost_cny=Decimal("2.5"),
+            p50_latency_ms=Decimal("200"),
+            p95_latency_ms=Decimal("290"),
+            scored_count=2,
+            scores_per_day=Decimal("0.5"),
+        ).model_dump_json()
+    )
+
+    assert body["known_cost_cny"] == 2.5
+    assert body["p95_latency_ms"] == 290
+    assert body["scores_per_day"] == 0.5
+
+
+def test_operation_delta_allows_an_undefined_percentage() -> None:
+    body = json.loads(
+        ReleaseOperationDelta(absolute=Decimal("3"), percentage=None).model_dump_json()
+    )
+
+    # A zero baseline has no growth rate, but the absolute move is still real.
+    assert body["absolute"] == 3
+    assert body["percentage"] is None
 
 
 def test_list_is_paginated() -> None:
@@ -167,6 +223,7 @@ def test_no_release_payload_can_carry_candidate_identity_or_content() -> None:
         evidence_target_result=TargetResult(
             value=Decimal("0.9375"), target=Decimal("0.95"), status="below_target"
         ),
+        operations=_operations(),
         by_jd=[],
     )
 

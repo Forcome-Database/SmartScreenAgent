@@ -22,6 +22,7 @@ from backend.app.models import (
     GoldenSet,
     GoldenSetSnapshot,
     GoldenSetSnapshotEntry,
+    LLMUsageAttempt,
     QualityRelease,
     QualityReleaseJD,
     RuleVersion,
@@ -479,6 +480,124 @@ def _metric_block(
     }
 
 
+def _attributed(bindings: list[JDBinding]) -> Any:
+    """Ledger work this release is accountable for.
+
+    Extraction is attributed by JD; judge and cross-check work only counts when
+    it ran against the exact bound rule version. A judge attempt on a different
+    version stays in the global dashboard but must never flatter a release.
+    """
+    return or_(
+        and_(
+            LLMUsageAttempt.operation == "extract",
+            LLMUsageAttempt.jd_id.in_([b.jd_id for b in bindings]),
+        ),
+        and_(
+            LLMUsageAttempt.operation.in_(("judge", "cross_check")),
+            LLMUsageAttempt.rule_version_id.in_(
+                [b.rule_version_id for b in bindings]
+            ),
+        ),
+    )
+
+
+async def _operation_totals(
+    db: AsyncSession, bindings: list[JDBinding], start: datetime, end: datetime
+) -> dict[str, Any]:
+    measurable = (LLMUsageAttempt.status != "pending") & LLMUsageAttempt.latency_ms.isnot(
+        None
+    )
+    known_usage = LLMUsageAttempt.input_tokens.isnot(
+        None
+    ) & LLMUsageAttempt.output_tokens.isnot(None)
+    row = (
+        await db.execute(
+            select(
+                func.count(),
+                func.count().filter(LLMUsageAttempt.status == "succeeded"),
+                func.count().filter(
+                    LLMUsageAttempt.status.in_(
+                        ("unavailable", "invalid_response", "configuration_error")
+                    )
+                ),
+                func.count().filter(LLMUsageAttempt.status == "abandoned"),
+                func.count().filter(~known_usage),
+                func.coalesce(func.sum(LLMUsageAttempt.estimated_cost_cny), 0),
+                func.percentile_cont(0.50)
+                .within_group(LLMUsageAttempt.latency_ms)
+                .filter(measurable),
+                func.percentile_cont(0.95)
+                .within_group(LLMUsageAttempt.latency_ms)
+                .filter(measurable),
+            ).where(
+                _attributed(bindings),
+                LLMUsageAttempt.started_at >= start,
+                LLMUsageAttempt.started_at < end,
+            )
+        )
+    ).one()
+
+    scored = (
+        await db.execute(
+            select(func.count())
+            .select_from(Score)
+            .where(
+                or_(
+                    *[
+                        and_(
+                            Score.jd_id == b.jd_id,
+                            Score.rule_version_id == b.rule_version_id,
+                        )
+                        for b in bindings
+                    ]
+                ),
+                Score.created_at >= start,
+                Score.created_at < end,
+            )
+        )
+    ).scalar_one()
+
+    days = Decimal(str((end - start).total_seconds())) / Decimal(86400)
+    return {
+        "attempt_count": int(row[0]),
+        "succeeded_count": int(row[1]),
+        "failed_count": int(row[2]),
+        "abandoned_count": int(row[3]),
+        "unknown_usage_count": int(row[4]),
+        "known_cost_cny": Decimal(str(row[5])),
+        "p50_latency_ms": None if row[6] is None else Decimal(str(row[6])),
+        "p95_latency_ms": None if row[7] is None else Decimal(str(row[7])),
+        "scored_count": int(scored),
+        "scores_per_day": (Decimal(int(scored)) / days) if days > 0 else None,
+    }
+
+
+def _operation_delta(current: Decimal, previous: Decimal) -> dict[str, Any]:
+    absolute = current - previous
+    return {
+        "absolute": absolute,
+        "percentage": None if previous == 0 else (absolute / previous) * 100,
+    }
+
+
+async def _release_operations(
+    db: AsyncSession, bindings: list[JDBinding], start: datetime, end: datetime
+) -> dict[str, Any]:
+    span = end - start
+    current = await _operation_totals(db, bindings, start, end)
+    previous = await _operation_totals(db, bindings, start - span, start)
+    return {
+        "current": current,
+        "previous": previous,
+        "cost_delta": _operation_delta(
+            current["known_cost_cny"], previous["known_cost_cny"]
+        ),
+        "attempt_delta": _operation_delta(
+            Decimal(current["attempt_count"]), Decimal(previous["attempt_count"])
+        ),
+    }
+
+
 def _json_ready(value: Any) -> Any:
     """Decimals become JSON numbers using the same tokens the fingerprint hashed."""
     if isinstance(value, Decimal):
@@ -686,6 +805,14 @@ async def create_release(
                     raise ReleaseInputChanged("release inputs changed since preview")
 
                 aggregate, per_jd, status = compute_release_metrics(gathered)
+                aggregate["operations"] = _json_ready(
+                    await _release_operations(
+                        session,
+                        gathered.bindings,
+                        gathered.window_start,
+                        gathered.window_end,
+                    )
+                )
                 snapshot_id = await _upsert_snapshot(
                     session, gathered, actor_user_id, now
                 )

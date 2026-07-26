@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from backend.app.models import (
     GoldenSet,
     GoldenSetSnapshot,
     GoldenSetSnapshotEntry,
+    LLMUsageAttempt,
     QualityRelease,
     RuleVersion,
     Score,
@@ -143,6 +145,41 @@ async def _seed_release_fixture(db: AsyncSession, code: str, user_id: int) -> JD
         await _seed_score(db, candidate, jd, version, grade=grade)
     await db.commit()
     return jd
+
+
+async def _seed_attempt(
+    db: AsyncSession,
+    *,
+    operation: str,
+    jd_id: int | None = None,
+    rule_version_id: int | None = None,
+    latency_ms: int = 100,
+    cost: Decimal = Decimal("1"),
+) -> None:
+    db.add(
+        LLMUsageAttempt(
+            call_group_id=uuid4(),
+            trace_id=f"trace-{uuid4().hex[:8]}",
+            jd_id=jd_id,
+            rule_version_id=rule_version_id,
+            operation=operation,
+            attempt_role="primary",
+            requested_model="test-judge",
+            actual_model="test-judge",
+            prompt_version="resume_judge_v1",
+            status="succeeded",
+            input_tokens=10,
+            output_tokens=5,
+            input_price_cny_per_million=Decimal("1.000000"),
+            output_price_cny_per_million=Decimal("2.000000"),
+            estimated_cost_cny=cost,
+            latency_ms=latency_ms,
+            error_code=None,
+            started_at=IN_WINDOW,
+            finished_at=IN_WINDOW + timedelta(seconds=1),
+        )
+    )
+    await db.flush()
 
 
 async def _importer_id(db: AsyncSession) -> int:
@@ -512,6 +549,44 @@ async def test_agreement_uses_window_and_version_matched_feedback(
 
     assert body["agreement"]["agreed"] == 1
     assert body["agreement"]["denominator"] == 1
+
+
+async def test_operation_metrics_use_release_attribution(
+    client, db_session, auth_headers
+):
+    headers = await auth_headers("hr_lead")
+    user_id = await _importer_id(db_session)
+    jd, version = await _seed_jd(db_session, f"OPS_{uuid4().hex[:6]}")
+    candidate = await _seed_candidate(db_session)
+    await _seed_golden(db_session, candidate, jd, "advance", user_id)
+    await _seed_score(db_session, candidate, jd, version)
+
+    # A second JD's version, used to prove wrong-version judge work is excluded.
+    other_jd, other_version = await _seed_jd(db_session, f"OTHER_{uuid4().hex[:6]}")
+
+    await _seed_attempt(db_session, operation="extract", jd_id=jd.id, latency_ms=100)
+    await _seed_attempt(
+        db_session, operation="judge", rule_version_id=version.id, latency_ms=300
+    )
+    # Wrong version: stays in the global dashboard, never in this release.
+    await _seed_attempt(
+        db_session, operation="judge", rule_version_id=other_version.id, latency_ms=9999
+    )
+    # Unattributed usage.
+    await _seed_attempt(db_session, operation="lightweight", latency_ms=8888)
+    await db_session.commit()
+
+    body = (
+        await client.post(RELEASES, json={"jd_codes": [jd.code]}, headers=headers)
+    ).json()
+
+    current = body["operations"]["current"]
+    assert current["attempt_count"] == 2
+    assert current["known_cost_cny"] == 2
+    # Continuous percentile over the two attributed latencies only.
+    assert current["p50_latency_ms"] == 200
+    assert current["scored_count"] == 1
+    assert body["operations"]["previous"]["attempt_count"] == 0
 
 
 # --- failure and conflict handling ------------------------------------------

@@ -94,6 +94,33 @@ class TargetResult(BaseModel):
     status: TargetStatus
 
 
+class ReleaseOperationTotals(BaseModel):
+    """Ledger and throughput facts attributed to this release's bindings."""
+
+    attempt_count: int
+    succeeded_count: int
+    failed_count: int
+    abandoned_count: int
+    unknown_usage_count: int
+    known_cost_cny: Number
+    p50_latency_ms: Ratio
+    p95_latency_ms: Ratio
+    scored_count: int
+    scores_per_day: Ratio
+
+
+class ReleaseOperationDelta(BaseModel):
+    absolute: Ratio
+    percentage: Ratio
+
+
+class ReleaseOperations(BaseModel):
+    current: ReleaseOperationTotals
+    previous: ReleaseOperationTotals
+    cost_delta: ReleaseOperationDelta
+    attempt_delta: ReleaseOperationDelta
+
+
 class ReleaseJDSelection(BaseModel):
     jd_id: int
     jd_code: str
@@ -147,6 +174,7 @@ class QualityReleaseDetail(BaseModel):
     agreement: AgreementMetrics
     f1_target_result: TargetResult
     evidence_target_result: TargetResult
+    operations: ReleaseOperations
     by_jd: list[QualityReleaseJDMetrics]
 
 
