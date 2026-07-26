@@ -63,6 +63,32 @@ async def already_ingested(
     return row is not None
 
 
+async def already_ingested_since(
+    db: AsyncSession, *, source: str, external_id: str, seen_since: datetime
+) -> bool:
+    """True when this candidate was already ingested at or after `seen_since`.
+
+    The exact identity in `already_ingested` includes the content hash, which
+    nobody can know before paying for the transfer. This is the weaker question
+    that *can* be asked first — "did we already ingest this candidate after the
+    source last changed them?" — and it is what makes a repeat run cost nothing
+    at all. A yes skips the download; a no costs one transfer that
+    `already_ingested` then deduplicates exactly.
+    """
+    _require_aware(seen_since)
+    row = (
+        await db.execute(
+            select(SyncSourceItem.id).where(
+                SyncSourceItem.source == source,
+                SyncSourceItem.source_external_id == external_id,
+                SyncSourceItem.outcome == "ingested",
+                SyncSourceItem.last_seen_at >= seen_since,
+            )
+        )
+    ).first()
+    return row is not None
+
+
 async def record_item(
     db: AsyncSession,
     *,

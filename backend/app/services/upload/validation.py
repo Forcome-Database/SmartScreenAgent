@@ -6,9 +6,9 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import UploadFile
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+from starlette.datastructures import UploadFile
 
 from backend.app.config import get_settings
 from backend.app.services.upload.errors import UploadValidationError
