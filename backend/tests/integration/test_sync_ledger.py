@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models import SyncCursor, SyncSourceItem
+from backend.app.database import AsyncSessionLocal
+from backend.app.models import IngestionJob, SyncCursor, SyncSourceItem
 from backend.app.services.sync.ledger import (
     already_ingested,
     read_cursor,
@@ -116,6 +120,114 @@ async def test_second_record_item_on_the_same_triple_updates_rather_than_inserts
         )
     )
     assert total == 1
+
+
+async def test_two_overlapping_runs_recording_the_same_item_do_not_collide() -> None:
+    """A lost ledger race must not turn a successful ingest into a failure.
+
+    Beat publishes `sync.pull_dingtalk` every interval whether or not a worker
+    is alive, so an outage queues messages that all dispatch at once on restart
+    across a prefork pool: two runs reaching the same candidate is ordinary.
+    Select-then-insert, both miss the SELECT, both INSERT, and the loser raises
+    `IntegrityError` on `uq_sync_source_items_identity` — which lands in
+    `run_sync`'s generic `except Exception`, calls `_record_failure` on the SAME
+    triple in a new session, and flips the winner's committed row to
+    `outcome='failed', error_code='ingestion_failed'`. The candidate WAS
+    ingested; the operator report says otherwise, and once `describe` is bound
+    the sweeper re-downloads it.
+
+    Two real sessions on one event loop interleave at every `await`, so both
+    SELECTs are issued before either INSERT lands — the race, deterministically.
+    """
+
+    async def _record(when: datetime) -> None:
+        async with AsyncSessionLocal() as session:
+            await record_item(
+                session,
+                source="dingtalk",
+                external_id="cand-race",
+                sha256="c" * 64,
+                outcome="ingested",
+                now=when,
+            )
+            await session.commit()
+
+    await asyncio.gather(_record(NOW), _record(LATER))
+
+    async with AsyncSessionLocal() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(SyncSourceItem).where(
+                        SyncSourceItem.source_external_id == "cand-race"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    # One row, and it still says what actually happened to the candidate.
+    assert len(rows) == 1
+    assert rows[0].outcome == "ingested"
+    # The loser updated the winner's row rather than raising, so the second
+    # sighting is counted exactly as a sequential repeat would have counted it.
+    assert rows[0].attempts == 2
+
+
+async def test_a_later_failure_does_not_erase_the_job_the_item_was_ingested_under(
+    db_session: AsyncSession,
+) -> None:
+    """`ingestion_job_id` is overwritten only by a non-None job id.
+
+    The ledger row is what points at the work already done. A later sighting
+    that carries no job — every `_record_failure` — must leave that pointer
+    alone, or the next run pays to download and parse the same bytes again.
+    """
+    digest = hashlib.sha256(uuid4().bytes).hexdigest()
+    job = IngestionJob(
+        state="queued",
+        source="dingtalk",
+        source_external_id="cand-keep",
+        jd_code=None,
+        raw_file_key=f"resumes/test/ledger-{digest[:16]}",
+        raw_file_sha256=digest,
+        raw_file_size_bytes=1234,
+        raw_file_content_type="application/pdf",
+        raw_file_original_name_cipher="cipher",
+        attempts=0,
+        actor="test",
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    await record_item(
+        db_session,
+        source="dingtalk",
+        external_id="cand-keep",
+        sha256="d" * 64,
+        outcome="ingested",
+        job_id=job.id,
+        now=NOW,
+    )
+    await db_session.commit()
+
+    row = await record_item(
+        db_session,
+        source="dingtalk",
+        external_id="cand-keep",
+        sha256="d" * 64,
+        outcome="failed",
+        error_code="item_unavailable",
+        now=LATER,
+    )
+    await db_session.commit()
+
+    assert row.ingestion_job_id == job.id
+    assert row.outcome == "failed"
+    assert row.error_code == "item_unavailable"
+    assert row.attempts == 2
+    assert row.first_seen_at == NOW
 
 
 async def test_write_cursor_then_read_cursor_round_trips_a_tz_aware_instant(

@@ -10,6 +10,7 @@ import httpx
 import pytest
 import respx
 
+from backend.app.config import get_settings
 from backend.app.services.sync.adapter import (
     ItemUnavailable,
     JobMeta,
@@ -287,7 +288,17 @@ def test_a_row_with_no_download_url_is_emitted_with_a_pii_free_placeholder() -> 
     assert "13800138000" not in items[0].filename
 
 
-def test_a_row_with_no_filename_is_emitted_without_a_url() -> None:
+def test_a_row_with_no_filename_keeps_its_download_url() -> None:
+    """A fetchable resume must not be discarded over an OPTIONAL field.
+
+    Spec §16.1 lists `fileName` as optional, and `_resolve_filename` already
+    covers its absence completely — `"resume"` plus a suffix from `fileType`,
+    then from the URL path. Gating the URL on the name threw the attachment
+    away before any of that ran, and the loss is permanent rather than
+    deferred: `fetch` raises `ItemUnavailable`, the ledger writes `failed` under
+    `UNKNOWN_SHA256`, the cursor advances past the row, and replay is inert for
+    DingTalk until the recruitment permission lands.
+    """
     items, urls = parse_candidates_page(
         _page(
             {
@@ -298,8 +309,50 @@ def test_a_row_with_no_filename_is_emitted_without_a_url() -> None:
         )
     )
 
-    assert urls == {}
-    assert items[0].filename == MISSING_ATTACHMENT_FILENAME
+    assert urls == {"cand-1": DOWNLOAD_URL}
+    assert items[0].filename == "resume.pdf"
+    assert items[0].filename != MISSING_ATTACHMENT_FILENAME
+
+
+def test_a_row_with_no_filename_and_no_file_type_takes_its_suffix_from_the_url() -> None:
+    items, urls = parse_candidates_page(
+        _page(
+            {
+                "candidateId": "cand-1",
+                "updateTime": "2026-07-27T04:30:00Z",
+                "resume": {"downloadUrl": "https://example.invalid/d/1001/cv.docx?sig=x"},
+            }
+        )
+    )
+
+    assert urls["cand-1"] == "https://example.invalid/d/1001/cv.docx?sig=x"
+    assert items[0].filename == "resume.docx"
+
+
+@respx.mock
+async def test_a_nameless_attachment_is_actually_downloaded() -> None:
+    # The end the parse change exists for: the row survives to `fetch` and the
+    # bytes land, instead of the candidate being dropped for good.
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_page(
+                {
+                    "candidateId": "cand-1",
+                    "updateTime": "2026-07-27T04:30:00Z",
+                    "resume": {"fileType": "application/pdf", "downloadUrl": DOWNLOAD_URL},
+                }
+            ),
+        )
+    )
+    respx.get(DOWNLOAD_URL).mock(return_value=httpx.Response(200, content=b"%PDF-1.4 fake"))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+    fetched = await adapter.fetch(items[0])
+
+    assert fetched.content == b"%PDF-1.4 fake"
+    assert fetched.filename == "resume.pdf"
 
 
 def test_an_undeclared_file_type_does_not_abort_the_page() -> None:
@@ -551,6 +604,108 @@ async def test_an_empty_download_is_item_unavailable() -> None:
 
     with pytest.raises(ItemUnavailable):
         await adapter.fetch(items[0])
+
+
+# --------------------------------------------------------------------------
+# The response body is bounded before it is buffered
+# --------------------------------------------------------------------------
+
+
+def _cap_downloads_at(monkeypatch, limit: int) -> None:
+    """Shrink `MAX_RESUME_FILE_BYTES` for the adapter built after this call.
+
+    The real cap is 20 MB; materialising 20 MB of test bytes would prove the
+    same thing several orders of magnitude more slowly.
+    """
+    capped = get_settings().model_copy(update={"MAX_RESUME_FILE_BYTES": limit})
+    monkeypatch.setattr("backend.app.services.sync.dingtalk.get_settings", lambda: capped)
+
+
+async def _chunked(total: int, chunk: int = 8):
+    """A body delivered in pieces and declaring no `Content-Length`."""
+    for start in range(0, total, chunk):
+        yield b"x" * min(chunk, total - start)
+
+
+@respx.mock
+async def test_a_download_at_the_size_limit_is_accepted(monkeypatch) -> None:
+    _cap_downloads_at(monkeypatch, 32)
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(200, json=_load("candidates-page"))
+    )
+    respx.get(DOWNLOAD_URL).mock(return_value=httpx.Response(200, content=b"x" * 32))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+    fetched = await adapter.fetch(items[0])
+
+    # Streaming must not change what an in-bounds download produces.
+    assert fetched.content == b"x" * 32
+    assert fetched.sha256 == sha256(b"x" * 32).hexdigest()
+
+
+@respx.mock
+async def test_a_download_declaring_too_many_bytes_is_refused(monkeypatch) -> None:
+    # `Content-Length` is the cheap early reject: the body is never read.
+    _cap_downloads_at(monkeypatch, 32)
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(200, json=_load("candidates-page"))
+    )
+    respx.get(DOWNLOAD_URL).mock(return_value=httpx.Response(200, content=b"x" * 33))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+
+    with pytest.raises(ItemUnavailable) as caught:
+        await adapter.fetch(items[0])
+
+    assert "max_resume_file_bytes" in str(caught.value)
+
+
+@respx.mock
+async def test_a_chunked_download_is_aborted_once_it_passes_the_limit(monkeypatch) -> None:
+    """The bound cannot rest on a header the same untrusted party wrote.
+
+    `MAX_RESUME_FILE_BYTES` is enforced by `UploadValidator`, which only ever
+    sees bytes already whole in this worker's memory — so `response.content` let
+    an unverified endpoint decide how much a worker allocates. A body with no
+    declared length is the case that proves the counter, not the header, is what
+    actually stops it.
+    """
+    _cap_downloads_at(monkeypatch, 32)
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(200, json=_load("candidates-page"))
+    )
+    respx.get(DOWNLOAD_URL).mock(return_value=httpx.Response(200, content=_chunked(4096)))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+
+    with pytest.raises(ItemUnavailable) as caught:
+        await adapter.fetch(items[0])
+
+    assert "content-length" not in respx.calls[-1].response.headers
+    message = str(caught.value)
+    assert "max_resume_file_bytes" in message
+    # Same rule as every other raise here: no URL, no filename.
+    assert "example.invalid" not in message
+    assert "zhang" not in message
+
+
+@respx.mock
+async def test_a_chunked_download_inside_the_limit_still_arrives(monkeypatch) -> None:
+    _cap_downloads_at(monkeypatch, 4096)
+    respx.get(CANDIDATES_URL).mock(
+        return_value=httpx.Response(200, json=_load("candidates-page"))
+    )
+    respx.get(DOWNLOAD_URL).mock(return_value=httpx.Response(200, content=_chunked(100)))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    items = await adapter.list_changed(SINCE, 10)
+    fetched = await adapter.fetch(items[0])
+
+    # Reassembled in order and whole, not merely under the cap.
+    assert fetched.content == b"x" * 100
 
 
 # --------------------------------------------------------------------------

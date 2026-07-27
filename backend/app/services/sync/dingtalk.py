@@ -67,7 +67,17 @@ ACCEPTED_SUFFIXES = frozenset({".pdf", ".docx", ".png", ".jpg", ".jpeg"})
 # cursor moves past it, wearing this stand-in name. It holds nothing the
 # candidate supplied, and it is never used: the item has no recorded download
 # URL, so `fetch` refuses it before the name can reach storage.
+#
+# Worn ONLY by a row with no `downloadUrl`. A row that has one but no
+# `fileName` is fetchable — see `parse_candidates_page`.
 MISSING_ATTACHMENT_FILENAME = "attachment-unavailable"
+
+# WP8 `external_id` policy, one rule across four modules: a
+# `source_external_id` MAY be stored in the ledger and MAY appear in a structlog
+# line; it MUST NOT reach an audit payload, an API response, or an exception
+# message. This module keeps the last clause — see `describe` and `fetch`. The
+# other three are `services/sync/runner.py`, `services/sync/replay.py`, and
+# `schemas/sync_report.py`.
 
 _SUFFIX_BY_CONTENT_TYPE = {
     "application/pdf": ".pdf",
@@ -137,6 +147,24 @@ def _resolve_filename(raw_name: str, content_type: str, download_url: str) -> st
     return name
 
 
+def list_params(since: datetime, limit: int) -> dict[str, str | int]:
+    """The candidates-list query string, in the one file allowed to know it.
+
+    UNVERIFIED parameter names, same status as `CANDIDATES_PATH` (design §8.2).
+    Exported because the live probe in
+    `backend/tests/external/test_dingtalk_recruitment_contract.py` issues its
+    own request — it must observe the RAW page order, which `list_changed`
+    sorts away — and a second inlined copy of these two names would make the
+    module docstring's "only file in the codebase that knows these endpoints"
+    false, and force two edits when the probe finally reports.
+    """
+    return {"since": since.isoformat(), "maxResults": limit}
+
+
+class _AttachmentTooLarge(Exception):
+    """Internal: the body outgrew `MAX_RESUME_FILE_BYTES`. Never leaves `fetch`."""
+
+
 def _parse_updated_at(value: object) -> datetime:
     """Read one instant as timezone-aware, or refuse it.
 
@@ -185,11 +213,20 @@ def parse_candidates_page(payload: dict) -> tuple[list[SourceItem], dict[str, st
       external id breaks deduplication for every later run, and one with no
       timestamp cannot move the cursor; skipping either silently would corrupt
       both.
-    - A row with no `resume`, no `downloadUrl`, or no `fileName` is emitted
-      anyway, with no recorded URL — so `fetch` fails that ONE item and the
-      cursor still advances past it (design §9). A candidate with no resume
-      attached is an ordinary ATS state; raising here would wedge every future
-      run behind the first one, over a window that grows without bound.
+    - A row with no `resume` object, or one whose `resume` carries no
+      `downloadUrl`, is emitted anyway, with no recorded URL — so `fetch` fails
+      that ONE item and the cursor still advances past it (design §9). A
+      candidate with no resume attached is an ordinary ATS state; raising here
+      would wedge every future run behind the first one, over a window that
+      grows without bound.
+    - A row that HAS a `downloadUrl` but no `fileName` is emitted WITH its URL
+      recorded. §16.1 lists `fileName` as optional and `_resolve_filename`
+      already covers its absence — `"resume"` plus a suffix taken from
+      `fileType`, then from the URL path. Discarding a fetchable attachment
+      over a missing optional field is not a deferred failure, it is a
+      permanent one: `fetch` would raise `ItemUnavailable`, the ledger would
+      record `failed` under `UNKNOWN_SHA256`, the cursor would advance past the
+      row, and replay is inert for this source until `describe` can be bound.
     """
     rows = payload.get("list")
     if not isinstance(rows, list):
@@ -210,7 +247,11 @@ def parse_candidates_page(payload: dict) -> tuple[list[SourceItem], dict[str, st
         # suffix needs no declared type, and the upload gate reads the suffix
         # alone anyway.
         content_type = _optional_text(attachment.get("fileType"))
-        if download_url and raw_name:
+        if download_url:
+            # The URL alone decides. `raw_name` is optional (§16.1) and
+            # `_resolve_filename` falls back to `"resume"` plus a derived
+            # suffix, so gating on it would throw a fetchable resume away for
+            # good — see this function's docstring.
             filename = _resolve_filename(raw_name, content_type, download_url)
             urls[external_id] = download_url
         else:
@@ -313,8 +354,7 @@ class DingTalkRecruitmentAdapter:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
                 response = await client.get(
                     url,
-                    # UNVERIFIED parameter names (design §8.2).
-                    params={"since": since.isoformat(), "maxResults": limit},
+                    params=list_params(since, limit),
                     headers={ACCESS_TOKEN_HEADER: token},
                 )
                 response.raise_for_status()
@@ -380,12 +420,13 @@ class DingTalkRecruitmentAdapter:
             # it. The message names neither the item nor its file.
             raise ItemUnavailable("no download url for item")
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
-                response = await client.get(
-                    download_url, headers=await self._download_headers(download_url)
-                )
-                response.raise_for_status()
-                content = response.content
+            content = await self._download(download_url)
+        except _AttachmentTooLarge as exc:
+            # Ordered before the total handler below so the size refusal keeps
+            # its own code instead of being re-labelled a download failure.
+            # Neither the URL nor the filename appears, same rule as every
+            # other raise in this file.
+            raise ItemUnavailable("attachment exceeds max_resume_file_bytes") from exc
         except Exception as exc:
             # Deliberately total, for the same reason as `list_changed`: the
             # runner catches `ItemUnavailable` here and nothing else, and a raw
@@ -440,6 +481,20 @@ class DingTalkRecruitmentAdapter:
         No request is made — deliberately, since there is no endpoint to make it
         against. When the recruitment permission is granted, this method and its
         fixture are what change; the sweeper does not.
+
+        BINDING IT IS NOT ENOUGH ON ITS OWN. `fetch` resolves its download URL
+        from `self._download_urls`, a side-map that only `list_changed`
+        populates, and on the replay path this adapter instance is fresh — that
+        map is empty. A `describe` that merely returned a well-formed
+        `SourceItem` would hand back an item its own `fetch` cannot resolve:
+        every replayed row would raise `ItemUnavailable("no download url for
+        item")`, spend an attempt for a reason that has nothing to do with the
+        item, and across `SYNC_MAX_ITEM_ATTEMPTS` sweeps drive the whole failed
+        queue terminal — the same permanent silent loss
+        `SourceCapabilityUnavailable` is refusing here, re-entered by another
+        door. Whatever binds this method must also record the item's
+        `downloadUrl` in `self._download_urls` (or make `fetch` re-derive it).
+        See `ResumeSourceAdapter.describe` in `adapter.py`.
         """
         # `external_id` is a real person's identifier in the recruiting system
         # and never reaches the message, matching every other raise in this file.
@@ -452,6 +507,41 @@ class DingTalkRecruitmentAdapter:
         if self._access_token is not None:
             return self._access_token
         return await self._token_client.get_token()
+
+    async def _download(self, download_url: str) -> bytes:
+        """Stream one attachment, refusing a body larger than the upload cap.
+
+        `MAX_RESUME_FILE_BYTES` is enforced by `UploadValidator`, which only
+        ever sees bytes that are already whole in this worker's memory. Buffering
+        the response first (`response.content`) therefore lets an unverified
+        endpoint — the one every other interaction in this file distrusts, down
+        to normalising its hostname and refusing to put our token on it — decide
+        how much memory a worker allocates. The transfer is aborted here
+        instead, at the first chunk that crosses the line.
+
+        `Content-Length` is checked first only as a cheap early reject; it is a
+        claim by the same untrusted party, so the byte counter below is what
+        actually enforces the bound, whether the header was absent, wrong, or
+        the response was chunked.
+        """
+        max_bytes = self._settings.MAX_RESUME_FILE_BYTES
+        headers = await self._download_headers(download_url)
+        chunks: list[bytes] = []
+        total = 0
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            async with client.stream("GET", download_url, headers=headers) as response:
+                response.raise_for_status()
+                declared = response.headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > max_bytes:
+                    raise _AttachmentTooLarge
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        # Raised inside the `stream` context so the response is
+                        # closed and the rest of the body never arrives.
+                        raise _AttachmentTooLarge
+                    chunks.append(chunk)
+        return b"".join(chunks)
 
     async def _download_headers(self, download_url: str) -> dict[str, str]:
         """Credential the download only over HTTPS to the API host.
