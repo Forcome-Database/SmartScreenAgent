@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     SYNC_MAX_ITEM_ATTEMPTS: int = Field(default=3, ge=1, le=10)
     SYNC_REPLAY_INTERVAL_SECONDS: int = Field(default=3600, ge=1)
 
+    # MCP surface (WP8)
+    MCP_ENABLED: bool = False
+    MCP_SERVICE_ROLE: str = "mcp_service"
+    MCP_SERVICE_TOKEN: str = ""
+
     # Resume parser (MinerU)
     MINERU_MODE: Literal["official", "stub"] = "official"
     MINERU_BASE_URL: str = "https://mineru.net"

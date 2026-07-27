@@ -1,7 +1,21 @@
 import pytest
 from pydantic import ValidationError
 
-from backend.app.config import get_settings
+from backend.app.config import Settings, get_settings
+
+
+def test_mcp_defaults_ship_closed() -> None:
+    """The shipped defaults, not the test environment's overrides.
+
+    `TEST_ENV_DEFAULTS` supplies a usable token so the resolver can be tested,
+    which would mask a production default that authenticates somebody. Read the
+    field defaults directly instead.
+    """
+    fields = Settings.model_fields
+
+    assert fields["MCP_ENABLED"].default is False
+    assert fields["MCP_SERVICE_TOKEN"].default == ""
+    assert fields["MCP_SERVICE_ROLE"].default == "mcp_service"
 
 
 def test_sync_defaults_are_off_and_bounded() -> None:
