@@ -274,6 +274,36 @@ then publish. A background task able to change the active rule version would be
 a back door around it. An integration test asserts `active_rule_version_id` is
 unchanged after synchronizing an existing JD.
 
+### 10.1 The unscored window — an operational consequence, not a bug
+
+A JD this task creates necessarily has `active_rule_version_id = NULL`, because
+setting it is forbidden above. `ingestion_jobs.jd_code` carries no foreign key,
+so a resume arriving for such a JD does not fail: the code is stored, the
+lookup returns nothing, `jd_has_active_rule` is false, and
+`backend/app/tasks/ingest.py` skips scoring. The resume is still downloaded,
+parsed, extracted, and persisted as a Candidate, and the job completes
+successfully.
+
+The consequence is permanent. Candidates surface under a JD only through
+`Score.jd_id`; there is no rescore or backfill path anywhere in the codebase;
+the replay sweeper re-drives only rows whose outcome is `failed`; and the
+dedupe ledger prevents a re-pull. So every resume synced between "the JD
+appears" and "a human publishes a rule version for it" is ingested and then
+invisible.
+
+Running JD sync before the resume pull does not close this — the JD's rule
+state is the same either way. The two operational rules that do:
+
+- Publish a rule version for a JD **before** its postings start attracting
+  applicants, not after.
+- Treat a JD that sync created as incomplete until WP6c's publish flow has run
+  against it.
+
+Closing the window properly needs a backfill path — rescoring already-ingested
+candidates when a JD's first rule version is published. That is out of WP8's
+scope and is recorded here so the next work package inherits the question
+rather than rediscovering it.
+
 ## 11. MCP Surface
 
 Hermes is self-hosted on the company intranet, connects to DingTalk itself, and
