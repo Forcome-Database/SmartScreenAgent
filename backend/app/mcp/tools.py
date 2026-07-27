@@ -116,19 +116,46 @@ async def list_jds(db: AsyncSession) -> list[dict[str, Any]]:
 
 async def top_candidates(
     db: AsyncSession, *, jd_code: str, n: int = 10, days: int = 7
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     """The best-scoring candidates for one JD over the last `days` days.
 
     Identified by id alone. Resolving an id to a person is a PII read, and the
     service role cannot reach the route that performs one.
+
+    Returns `None` when no JD carries that code, and `[]` when the JD exists
+    but nothing ranks under it. Conflating the two would hand a model `[]` for
+    a misspelled code, which it would report as "there are no top candidates
+    for JD-X" — a fact stated about a JD that does not exist. `None` is the
+    not-found signal `score_summary` and the WP4 read service already use.
+
+    Only scores computed under the JD's *active* rule version are ranked, as in
+    `services.read.candidates.list_ranked_for_jd`, which this is a view of.
+    `uq_scores_candidate_jd_rule` is keyed on the rule version, so republishing
+    a rule leaves the superseded scores in place: without the filter one person
+    would occupy two of the `n` slots, holding two totals graded against two
+    different schemas, and the superseded one could win. A JD with no active
+    version therefore ranks nobody yet — `[]`, the same answer WP4 gives.
     """
+    if days < 1:
+        raise ValueError(f"days must be at least 1, got {days!r}")
+    jd = (
+        await db.execute(select(JD.id, JD.active_rule_version_id).where(JD.code == jd_code))
+    ).first()
+    if jd is None:
+        return None
+    jd_id, active_rule_version_id = jd
+    if not active_rule_version_id:
+        return []
     since = datetime.now(timezone.utc) - timedelta(days=days)
     rows = (
         await db.execute(
             select(Score.candidate_id, Score.total_score, Score.grade, Score.created_at)
-            .join(JD, JD.id == Score.jd_id)
-            .where(JD.code == jd_code, Score.created_at >= since)
-            .order_by(Score.total_score.desc(), Score.id.desc())
+            .where(
+                Score.jd_id == jd_id,
+                Score.rule_version_id == active_rule_version_id,
+                Score.created_at >= since,
+            )
+            .order_by(Score.total_score.desc(), Score.id.asc())
             .limit(min(max(n, 1), MAX_TOP_CANDIDATES))
         )
     ).all()

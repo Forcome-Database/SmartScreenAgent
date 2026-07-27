@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from backend.app.mcp.tools import SCORE_SUMMARY_SQL, project_dimensions
 
 
@@ -64,3 +66,49 @@ def test_the_score_projection_never_names_a_private_column_or_key() -> None:
     assert "'id', d.value ->> 'id'" in sql
     assert "'tier', d.value ->> 'tier'" in sql
     assert "'score', d.value -> 'score'" in sql
+
+
+def test_the_score_projection_reads_exactly_three_judge_fields() -> None:
+    """The whitelist the blacklist above cannot express.
+
+    Naming forbidden keys catches a widening that says `reasoning`. It cannot
+    catch one that selects `s.judge_dimensions` wholesale, or that emits
+    `d.value` itself under some new key — neither names anything blacklistable,
+    and `judge_dimensions` cannot go on the blacklist because the statement
+    legitimately reads it. Either widening would then be clamped back by
+    `project_dimensions`, so the integration field-set assertion would pass too
+    and the quotes would be inside this process undetected.
+
+    So enumerate instead every read the statement makes out of the judge
+    payload and require the list to be exactly this one. A fourth extraction,
+    whatever it is called, fails here.
+    """
+    sql = str(SCORE_SUMMARY_SQL)
+
+    # Every mention of the judge column, with whatever key it extracts. A bare
+    # `s.judge_dimensions` — the wholesale select — matches with an empty key.
+    assert re.findall(r"s\.judge_dimensions(\s*->>?\s*'\w+')?", sql) == [
+        " -> 'dimensions'",  # the type guard
+        " -> 'dimensions'",  # the array walked by jsonb_array_elements
+    ]
+
+    # Every mention of an array element, likewise, in statement order.
+    assert re.findall(r"d\.value(\s*->>?\s*'\w+')?", sql) == [
+        " ->> 'id'",
+        " ->> 'tier'",
+        " -> 'score'",
+        "",  # jsonb_typeof(d.value) = 'object'
+        " -> 'id'",  # jsonb_typeof(d.value -> 'id') = 'string'
+    ]
+
+    # …and exactly three of them are emitted, under exactly these keys.
+    arguments = re.search(r"jsonb_build_object\(([^)]*)\)", sql)
+    assert arguments is not None
+    parts = [part.strip() for part in arguments.group(1).split(",")]
+    # `strict` so an odd argument list — a value emitted without a key — is a
+    # hard failure rather than a silently truncated pairing.
+    assert list(zip(parts[::2], parts[1::2], strict=True)) == [
+        ("'id'", "d.value ->> 'id'"),
+        ("'tier'", "d.value ->> 'tier'"),
+        ("'score'", "d.value -> 'score'"),
+    ]

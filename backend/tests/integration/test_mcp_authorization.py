@@ -99,7 +99,18 @@ async def _seed_score(db_session) -> tuple[Candidate, Score]:
                     "evidence_quotes": ["quotable evidence"],
                     "reasoning": "private reasoning",
                     "suggested_interview_questions": ["private interview question"],
-                }
+                },
+                # A second dimension, so "field-set exact at every nesting
+                # level" is a claim about a list rather than about its head.
+                {
+                    "id": "ownership",
+                    "tier": "medium",
+                    "score": 6,
+                    "confidence": 0.5,
+                    "evidence_quotes": ["quotable evidence"],
+                    "reasoning": "private reasoning",
+                    "suggested_interview_questions": ["private interview question"],
+                },
             ],
         },
     )
@@ -107,6 +118,10 @@ async def _seed_score(db_session) -> tuple[Candidate, Score]:
     await db_session.flush()
     await db_session.commit()
     return candidate, score
+
+
+async def _jd_code(db_session, jd_id: int) -> str:
+    return (await db_session.execute(select(JD.code).where(JD.id == jd_id))).scalar_one()
 
 
 async def test_the_service_role_cannot_reach_pii_routes(client, db_session):
@@ -242,18 +257,29 @@ async def test_score_summary_returns_an_exact_field_set(db_session):
         "hard_filter_rejected",
         "dimensions",
     }
-    assert set(summary["dimensions"][0]) == {"id", "tier", "score"}
+    # Every element, not just the head: the seeded payload carries two.
+    assert len(summary["dimensions"]) == 2
+    for dimension in summary["dimensions"]:
+        assert set(dimension) == {"id", "tier", "score"}
     assert summary["hard_filter_rejected"] is False
     _assert_no_seeded_secret(summary)
 
 
 async def test_score_summary_reads_nothing_it_would_have_to_audit(db_session):
-    """The tool is not the operator route with fields removed.
+    """The call writes no audit row, and reports a missing score as `None`.
 
     `get_score_detail` returns the quotes and records a `score_detail_read`
-    audit row because doing so is a PII event. This reads a projection that
-    cannot carry them, so there is nothing to audit — and an absent audit row
-    is the observable proof it did not go through that service.
+    event because for an operator that read *is* a PII event. This projection
+    cannot carry them, so recording one would corrupt the trail with entries
+    claiming a scorecard was opened when nothing readable was. That absence is
+    what this asserts.
+
+    It is *not* proof the tool avoided `get_score_detail`: that service writes
+    its row only `if actor is not None`, so a regression calling it with no
+    actor would leave the count unchanged and still pass here. The proof of
+    what is read is
+    `backend/tests/unit/test_mcp_tools.py::test_the_score_projection_reads_exactly_three_judge_fields`,
+    which pins the only statement the tool issues.
     """
     from backend.app.mcp.tools import score_summary
 
@@ -328,9 +354,101 @@ async def test_top_candidates_exposes_ids_not_identities(db_session):
     rows = await top_candidates(db_session, jd_code=str(summary["jd_code"]), n=10, days=7)
 
     assert rows
-    assert set(rows[0]) == {"candidate_id", "total_score", "grade", "scored_at"}
+    for row in rows:
+        assert set(row) == {"candidate_id", "total_score", "grade", "scored_at"}
     assert rows[0]["candidate_id"] == score.candidate_id
     _assert_no_seeded_secret(rows)
+
+
+async def test_top_candidates_ranks_only_the_active_rule_version(db_session):
+    """A republication must not put one person in two of the `n` slots.
+
+    `uq_scores_candidate_jd_rule` is keyed on the rule version, so publishing a
+    rule inside the window leaves the superseded score in place beside the new
+    one. Their totals are graded against two different schemas, so ranking them
+    against each other means nothing — and here the superseded one is the
+    higher, so without the filter it would be presented as the current answer.
+    The WP4 ranked list this tool is a view of filters to the active version.
+    """
+    from backend.app.mcp.tools import top_candidates
+
+    candidate, seeded = await _seed_score(db_session)
+    jd = await db_session.get(JD, seeded.jd_id)
+    republished = RuleVersion(
+        jd_id=jd.id, version="v2", published_at=NOW, schema_json={"jd_code": jd.code}
+    )
+    db_session.add(republished)
+    await db_session.flush()
+    jd.active_rule_version_id = republished.id
+    db_session.add(
+        Score(
+            candidate_id=candidate.id,
+            jd_id=jd.id,
+            rule_version_id=republished.id,
+            # Lower than the seeded 70 scored under the retired v1, so an
+            # unfiltered query would rank the stale score first.
+            total_score=55,
+            grade="L2",
+            hard_filter_result={},
+            rule_dimensions={},
+            judge_dimensions=None,
+        )
+    )
+    await db_session.commit()
+
+    rows = await top_candidates(db_session, jd_code=jd.code, n=10, days=7)
+
+    assert rows is not None
+    assert len(rows) == 1
+    assert rows[0]["candidate_id"] == candidate.id
+    assert rows[0]["total_score"] == "55.00"
+    assert rows[0]["grade"] == "L2"
+
+
+async def test_top_candidates_separates_an_unknown_jd_from_an_unranked_one(db_session):
+    """`None` and `[]` are different answers and must stay different.
+
+    A model handed `[]` for a misspelled code states "there are no top
+    candidates for JD-X" as a fact about a JD that does not exist. `None` is
+    the not-found signal `score_summary` and `list_ranked_for_jd` already use.
+    A JD with no active rule version ranks nobody *yet*, which is `[]` — the
+    same answer WP4 gives it.
+    """
+    from backend.app.mcp.tools import top_candidates
+
+    await _seed_score(db_session)
+    scored_but_empty = JD(
+        code=f"MCP_{uuid4().hex[:6]}", name="empty", description="", status="active"
+    )
+    db_session.add(scored_but_empty)
+    await db_session.flush()
+    version = RuleVersion(
+        jd_id=scored_but_empty.id, version="v1", published_at=NOW, schema_json={}
+    )
+    db_session.add(version)
+    await db_session.flush()
+    scored_but_empty.active_rule_version_id = version.id
+    unpublished = JD(
+        code=f"MCP_{uuid4().hex[:6]}", name="unpublished", description="", status="active"
+    )
+    db_session.add(unpublished)
+    await db_session.commit()
+
+    assert await top_candidates(db_session, jd_code="MCP_NO_SUCH_JD") is None
+    assert await top_candidates(db_session, jd_code=scored_but_empty.code) == []
+    assert await top_candidates(db_session, jd_code=unpublished.code) == []
+
+
+async def test_top_candidates_refuses_a_window_that_can_contain_nothing(db_session):
+    """`days=0` silently returning `[]` is the unknown-JD lie from the other side."""
+    from backend.app.mcp.tools import top_candidates
+
+    _candidate, seeded = await _seed_score(db_session)
+    jd_code = await _jd_code(db_session, seeded.jd_id)
+
+    for days in (0, -1):
+        with pytest.raises(ValueError):
+            await top_candidates(db_session, jd_code=jd_code, days=days)
 
 
 async def test_list_jds_returns_an_exact_field_set(db_session):
