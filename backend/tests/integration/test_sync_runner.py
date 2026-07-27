@@ -70,6 +70,19 @@ class StubAdapter:
             content_type=item.content_type,
         )
 
+    async def describe(self, external_id: str) -> SourceItem:
+        """Present so the double is still a `ResumeSourceAdapter`, and loud.
+
+        A pull works from the listing; only the replay sweeper re-derives an
+        item by id. A `run_sync` that reached for this would be doing the
+        sweeper's job, and the test suite should say so rather than quietly
+        agree. A real adapter answers here, raising `ItemUnavailable` when the
+        source has the lookup but not the item, `SourceCapabilityUnavailable`
+        when it has no such lookup, and `SourceUnavailable` when the provider
+        itself is down.
+        """
+        raise AssertionError("run_sync must not describe; replay owns re-drive")
+
 
 class BrokenAdapter:
     source_name = STUB_SOURCE
@@ -78,6 +91,11 @@ class BrokenAdapter:
         raise SourceUnavailable("permission revoked")
 
     async def fetch(self, item: SourceItem) -> FetchedResume:
+        raise AssertionError("must not be reached")
+
+    async def describe(self, external_id: str) -> SourceItem:
+        # See `StubAdapter.describe`: the port has three methods and a double
+        # that implements two of them is not the port.
         raise AssertionError("must not be reached")
 
 
@@ -349,6 +367,53 @@ async def test_a_listing_failure_leaves_the_cursor_untouched(db_session, minio_s
     assert audit.payload["error_code"] == "source_unavailable"
     # The provider's own words may name a person; only our codes may be stored.
     assert "permission revoked" not in str(audit.payload)
+
+
+async def test_an_abort_inside_the_batch_still_leaves_an_audit_row(
+    db_session, minio_storage, monkeypatch
+):
+    """A run that dies mid-loop has already committed and enqueued items.
+
+    Only the listing failure was audited before: anything raised from inside
+    the per-item loop propagated past the cursor write and past the audit,
+    leaving neither `resume_sync_completed` nor `resume_sync_failed` — a run
+    that really happened, with jobs really queued, and no `resume_sync_*`
+    evidence at all to distinguish it from a Beat tick that never fired.
+    """
+
+    def _broker_is_down(job_id: int) -> None:
+        raise RuntimeError("broker refused the message")
+
+    monkeypatch.setattr("backend.app.services.sync.runner.enqueue_job", _broker_is_down)
+    adapter = StubAdapter([_item("c1", filename="Zhang Wei resume.pdf"), _item("c2")])
+
+    with pytest.raises(RuntimeError):
+        await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_failed")
+        )
+    ).scalars().one()
+    assert audit.payload["error_code"] == "run_aborted"
+    assert audit.payload["listed"] == 2
+    # Counts as far as the run got, and nothing a candidate supplied.
+    assert audit.payload["ingested"] == 0
+    assert "Zhang" not in str(audit.payload)
+    assert "broker refused" not in str(audit.payload)
+    completed = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.event_type == "resume_sync_completed")
+        )
+    ).scalar_one()
+    assert completed == 0
+    # The cursor is still unwritten, so the next run re-opens the same window.
+    cursors = (
+        await db_session.execute(select(func.count()).select_from(SyncCursor))
+    ).scalar_one()
+    assert cursors == 0
 
 
 async def test_the_per_run_cap_is_reported_not_silent(db_session, minio_storage):

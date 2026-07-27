@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timezone
 
 import pytest
@@ -54,9 +55,35 @@ def test_the_port_can_re_derive_an_item_from_its_external_id_alone() -> None:
 
     A failed ledger row stores only `source_external_id` — the cursor has moved
     past it and the overlap will not reach back, so re-listing cannot find it.
-    Without this method the sweeper has no way to obtain an item to `fetch`.
+    Without this method the sweeper has no way to obtain an item to `fetch`,
+    and the id is the ONLY thing it can be asked for.
     """
     from backend.app.services.sync.adapter import ResumeSourceAdapter
 
-    # `__protocol_attrs__` is 3.12+; this repo supports 3.10.
-    assert callable(getattr(ResumeSourceAdapter, "describe", None))
+    # `__protocol_attrs__` is 3.12+ and this repo supports 3.10, but
+    # `inspect.signature` pins the shape portably — and the shape is the point:
+    # `callable(...)` alone would accept a zero-argument `describe`, which
+    # cannot re-derive anything.
+    signature = inspect.signature(ResumeSourceAdapter.describe)
+
+    assert list(signature.parameters) == ["self", "external_id"]
+    assert signature.parameters["external_id"].annotation == "str"
+    assert signature.return_annotation == "SourceItem"
+
+
+def test_the_port_tells_implementers_what_a_provider_outage_looks_like() -> None:
+    """All three failure meanings, named where an implementer will read them.
+
+    `describe` is called once per failed row. An adapter that maps a transport
+    error to `ItemUnavailable` — the natural reading of a per-item call — spends
+    one attempt per row per sweep during an outage, and about
+    `SYNC_MAX_ITEM_ATTEMPTS` sweeps later the entire failed queue is terminal
+    with no genuine per-item failure anywhere. The contract has to say so.
+    """
+    from backend.app.services.sync.adapter import ResumeSourceAdapter
+
+    contract = ResumeSourceAdapter.describe.__doc__ or ""
+
+    assert "ItemUnavailable" in contract
+    assert "SourceCapabilityUnavailable" in contract
+    assert "SourceUnavailable" in contract

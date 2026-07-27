@@ -15,6 +15,7 @@ from backend.app.services.sync.adapter import (
     ItemUnavailable,
     SourceCapabilityUnavailable,
     SourceItem,
+    SourceUnavailable,
 )
 from backend.app.services.sync.replay import replay_failed
 from backend.app.services.sync.runner import UNKNOWN_SHA256
@@ -64,10 +65,16 @@ class ReplayAdapter:
         undescribable: bool = False,
         missing_ids: set[str] | None = None,
         fetch_fails: set[str] | None = None,
+        describe_outage: set[str] | None = None,
+        fetch_outage: set[str] | None = None,
     ) -> None:
         self.undescribable = undescribable
         self.missing_ids = missing_ids or set()
         self.fetch_fails = fetch_fails or set()
+        # An outage is not a property of the item it happens to be asked about:
+        # these sets only say which call the provider is down for.
+        self.describe_outage = describe_outage or set()
+        self.fetch_outage = fetch_outage or set()
         self.described: list[str] = []
         self.fetched: list[str] = []
 
@@ -78,11 +85,15 @@ class ReplayAdapter:
         if self.undescribable:
             raise SourceCapabilityUnavailable("no single-item lookup")
         self.described.append(external_id)
+        if external_id in self.describe_outage:
+            raise SourceUnavailable("provider is down")
         if external_id in self.missing_ids:
             raise ItemUnavailable("candidate is gone")
         return _item(external_id)
 
     async def fetch(self, item: SourceItem) -> FetchedResume:
+        if item.external_id in self.fetch_outage:
+            raise SourceUnavailable("provider is down")
         if item.external_id in self.fetch_fails:
             raise ItemUnavailable("attachment still missing")
         self.fetched.append(item.external_id)
@@ -334,6 +345,117 @@ async def test_an_adapter_that_cannot_describe_spends_no_attempt(
     # Untouched: still one attempt spent, still recoverable when the binding lands.
     assert rows[0].attempts == 1
     assert rows[0].error_code == "item_unavailable"
+
+
+async def test_a_provider_outage_spends_no_attempt_on_any_row(db_session, minio_storage):
+    """The failure that is about no item at all must cost no item anything.
+
+    `describe` is called once per failed row, so an outage answers every row —
+    and if that counted as a per-item failure, `SYNC_MAX_ITEM_ATTEMPTS` sweeps
+    would make the entire failed queue terminal. At the shipped 3600s interval
+    and 3 attempts that is a three-hour outage silently destroying precisely
+    the rows this sweeper exists to rescue, with not one genuine per-item
+    failure anywhere in it. The pass aborts instead, spending nothing, exactly
+    as `run_sync` aborts when `list_changed` raises the same exception.
+    """
+    await _seed_failure(db_session, "cand-a")
+    await _seed_failure(db_session, "cand-b")
+    adapter = ReplayAdapter(describe_outage={"cand-a", "cand-b"})
+
+    for _ in range(3):
+        with pytest.raises(SourceUnavailable):
+            await replay_failed(
+                AsyncSessionLocal, adapter, now=NOW, max_attempts=MAX_ATTEMPTS
+            )
+
+    # The outage hit the first row asked about, so the second was never even
+    # reached — and neither row moved.
+    first = await _rows(db_session, "cand-a")
+    second = await _rows(db_session, "cand-b")
+    assert [row.attempts for row in first + second] == [1, 1]
+    assert {row.outcome for row in first + second} == {"failed"}
+    assert {row.error_code for row in first + second} == {"item_unavailable"}
+
+
+async def test_an_outage_during_the_download_also_spends_nothing(db_session, minio_storage):
+    # Same condition, one call later: `fetch` failing because the provider is
+    # down is not this attachment being missing, and must not be charged to it.
+    await _seed_failure(db_session, "cand-c")
+    adapter = ReplayAdapter(fetch_outage={"cand-c"})
+
+    with pytest.raises(SourceUnavailable):
+        await replay_failed(AsyncSessionLocal, adapter, now=NOW, max_attempts=MAX_ATTEMPTS)
+
+    rows = await _rows(db_session, "cand-c")
+    assert rows[0].attempts == 1
+
+
+async def test_an_aborted_sweep_still_says_it_ran(db_session, minio_storage):
+    """An abort must leave evidence, with the counts it got to.
+
+    Everything that is not a per-item failure used to propagate past the audit
+    write at the end of the sweep, so a sweep that downloaded, ingested and
+    queued real work left zero `resume_sync_*` rows — indistinguishable from a
+    sweep that never happened, which is the one distinction the module exists
+    to preserve.
+    """
+    await _seed_failure(db_session, "cand-ok")
+    await _seed_failure(db_session, "cand-outage")
+    adapter = ReplayAdapter(describe_outage={"cand-outage"})
+
+    with pytest.raises(SourceUnavailable):
+        await replay_failed(AsyncSessionLocal, adapter, now=NOW, max_attempts=MAX_ATTEMPTS)
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_replay_failed")
+        )
+    ).scalars().one()
+    assert audit.payload["error_code"] == "source_unavailable"
+    assert audit.payload["selected"] == 2
+    # The row processed before the outage keeps what it earned, and the audit
+    # says so rather than reporting the whole pass as lost.
+    assert audit.payload["replayed"] == 1
+    assert audit.payload["failed"] == 0
+    for forbidden in ("cand-ok", "cand-outage", ".pdf", "resumes/", "provider is down"):
+        assert forbidden not in str(audit.payload)
+    replayed_rows = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.event_type == "resume_sync_replayed")
+        )
+    ).scalar_one()
+    assert replayed_rows == 0
+
+
+async def test_a_broker_failure_is_audited_as_an_abort(
+    db_session, minio_storage, monkeypatch
+):
+    # `enqueue_job` is outside the per-item try on purpose — a broker failure
+    # must not spend the attempt of a row that just ingested successfully — so
+    # it is one of the exceptions that used to escape with no audit at all.
+    await _seed_failure(db_session, "cand-broker")
+
+    def _broker_is_down(job_id: int) -> None:
+        raise RuntimeError("broker refused the message")
+
+    monkeypatch.setattr(
+        "backend.app.services.sync.replay.enqueue_job", _broker_is_down
+    )
+    adapter = ReplayAdapter()
+
+    with pytest.raises(RuntimeError):
+        await replay_failed(AsyncSessionLocal, adapter, now=NOW, max_attempts=MAX_ATTEMPTS)
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_replay_failed")
+        )
+    ).scalars().one()
+    assert audit.payload["error_code"] == "replay_aborted"
+    assert audit.payload["selected"] == 1
+    assert "broker refused" not in str(audit.payload)
 
 
 async def test_an_item_the_source_no_longer_has_spends_an_attempt(

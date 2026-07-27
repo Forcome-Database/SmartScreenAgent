@@ -83,6 +83,11 @@ async def run_sync(
     Every database write is its own short transaction; the adapter's HTTP call
     and the MinIO upload happen with no transaction open. A stalled provider
     must never hold connections that manual upload also needs.
+
+    A run that cannot finish writes `resume_sync_failed` with an error code and
+    the counts it got to, then re-raises — whether it died at the listing or
+    part-way through the batch. Either way it leaves a record: a run that
+    aborted must never be indistinguishable from a tick that never fired.
     """
     source = adapter.source_name
     actor = f"system:sync:{source}"
@@ -134,144 +139,175 @@ async def run_sync(
     processed: list[SourceItem] = []
     ingested = skipped = failed = 0
 
-    for item in items:
-        try:
-            fetched = await adapter.fetch(item)
-        except ItemUnavailable:
-            failed += 1
-            await _record_failure(
-                session_factory,
-                source=source,
-                external_id=item.external_id,
-                sha256=UNKNOWN_SHA256,
-                error_code="item_unavailable",
-                now=now,
-            )
-            logger.warning(
-                "sync_item_unavailable", source=source, external_id=item.external_id
-            )
-            # Design §9: the cursor moves past every item the run looked at,
-            # failures included. Recovering them is the bounded replay
-            # sweeper's job. Holding the cursor back for a permanently failing
-            # item would re-list and re-download it on every run forever, over
-            # a window that grows until it truncates at the cap.
-            processed.append(item)
-            continue
-
-        async with session_factory() as session:
-            # The dedupe key is the exact triple (design §7), so the content
-            # hash has to be in hand: this is checked after the transfer and
-            # before the job, and what it saves is the MinerU parse and the LLM
-            # spend that the job would trigger.
-            seen = await already_ingested(
-                session,
-                source=source,
-                external_id=item.external_id,
-                sha256=fetched.sha256,
-            )
-            await session.commit()
-        if seen:
-            skipped += 1
-            processed.append(item)
-            continue
-
-        try:
-            async with session_factory() as session:
-                job, created = await ingest_upload(
-                    UploadFile(
-                        file=io.BytesIO(fetched.content),
-                        filename=fetched.filename,
-                        size=len(fetched.content),
-                    ),
-                    db=session,
-                    validator=UploadValidator(),
-                    scanner=scanner,
-                    storage=ResumeStorageService(),
-                    jobs=IngestionJobService(session),
+    try:
+        for item in items:
+            try:
+                fetched = await adapter.fetch(item)
+            except ItemUnavailable:
+                failed += 1
+                await _record_failure(
+                    session_factory,
                     source=source,
-                    source_external_id=item.external_id,
-                    jd_code=item.jd_code,
-                    actor=actor,
+                    external_id=item.external_id,
+                    sha256=UNKNOWN_SHA256,
+                    error_code="item_unavailable",
+                    now=now,
                 )
-                # `created is False` means an active job already covers these
-                # bytes; the ledger still points at it, or the next run would
-                # pay to download and parse them all over again.
-                await record_item(
+                logger.warning(
+                    "sync_item_unavailable", source=source, external_id=item.external_id
+                )
+                # Design §9: the cursor moves past every item the run looked at,
+                # failures included. Recovering them is the bounded replay
+                # sweeper's job. Holding the cursor back for a permanently failing
+                # item would re-list and re-download it on every run forever, over
+                # a window that grows until it truncates at the cap.
+                processed.append(item)
+                continue
+
+            async with session_factory() as session:
+                # The dedupe key is the exact triple (design §7), so the content
+                # hash has to be in hand: this is checked after the transfer and
+                # before the job, and what it saves is the MinerU parse and the LLM
+                # spend that the job would trigger.
+                seen = await already_ingested(
                     session,
                     source=source,
                     external_id=item.external_id,
                     sha256=fetched.sha256,
-                    outcome="ingested",
-                    job_id=job.id,
-                    now=now,
                 )
                 await session.commit()
-        except UploadValidationError:
-            # Design §16.3: recruitment attachments are not guaranteed to be
-            # formats WP1 accepts. A rejected file is one bad item, not a
-            # reason to abandon the batch.
-            failed += 1
-            await _record_failure(
-                session_factory,
-                source=source,
-                external_id=item.external_id,
-                sha256=fetched.sha256,
-                error_code="unsupported_attachment",
-                now=now,
-            )
-            # Design §9: see the `item_unavailable` branch above.
+            if seen:
+                skipped += 1
+                processed.append(item)
+                continue
+
+            try:
+                async with session_factory() as session:
+                    job, created = await ingest_upload(
+                        UploadFile(
+                            file=io.BytesIO(fetched.content),
+                            filename=fetched.filename,
+                            size=len(fetched.content),
+                        ),
+                        db=session,
+                        validator=UploadValidator(),
+                        scanner=scanner,
+                        storage=ResumeStorageService(),
+                        jobs=IngestionJobService(session),
+                        source=source,
+                        source_external_id=item.external_id,
+                        jd_code=item.jd_code,
+                        actor=actor,
+                    )
+                    # `created is False` means an active job already covers these
+                    # bytes; the ledger still points at it, or the next run would
+                    # pay to download and parse them all over again.
+                    await record_item(
+                        session,
+                        source=source,
+                        external_id=item.external_id,
+                        sha256=fetched.sha256,
+                        outcome="ingested",
+                        job_id=job.id,
+                        now=now,
+                    )
+                    await session.commit()
+            except UploadValidationError:
+                # Design §16.3: recruitment attachments are not guaranteed to be
+                # formats WP1 accepts. A rejected file is one bad item, not a
+                # reason to abandon the batch.
+                failed += 1
+                await _record_failure(
+                    session_factory,
+                    source=source,
+                    external_id=item.external_id,
+                    sha256=fetched.sha256,
+                    error_code="unsupported_attachment",
+                    now=now,
+                )
+                # Design §9: see the `item_unavailable` branch above.
+                processed.append(item)
+                continue
+            except Exception as exc:
+                failed += 1
+                await _record_failure(
+                    session_factory,
+                    source=source,
+                    external_id=item.external_id,
+                    sha256=fetched.sha256,
+                    error_code="ingestion_failed",
+                    now=now,
+                )
+                logger.error(
+                    "sync_item_ingestion_failed",
+                    source=source,
+                    external_id=item.external_id,
+                    error_type=type(exc).__name__,
+                )
+                # Design §9: see the `item_unavailable` branch above.
+                processed.append(item)
+                continue
+
+            if created:
+                # A reused job already has a message in flight; a second one would
+                # parse the same file twice.
+                enqueue_job(job.id)
+            ingested += 1
             processed.append(item)
-            continue
-        except Exception as exc:
-            failed += 1
-            await _record_failure(
-                session_factory,
-                source=source,
-                external_id=item.external_id,
-                sha256=fetched.sha256,
-                error_code="ingestion_failed",
-                now=now,
-            )
-            logger.error(
-                "sync_item_ingestion_failed",
-                source=source,
-                external_id=item.external_id,
-                error_type=type(exc).__name__,
-            )
-            # Design §9: see the `item_unavailable` branch above.
-            processed.append(item)
-            continue
 
-        if created:
-            # A reused job already has a message in flight; a second one would
-            # parse the same file twice.
-            enqueue_job(job.id)
-        ingested += 1
-        processed.append(item)
+        advanced = next_cursor(cursor, processed)
 
-    advanced = next_cursor(cursor, processed)
-
-    async with session_factory() as session:
-        await write_cursor(session, source, value=advanced, now=now)
-        session.add(
-            AuditLog(
-                event_type="resume_sync_completed",
-                actor=actor,
-                target_type="sync",
-                payload={
-                    "source": source,
-                    "cursor_from": cursor.isoformat(),
-                    "cursor_to": advanced.isoformat(),
-                    "listed": len(items),
-                    "ingested": ingested,
-                    "skipped": skipped,
-                    "failed": failed,
-                    "truncated": truncated,
-                    "dropped_at_least": dropped_at_least,
-                },
+        async with session_factory() as session:
+            await write_cursor(session, source, value=advanced, now=now)
+            session.add(
+                AuditLog(
+                    event_type="resume_sync_completed",
+                    actor=actor,
+                    target_type="sync",
+                    payload={
+                        "source": source,
+                        "cursor_from": cursor.isoformat(),
+                        "cursor_to": advanced.isoformat(),
+                        "listed": len(items),
+                        "ingested": ingested,
+                        "skipped": skipped,
+                        "failed": failed,
+                        "truncated": truncated,
+                        "dropped_at_least": dropped_at_least,
+                    },
+                )
             )
+            await session.commit()
+    except Exception as exc:
+        # Everything above this point can have committed items and published
+        # Celery messages already, so an abort here is not "the run did not
+        # happen": it is a partial run whose cursor was never written. Without
+        # this row it leaves no `resume_sync_*` evidence at all — neither
+        # completed nor failed — and an operator cannot tell it from a Beat
+        # tick that never fired. The cursor stays unwritten deliberately: the
+        # next run re-opens the same window and the ledger deduplicates
+        # whatever already landed.
+        await _audit(
+            session_factory,
+            event_type="resume_sync_failed",
+            actor=actor,
+            payload={
+                "source": source,
+                "cursor_from": cursor.isoformat(),
+                "listed": len(items),
+                "ingested": ingested,
+                "skipped": skipped,
+                "failed": failed,
+                "error_code": "run_aborted",
+            },
         )
-        await session.commit()
+        logger.error(
+            "resume_sync_failed",
+            source=source,
+            error_code="run_aborted",
+            error_type=type(exc).__name__,
+        )
+        raise
 
     logger.info(
         "resume_sync_completed",

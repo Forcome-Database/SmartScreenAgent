@@ -80,7 +80,25 @@ class ResumeSourceAdapter(Protocol):
         recovery is a recruiter attaching the resume later, an edit that need
         not bump the candidate record's timestamp.
 
-        Raises `ItemUnavailable` when the source has the lookup but not this
-        item, and `SourceCapabilityUnavailable` when it has no such lookup.
+        Three failures, three meanings, and the sweeper answers each one
+        differently — so an implementation that conflates them destroys data:
+
+        - `ItemUnavailable` — the source has the lookup and answered "not
+          here". A real per-item failure; the sweeper spends one of that item's
+          bounded attempts.
+        - `SourceCapabilityUnavailable` — this adapter has no such lookup at
+          all. A fact about the adapter; the sweeper spends nothing and stops.
+        - `SourceUnavailable` — the provider itself is down, or the credential
+          is gone. A fact about the source, true of every item and of none in
+          particular. The sweeper spends nothing and aborts the pass, exactly
+          as `run_sync` does when `list_changed` raises it.
+
+        The last one is the trap. A transport error — connection refused, 500,
+        timeout — is NOT `ItemUnavailable`, however per-item the call site
+        looks: raised once per row during an outage it burns every failed row's
+        attempts down to `SYNC_MAX_ITEM_ATTEMPTS` and makes them all terminal,
+        which is permanent silent loss of precisely the rows replay exists to
+        rescue, caused by a condition that was about no item at all. Map
+        transport failures to `SourceUnavailable` and let the pass abort.
         """
         ...

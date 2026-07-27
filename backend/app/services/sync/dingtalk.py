@@ -329,6 +329,23 @@ class DingTalkRecruitmentAdapter:
             # runner catches `ItemUnavailable` here and nothing else, and a raw
             # transport error escaping mid-loop leaves items already committed
             # and enqueued with no cursor write and no audit row at all.
+            #
+            # `ItemUnavailable` is correct HERE and only here. This mapping is
+            # per-item because the caller is the runner, which is already
+            # inside a listed window: one item's download failing costs that
+            # item an attempt and the batch continues.
+            #
+            # WHEN `describe` IS BOUND TO A REAL ENDPOINT, IT MUST NOT COPY
+            # THIS MAPPING. Replay calls `describe` (and then `fetch`) once per
+            # failed ledger row, so a provider outage would raise here for
+            # EVERY row, spending an attempt on each; at
+            # `SYNC_MAX_ITEM_ATTEMPTS=3` and a 3600s sweep, roughly three hours
+            # of downtime drives the entire failed queue terminal without one
+            # genuine per-item failure. Transport-level failures on the replay
+            # path — connection refused, 5xx, timeout — must raise
+            # `SourceUnavailable`, which aborts the pass and spends nothing.
+            # Reserve `ItemUnavailable` for the source answering "not here"
+            # (a 404, or an empty candidate row).
             raise ItemUnavailable("attachment download failed") from exc
         if not content:
             raise ItemUnavailable("attachment download returned no bytes")
