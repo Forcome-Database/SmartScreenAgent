@@ -200,9 +200,17 @@ def parse_candidates_page(payload: dict) -> tuple[list[SourceItem], dict[str, st
     runner caps a run and the cursor picks up the remainder next time — which
     is true *because* `list_changed` sorts oldest-first before it truncates.
     Without that sort a newest-first feed would lose every item the cap
-    dropped, permanently and silently. With it, an unread `hasMore` costs
-    observability only (`SyncReport.truncated` under-reports a server-paged
-    run), never data.
+    dropped, permanently and silently.
+
+    That sort protects the page we were *given*. It cannot protect against the
+    server truncating first: if the endpoint honours `maxResults`, orders
+    newest-first, and more rows match `since` than we asked for, everything
+    below the returned page is never listed again and `truncated` reports
+    `dropped_at_least: 1` while far more were lost. The page order is
+    UNVERIFIED (design §16.1 row G), so that condition is unruled-out rather
+    than ruled out — see row E. Reading `hasMore` and auditing it would turn
+    that silence into a signal without building pagination against a field
+    nobody has seen.
 
     The URLs are returned separately so `SourceItem` carries no transport
     detail; the adapter keeps them and the runner never sees them.
