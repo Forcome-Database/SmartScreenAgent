@@ -4,15 +4,42 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import func, select
 
 from backend.app.config import get_settings
-from backend.app.models import JD, Candidate, RuleVersion, Score, User
+from backend.app.models import JD, AuditLog, Candidate, RuleVersion, Score, User
 from backend.app.security.crypto import encrypt_pii
 from backend.app.security.jwt import create_access_token
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 NOW = datetime.now(timezone.utc)
+
+# Planted in `_seed_score`, one per kind of thing design §11.3 forbids a tool
+# from returning. Every tool's output is scanned for all of them.
+#
+# Note what is *not* here: `resume_judge_v1`, the `prompt_version` seeded
+# alongside the judge dimensions. WP7 scanned for the substring "resume" and
+# false-positived on exactly that legitimate value, so the blacklist names
+# whole seeded secrets and the field-set assertions — not a substring sweep —
+# are what prove nothing else came back.
+SEEDED_SECRETS = (
+    "private-name",
+    "private-phone",
+    "private-email",
+    "private/object/key.pdf",
+    "quotable evidence",
+    "private reasoning",
+    "private interview question",
+    "private-hard-filter-rule",
+    "private-rule-dimension",
+)
+
+
+def _assert_no_seeded_secret(payload: object) -> None:
+    rendered = str(payload)
+    for secret in SEEDED_SECRETS:
+        assert secret not in rendered, f"{secret!r} leaked into {rendered!r}"
 
 
 async def _service_headers(db_session) -> dict[str, str]:
@@ -37,9 +64,13 @@ async def _seed_score(db_session) -> tuple[Candidate, Score]:
     )
     db_session.add(version)
     await db_session.flush()
+    jd.active_rule_version_id = version.id
     candidate = Candidate(
         source="upload",
         name_cipher=encrypt_pii("private-name"),
+        phone_cipher=encrypt_pii("private-phone"),
+        email_cipher=encrypt_pii("private-email"),
+        raw_file_key="private/object/key.pdf",
         pii_hash=uuid4().hex,
         extracted_json={},
     )
@@ -51,9 +82,14 @@ async def _seed_score(db_session) -> tuple[Candidate, Score]:
         rule_version_id=version.id,
         total_score=70,
         grade="L1",
-        hard_filter_result={},
-        rule_dimensions={},
+        hard_filter_result={
+            "passed": True,
+            "unknown_filter_ids": [],
+            "audit_entries": [{"rule": "private-hard-filter-rule"}],
+        },
+        rule_dimensions={"items": [{"id": "years", "note": "private-rule-dimension"}]},
         judge_dimensions={
+            "prompt_version": "resume_judge_v1",
             "dimensions": [
                 {
                     "id": "independence",
@@ -62,8 +98,9 @@ async def _seed_score(db_session) -> tuple[Candidate, Score]:
                     "confidence": 0.9,
                     "evidence_quotes": ["quotable evidence"],
                     "reasoning": "private reasoning",
+                    "suggested_interview_questions": ["private interview question"],
                 }
-            ]
+            ],
         },
     )
     db_session.add(score)
@@ -184,3 +221,99 @@ async def test_an_unprovisioned_service_user_is_refused(db_session):
 
     with pytest.raises(McpUnauthorized):
         await resolve_mcp_user(db_session, get_settings().MCP_SERVICE_TOKEN)
+
+
+async def test_score_summary_returns_an_exact_field_set(db_session):
+    from backend.app.mcp.tools import score_summary
+
+    _candidate, score = await _seed_score(db_session)
+
+    summary = await score_summary(db_session, score_id=score.id)
+
+    assert summary is not None
+    # An exact set, not a substring sweep: WP7 learned that scanning for
+    # "resume" false-positives on the legitimate value "resume_judge_v1",
+    # which `_seed_score` plants in this very payload.
+    assert set(summary) == {
+        "score_id",
+        "jd_code",
+        "total_score",
+        "grade",
+        "hard_filter_rejected",
+        "dimensions",
+    }
+    assert set(summary["dimensions"][0]) == {"id", "tier", "score"}
+    assert summary["hard_filter_rejected"] is False
+    _assert_no_seeded_secret(summary)
+
+
+async def test_score_summary_reads_nothing_it_would_have_to_audit(db_session):
+    """The tool is not the operator route with fields removed.
+
+    `get_score_detail` returns the quotes and records a `score_detail_read`
+    audit row because doing so is a PII event. This reads a projection that
+    cannot carry them, so there is nothing to audit — and an absent audit row
+    is the observable proof it did not go through that service.
+    """
+    from backend.app.mcp.tools import score_summary
+
+    _candidate, score = await _seed_score(db_session)
+    before = (await db_session.execute(select(func.count()).select_from(AuditLog))).scalar_one()
+
+    await score_summary(db_session, score_id=score.id)
+
+    # Autoflush means an audit row merely *added* to the session would be
+    # counted here too, so this catches an uncommitted one as well.
+    after = (await db_session.execute(select(func.count()).select_from(AuditLog))).scalar_one()
+    assert after == before
+    assert await score_summary(db_session, score_id=-1) is None
+
+
+async def test_top_candidates_exposes_ids_not_identities(db_session):
+    from backend.app.mcp.tools import score_summary, top_candidates
+
+    _candidate, score = await _seed_score(db_session)
+    summary = await score_summary(db_session, score_id=score.id)
+    assert summary is not None
+
+    rows = await top_candidates(db_session, jd_code=str(summary["jd_code"]), n=10, days=7)
+
+    assert rows
+    assert set(rows[0]) == {"candidate_id", "total_score", "grade", "scored_at"}
+    assert rows[0]["candidate_id"] == score.candidate_id
+    _assert_no_seeded_secret(rows)
+
+
+async def test_list_jds_returns_an_exact_field_set(db_session):
+    from backend.app.mcp.tools import list_jds
+
+    await _seed_score(db_session)
+
+    rows = await list_jds(db_session)
+
+    assert rows
+    assert set(rows[0]) == {"jd_code", "name", "active_rule_version"}
+    assert rows[0]["active_rule_version"] == "v1"
+    _assert_no_seeded_secret(rows)
+
+
+async def test_operations_summary_returns_an_exact_field_set(db_session):
+    from backend.app.mcp.tools import operations_summary
+    from backend.app.services.operations.reporting import InvalidOperationsWindow
+
+    await _seed_score(db_session)
+
+    summary = await operations_summary(db_session, window="7d")
+
+    assert set(summary) == {"window", "known_cost_cny", "attempt_count", "budgets"}
+    assert summary["window"] == "7d"
+    # Money is a string on the wire, as it is throughout the WP7 API.
+    assert isinstance(summary["known_cost_cny"], str)
+    assert summary["budgets"]
+    for budget in summary["budgets"]:
+        assert set(budget) == {"scope", "state", "spend_cny"}
+        assert isinstance(budget["spend_cny"], str)
+    _assert_no_seeded_secret(summary)
+
+    with pytest.raises(InvalidOperationsWindow):
+        await operations_summary(db_session, window="all-time")
