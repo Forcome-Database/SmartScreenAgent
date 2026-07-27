@@ -12,6 +12,15 @@ from backend.app.services.llm.pricing import (
     parse_price_book,
 )
 
+# The WP8 sync tasks' own time limits. `backend/app/tasks/wp8.py` carries them
+# on its three decorators and explains what the two numbers buy; they are
+# DECLARED here because `Settings` has to validate the Beat interval against the
+# hard one, and `config.py` cannot import `tasks.wp8` — that module imports
+# `celery_app`, which imports this one. Putting them here makes the single
+# source of truth point the way the dependency already runs.
+SYNC_SOFT_TIME_LIMIT_SECONDS = 1500
+SYNC_HARD_TIME_LIMIT_SECONDS = 1740
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -156,6 +165,38 @@ class Settings(BaseSettings):
                 prices.require(self.CROSS_ENGINE_MODEL)
         except (InvalidPriceBook, ModelPriceMissing) as exc:
             raise ValueError(f"invalid LLM model price configuration: {exc}") from exc
+        return self
+
+    @model_validator(mode="after")
+    def _sync_interval_outlives_the_task_hard_limit(self) -> Settings:
+        """Beat must never publish a tick a previous run could still be serving.
+
+        The sync tasks override the global limit with
+        `SYNC_HARD_TIME_LIMIT_SECONDS`. At or below that, a hung run is still
+        holding a worker when the next tick lands and runs stack — six of them
+        at the 300 s an operator reaching for "watch it closely" would pick.
+        Nothing is corrupted: `record_item` upserts and `create_or_reuse` is
+        atomic. What it costs is every download paid several times over and an
+        audit report that no longer describes one run.
+
+        A refusal rather than a warning, for the same reason `build_mcp_app`
+        refuses to mount on a misconfigured `MCP_SERVICE_ROLE`: a configuration
+        typo that leaves the process running is a typo nobody finds.
+
+        Only while the switch is on. With sync disabled nothing is scheduled,
+        so the interval governs nothing, and refusing to boot over a dormant
+        value would just be a second trap in place of the first.
+        """
+        if (
+            self.DINGTALK_SYNC_ENABLED
+            and self.DINGTALK_SYNC_INTERVAL_SECONDS <= SYNC_HARD_TIME_LIMIT_SECONDS
+        ):
+            raise ValueError(
+                "DINGTALK_SYNC_ENABLED is true, so DINGTALK_SYNC_INTERVAL_SECONDS "
+                f"({self.DINGTALK_SYNC_INTERVAL_SECONDS}) must exceed the sync tasks' "
+                f"hard time limit of {SYNC_HARD_TIME_LIMIT_SECONDS}s; otherwise Beat "
+                "publishes the next tick before a hung run can be killed and runs stack"
+            )
         return self
 
     @property

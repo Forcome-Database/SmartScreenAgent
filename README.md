@@ -618,7 +618,7 @@ uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m ex
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `DINGTALK_SYNC_ENABLED` | `false` | 总开关 |
-| `DINGTALK_SYNC_INTERVAL_SECONDS` | `1800` | 简历拉取与 JD 同步的间隔（秒） |
+| `DINGTALK_SYNC_INTERVAL_SECONDS` | `1800` | 简历拉取与 JD 同步的间隔（秒）。开关打开时**下限 1741**：必须大于任务自带的硬超时 1740 秒，否则进程直接拒绝启动（改小会让 Beat 在上一轮被杀掉之前就发下一次，多轮叠着跑） |
 | `DINGTALK_RECRUITMENT_BASE_URL` | `https://api.dingtalk.com` | 招聘接口 host |
 | `SYNC_OVERLAP_SECONDS` | `300` | 每次从「游标减去该值」起查 |
 | `SYNC_MAX_ITEMS_PER_RUN` | `200` | 单次运行处理条数上限 |
@@ -759,13 +759,17 @@ GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
 只报其中一张表会正好藏掉后一种故障。而 `items` 为**空数组**只说明两张表里一行都没有：要么同步
 从没跑过，要么每一轮都在写下任何东西之前就挂了。**它不等于队列干净**——和上一节 `failed: 0`
 是同一个坑，接口本身分不出「健康且空闲」和「从未运行」，看到空数组请当作后者，并去
-`audit_logs` 查 `resume_sync_failed`。开关关着时这个接口照常可用，读的是历史留下的表。
+`audit_logs` 查 `resume_sync_failed`。但**数据库整体挂掉时 `audit_logs` 里同样一行都没有**——
+审计行走的是同一个 session factory，它写不进去时异常会被吞掉以保住原始故障，证据只留在 worker
+日志里。拉取与 JD 同步搜 `sync_audit_write_failed`，重放清扫搜
+`sync_replay_audit_write_failed`——**两个事件名不同，只搜前者会漏掉整条重放路径**；两者都带
+`error_code=audit_write_failed`。开关关着时这个接口照常可用，读的是历史留下的表。
 
-本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 655 通过；
+本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 659 通过；
 集成 296 通过、零 skip，其中 WP8 同步套件（`test_sync_runner` 25、`test_sync_replay` 19、
 `test_sync_ledger` 8、`test_sync_report_api` 6）58 条；Python 3.10 那条腿
 （`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
-655 通过。
+659 通过。
 设计与计划见
 [`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md)
 和 [`WP8 plan`](docs/superpowers/plans/2026-07-27-wp8-dingtalk-sync.md)。
@@ -849,11 +853,11 @@ Starlette **不会运行被 mount 的子应用的 lifespan**——挂在现有 F
 Hermes 侧能否透传调用者身份，尚未确认，记录在设计 §16.2 留给后续工作包。在那之前不要
 把这个 server 当作「模型可以代替 HR 登录」的入口。
 
-本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 655 通过，
+本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 659 通过，
 其中 MCP 单元测试 `test_mcp_server` 9、`test_mcp_tools` 5、`test_mcp_ceiling` 3；
 集成 296 通过、零 skip，其中 `test_mcp_authorization` 28 条覆盖角色矩阵与内容黑名单；
 Python 3.10 那条腿
 （`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
-655 通过。设计与计划见
+659 通过。设计与计划见
 [`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md) §11
 和 [`WP8 MCP plan`](docs/superpowers/plans/2026-07-27-wp8-mcp-server.md)。

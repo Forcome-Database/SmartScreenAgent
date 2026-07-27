@@ -446,8 +446,17 @@ before pushing. Hosted CI caught exactly this defect in WP7.
 2. Once the administrator grants the recruitment permission, run the
    `external_contract` probe. If the real endpoints differ, change
    `services/sync/dingtalk.py` only.
-3. Enable sync in a low interval against one JD, watch the audit report, then
-   widen.
+3. Enable sync against one JD, watch the audit report, then widen. **Do not
+   shorten the interval to watch it more closely.** `DINGTALK_SYNC_INTERVAL_SECONDS`
+   must exceed the sync tasks' hard time limit (`SYNC_HARD_TIME_LIMIT_SECONDS`,
+   1740 s in `backend/app/config.py`), so the floor while
+   `DINGTALK_SYNC_ENABLED` is true is **1741 s** and the shipped 1800 already
+   sits just above it — a `Settings` validator refuses to construct below that,
+   and the process will not boot. Anything shorter lets Beat publish the next
+   tick before a hung run can be killed, stacking concurrent runs that re-pay
+   every download and make one audit report describe several runs at once.
+   To observe a single run instead, trigger `sync.pull_dingtalk` manually with
+   `send_task` and leave the interval alone.
 4. Enable MCP and point one Hermes instance at it.
 
 Rollback is configuration: set either flag to `false`. No data migration is

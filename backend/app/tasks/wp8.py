@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from backend.app.config import get_settings
+from backend.app.config import (
+    SYNC_HARD_TIME_LIMIT_SECONDS,
+    SYNC_SOFT_TIME_LIMIT_SECONDS,
+    get_settings,
+)
 from backend.app.database import AsyncSessionLocal, engine
 from backend.app.tasks.celery_app import celery_app
 
@@ -35,10 +39,25 @@ from backend.app.tasks.celery_app import celery_app
 # `replay.py` and the audit row actually gets written. The 240 s between the two
 # is the budget that write is given before the process is killed outright.
 #
-# Both sit below `DINGTALK_SYNC_INTERVAL_SECONDS` (1800, its default) so a run
-# that hangs is dead before Beat publishes the next tick and runs cannot pile up.
-SYNC_SOFT_TIME_LIMIT_SECONDS = 1500
-SYNC_HARD_TIME_LIMIT_SECONDS = 1740
+# DEPLOYMENT CONSTRAINT on everything the paragraph above claims. Celery delivers
+# a soft limit as `SIGUSR1`, so it is a POSIX-signal feature: on Windows Celery
+# ignores `soft_time_limit` outright, and even on Linux the signal only reaches
+# the task under the PREFORK pool — `--pool=solo` and `--pool=threads` do not
+# deliver it either. Run the worker anywhere in that set and
+# `SoftTimeLimitExceeded` is never raised, no abort handler runs, and the
+# audit-on-timeout guarantee is silently absent while the numbers below still
+# read as if it held. Note that `docker-compose.yml` deliberately does NOT
+# contain worker or beat services (see its comment): the README quick start runs
+# them on the host with the default pool, so "the deployment host is Linux
+# prefork" is a requirement of this file, not something the repo enforces.
+#
+# Both limits sit below `DINGTALK_SYNC_INTERVAL_SECONDS` so a run that hangs is
+# dead before Beat publishes the next tick and runs cannot pile up. That is no
+# longer a hope about the default: `Settings` refuses to construct when the
+# interval does not exceed the hard limit while `DINGTALK_SYNC_ENABLED` is true.
+# The two constants are declared in `backend/app/config.py` for that reason —
+# the validator needs them, and `config.py` cannot import this module without a
+# cycle. They are imported here because these decorators are what they are FOR.
 
 
 @celery_app.task(
