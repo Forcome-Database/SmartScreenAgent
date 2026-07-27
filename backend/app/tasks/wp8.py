@@ -7,8 +7,45 @@ from backend.app.config import get_settings
 from backend.app.database import AsyncSessionLocal, engine
 from backend.app.tasks.celery_app import celery_app
 
+# Why these three tasks override Celery's global 600 s `task_time_limit`.
+#
+# `SYNC_MAX_ITEMS_PER_RUN` is 200, and each item costs an HTTP download (30 s
+# timeout of its own), a temp-file write, a PDF/DOCX parse, a MinIO upload and
+# three DB round trips. A slow provider puts one full run well past 600 s — and
+# Celery's HARD limit kills the child process, so no `except Exception` runs at
+# all: no `resume_sync_failed` row and no cursor write. That is precisely the
+# state this package's audit discipline exists to prevent, a partial run
+# indistinguishable from a tick that never fired, made worse by the operator
+# README teaching people to read a non-moving `cursor_value` as "sync is
+# working".
+#
+# The GLOBAL limit stays at 600 s. Its comment in `celery_app.py` requires it to
+# stay below `INGESTION_LEASE_SECONDS` (900) so a task is never force-killed
+# while its ingestion job's lease still reads as live and the sweeper could
+# reclaim a job the worker still owns. That reasoning does not reach these
+# tasks: they CREATE ingestion jobs, they never hold an ingestion lease. The
+# lease is claimed inside `ingest.parse_and_score`
+# (`IngestionJobService.claim(job_id, lease_seconds=INGESTION_LEASE_SECONDS)`),
+# a different task still under the global limit, and every job created here is
+# committed and handed to `enqueue_job` immediately, so no job's `queued` age is
+# tied to how long this run takes either.
+#
+# SOFT strictly below HARD is the whole point: `SoftTimeLimitExceeded` subclasses
+# `Exception`, so it propagates into the abort handlers in `runner.py` and
+# `replay.py` and the audit row actually gets written. The 240 s between the two
+# is the budget that write is given before the process is killed outright.
+#
+# Both sit below `DINGTALK_SYNC_INTERVAL_SECONDS` (1800, its default) so a run
+# that hangs is dead before Beat publishes the next tick and runs cannot pile up.
+SYNC_SOFT_TIME_LIMIT_SECONDS = 1500
+SYNC_HARD_TIME_LIMIT_SECONDS = 1740
 
-@celery_app.task(name="sync.pull_dingtalk")
+
+@celery_app.task(
+    name="sync.pull_dingtalk",
+    soft_time_limit=SYNC_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=SYNC_HARD_TIME_LIMIT_SECONDS,
+)
 def pull_dingtalk_task() -> dict:
     """Pull one batch of changed recruitment resumes."""
 
@@ -52,7 +89,11 @@ def pull_dingtalk_task() -> dict:
     return asyncio.run(_runner())
 
 
-@celery_app.task(name="sync.pull_jds")
+@celery_app.task(
+    name="sync.pull_jds",
+    soft_time_limit=SYNC_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=SYNC_HARD_TIME_LIMIT_SECONDS,
+)
 def pull_jds_task() -> dict:
     """Create missing JDs and refresh their name/description from the source.
 
@@ -88,7 +129,11 @@ def pull_jds_task() -> dict:
     return asyncio.run(_runner())
 
 
-@celery_app.task(name="sync.replay_failed")
+@celery_app.task(
+    name="sync.replay_failed",
+    soft_time_limit=SYNC_SOFT_TIME_LIMIT_SECONDS,
+    time_limit=SYNC_HARD_TIME_LIMIT_SECONDS,
+)
 def replay_failed_task() -> dict:
     """Re-drive failed ledger items by external id, up to their attempt bound."""
 

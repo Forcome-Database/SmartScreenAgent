@@ -126,27 +126,46 @@ async def replay_failed(
         The counters are read at call time, so the row carries what the pass
         actually accomplished before it died. Counts and an error code only —
         never a candidate id, a filename, an object key, or the text of an
-        exception, any of which can name a real person.
+        exception, any of which can name a real person. That is the WP8
+        `external_id` policy: a `source_external_id` MAY be stored in the ledger
+        and MAY appear in a structlog line; it MUST NOT reach an audit payload,
+        an API response, or an exception message. See `runner._audit`,
+        `dingtalk.py`, and `schemas/sync_report.py` for the other three.
+
+        This row is written through the same `session_factory` that may be WHY
+        the sweep aborted, so the write is guarded: unguarded, it would raise
+        from inside the `except`, leaving the original exception as nothing but
+        a `__context__` and handing Celery the audit-write error as the task's
+        failure. The caller re-raises the original either way; a type name and a
+        fixed code are logged, never a driver message that can quote a row.
         """
-        async with session_factory() as session:
-            session.add(
-                AuditLog(
-                    event_type="resume_sync_replay_failed",
-                    actor=actor,
-                    target_type="sync",
-                    payload={
-                        "source": source,
-                        "selected": selected,
-                        "replayed": replayed,
-                        "failed": failed,
-                        "superseded": superseded,
-                        "undescribable": undescribable,
-                        "max_attempts": max_attempts,
-                        "error_code": error_code,
-                    },
+        try:
+            async with session_factory() as session:
+                session.add(
+                    AuditLog(
+                        event_type="resume_sync_replay_failed",
+                        actor=actor,
+                        target_type="sync",
+                        payload={
+                            "source": source,
+                            "selected": selected,
+                            "replayed": replayed,
+                            "failed": failed,
+                            "superseded": superseded,
+                            "undescribable": undescribable,
+                            "max_attempts": max_attempts,
+                            "error_code": error_code,
+                        },
+                    )
                 )
+                await session.commit()
+        except Exception as exc:
+            logger.error(
+                "sync_replay_audit_write_failed",
+                source=source,
+                error_code="audit_write_failed",
+                error_type=type(exc).__name__,
             )
-            await session.commit()
 
     try:
         for index, (row_id, external_id, stored_sha) in enumerate(pending):
@@ -293,6 +312,29 @@ async def replay_failed(
             if created:
                 enqueue_job(job.id)
             replayed += 1
+
+        # INSIDE the guarded region, matching `run_sync`'s completed audit.
+        # Outside it, a sweep whose success row failed to write would leave no
+        # `resume_sync_*` evidence at all — the one outcome both branches of
+        # this handler exist to make impossible.
+        async with session_factory() as session:
+            session.add(
+                AuditLog(
+                    event_type="resume_sync_replayed",
+                    actor=actor,
+                    target_type="sync",
+                    payload={
+                        "source": source,
+                        "selected": selected,
+                        "replayed": replayed,
+                        "failed": failed,
+                        "superseded": superseded,
+                        "undescribable": undescribable,
+                        "max_attempts": max_attempts,
+                    },
+                )
+            )
+            await session.commit()
     except SourceUnavailable:
         # The provider is down — true of every row and of none in particular.
         # No attempt is spent, here or on the rows not yet reached: the pass is
@@ -319,25 +361,6 @@ async def replay_failed(
             error_type=type(exc).__name__,
         )
         raise
-
-    async with session_factory() as session:
-        session.add(
-            AuditLog(
-                event_type="resume_sync_replayed",
-                actor=actor,
-                target_type="sync",
-                payload={
-                    "source": source,
-                    "selected": selected,
-                    "replayed": replayed,
-                    "failed": failed,
-                    "superseded": superseded,
-                    "undescribable": undescribable,
-                    "max_attempts": max_attempts,
-                },
-            )
-        )
-        await session.commit()
 
     logger.info(
         "resume_sync_replayed",

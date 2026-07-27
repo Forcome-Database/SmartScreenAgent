@@ -27,6 +27,42 @@ def test_wp8_tasks_are_registered_under_their_published_names() -> None:
     )
 
 
+def test_the_wp8_tasks_carry_their_own_time_limits() -> None:
+    """A full run must be able to outlive the global 600 s limit — and still audit.
+
+    `SYNC_MAX_ITEMS_PER_RUN` is 200 and each item costs an HTTP download, a
+    parse, a MinIO upload and three DB round trips, so a slow provider puts one
+    run past the global `task_time_limit`. That limit is HARD: it kills the
+    child process, so no `except Exception` runs, and the run leaves neither
+    `resume_sync_failed` nor a cursor write — indistinguishable from a Beat tick
+    that never fired.
+
+    What makes the override safe rather than merely bigger is the ORDER below:
+    a soft limit strictly under the hard one, so `SoftTimeLimitExceeded` (an
+    ordinary `Exception`) reaches the abort handler with time left to write the
+    row. Asserting the numbers alone would pass just as happily on a soft limit
+    set above the hard one, where the abort handler is never reached at all.
+    """
+    import backend.app.tasks.wp8 as wp8
+
+    for name in ("sync.pull_dingtalk", "sync.replay_failed", "sync.pull_jds"):
+        task = celery_app.tasks[name]
+        assert task.soft_time_limit == wp8.SYNC_SOFT_TIME_LIMIT_SECONDS
+        assert task.time_limit == wp8.SYNC_HARD_TIME_LIMIT_SECONDS
+        # The soft one must fire first, or nothing is ever audited.
+        assert task.soft_time_limit < task.time_limit
+        # And the whole run must be dead before Beat publishes the next tick,
+        # or a slow provider quietly stacks overlapping runs.
+        assert task.time_limit < get_settings().DINGTALK_SYNC_INTERVAL_SECONDS
+        # The global limit is untouched: it is pinned below
+        # `INGESTION_LEASE_SECONDS` so `ingest.parse_and_score` — the task that
+        # actually HOLDS a lease — can never be killed while the sweeper still
+        # reads its job as live.
+        assert task.time_limit > celery_app.conf.task_time_limit
+
+    assert celery_app.conf.task_time_limit == 600
+
+
 def test_sync_is_not_scheduled_while_disabled() -> None:
     # The kill switch must remove the schedule entry, not merely make the task
     # return early: a registered schedule still wakes a worker every interval.

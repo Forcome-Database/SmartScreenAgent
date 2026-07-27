@@ -113,10 +113,11 @@ async def run_sync(
     except SourceUnavailable:
         # The cursor is deliberately left alone so the next run retries the
         # same window. Retrying in-task would only spin on a revoked token.
-        await _audit(
+        await _audit_abort(
             session_factory,
             event_type="resume_sync_failed",
             actor=actor,
+            source=source,
             payload={
                 "source": source,
                 "cursor_from": cursor.isoformat(),
@@ -156,6 +157,9 @@ async def run_sync(
                     error_code="item_unavailable",
                     now=now,
                 )
+                # `external_id` in a LOG line is permitted by the WP8 policy
+                # stated on `_audit` below; the audit payload above carries a
+                # code and nothing else.
                 logger.warning(
                     "sync_item_unavailable", source=source, external_id=item.external_id
                 )
@@ -241,6 +245,8 @@ async def run_sync(
                     error_code="ingestion_failed",
                     now=now,
                 )
+                # Same policy as `sync_item_unavailable` above: `external_id` is
+                # permitted here and forbidden in the audit payload.
                 logger.error(
                     "sync_item_ingestion_failed",
                     source=source,
@@ -290,10 +296,11 @@ async def run_sync(
         # tick that never fired. The cursor stays unwritten deliberately: the
         # next run re-opens the same window and the ledger deduplicates
         # whatever already landed.
-        await _audit(
+        await _audit_abort(
             session_factory,
             event_type="resume_sync_failed",
             actor=actor,
+            source=source,
             payload={
                 "source": source,
                 "cursor_from": cursor.isoformat(),
@@ -383,10 +390,11 @@ async def sync_jd_metadata(
     try:
         jobs = await adapter.list_jobs()
     except SourceUnavailable:
-        await _audit(
+        await _audit_abort(
             session_factory,
             event_type="jd_sync_failed",
             actor=actor,
+            source=source,
             payload={"source": source, "error_code": "source_unavailable"},
         )
         logger.error("jd_sync_failed", source=source, error_code="source_unavailable")
@@ -428,16 +436,29 @@ async def sync_jd_metadata(
                 )
                 changed += 1
             await session.commit()
+        # INSIDE the guarded region, matching `run_sync`'s completed audit. Left
+        # after the `except`, a JD sync whose completion audit failed would
+        # leave no evidence in either direction — no `jd_sync_completed` because
+        # the write died, and no `jd_sync_failed` because nothing was watching.
+        await _audit(
+            session_factory,
+            event_type="jd_sync_completed",
+            actor=actor,
+            payload={"source": source, "listed": len(jobs), "changed": changed},
+        )
     except Exception as exc:
         # Without this row a JD sync that dies leaves no evidence at all — not
         # even the distinction between "the tick never fired" and "the tick
         # fired and the write blew up". Unlike `run_sync`, the whole batch is
-        # one transaction, so the abort rolled everything back; the count is
-        # how far the run got, which is why it is not named `changed`.
-        await _audit(
+        # one transaction, so an abort during it rolled everything back; the
+        # count is how far the run got, which is why it is not named `changed`.
+        # (The one path where the JD writes did commit is a failure of the
+        # completion audit above — still an aborted run, still worth a row.)
+        await _audit_abort(
             session_factory,
             event_type="jd_sync_failed",
             actor=actor,
+            source=source,
             payload={
                 "source": source,
                 "listed": len(jobs),
@@ -453,12 +474,6 @@ async def sync_jd_metadata(
         )
         raise
 
-    await _audit(
-        session_factory,
-        event_type="jd_sync_completed",
-        actor=actor,
-        payload={"source": source, "listed": len(jobs), "changed": changed},
-    )
     logger.info("jd_sync_completed", source=source, listed=len(jobs), changed=changed)
     return changed
 
@@ -485,6 +500,39 @@ async def _record_failure(
         await session.commit()
 
 
+async def _audit_abort(
+    session_factory: SessionFactory,
+    *,
+    event_type: str,
+    actor: str,
+    source: str,
+    payload: dict,
+) -> None:
+    """Write an abort's audit row without letting it replace the abort's cause.
+
+    Every abort path here records through the same `session_factory` that may be
+    WHY the run aborted. Unguarded, the audit write raises from inside the
+    `except`, the original exception survives only as `__context__`, and Celery
+    records the audit-write error as the task's failure — destroying the
+    diagnosis at exactly the moment it is needed, in the handler whose whole
+    purpose is to leave evidence.
+
+    So the audit failure is logged and swallowed, and the caller re-raises the
+    original. A type name and a fixed code only: a database driver's message can
+    quote the row it choked on, and these rows carry candidate identifiers.
+    """
+    try:
+        await _audit(session_factory, event_type=event_type, actor=actor, payload=payload)
+    except Exception as exc:
+        logger.error(
+            "sync_audit_write_failed",
+            source=source,
+            event_type=event_type,
+            error_code="audit_write_failed",
+            error_type=type(exc).__name__,
+        )
+
+
 async def _audit(
     session_factory: SessionFactory,
     *,
@@ -496,6 +544,13 @@ async def _audit(
 
     Payloads carry counts, cursors, and error codes only — never a filename, an
     object key, or anything a candidate supplied.
+
+    WP8 `external_id` policy, one rule across four modules: a
+    `source_external_id` MAY be stored in the ledger and MAY appear in a
+    structlog line (this module does both); it MUST NOT reach an audit payload,
+    an API response, or an exception message. The other three are
+    `services/sync/replay.py`, `services/sync/dingtalk.py`, and
+    `schemas/sync_report.py`.
     """
     async with session_factory() as session:
         session.add(

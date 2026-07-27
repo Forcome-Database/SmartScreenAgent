@@ -24,6 +24,11 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 NOW = datetime.now(timezone.utc)
 REPLAY_SOURCE = "stub-source"
+
+
+class BrokerRefused(Exception):
+    """A distinctive cause, so a test can prove the audit did not replace it."""
+
 OTHER_SOURCE = "other-source"
 MAX_ATTEMPTS = 3
 
@@ -456,6 +461,61 @@ async def test_a_broker_failure_is_audited_as_an_abort(
     assert audit.payload["error_code"] == "replay_aborted"
     assert audit.payload["selected"] == 1
     assert "broker refused" not in str(audit.payload)
+
+
+async def test_a_failing_success_audit_still_leaves_the_sweep_an_audit_row(
+    db_session, minio_storage, monkeypatch
+):
+    """`resume_sync_replayed` must be written INSIDE the guarded region.
+
+    Left outside it, a sweep that downloaded, ingested and queued real work and
+    then failed to write its success row left no `resume_sync_*` evidence at all
+    — the one outcome both branches of the abort handler exist to make
+    impossible, re-entered through the success path.
+    """
+    await _seed_failure(db_session, "cand-audit")
+    real_audit_log = AuditLog
+
+    def _audit_log(**kwargs):
+        if kwargs.get("event_type") == "resume_sync_replayed":
+            raise RuntimeError("the audit table is unreachable")
+        return real_audit_log(**kwargs)
+
+    monkeypatch.setattr("backend.app.services.sync.replay.AuditLog", _audit_log)
+
+    with pytest.raises(RuntimeError):
+        await replay_failed(AsyncSessionLocal, ReplayAdapter(), now=NOW, max_attempts=MAX_ATTEMPTS)
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_replay_failed")
+        )
+    ).scalars().one()
+    assert audit.payload["error_code"] == "replay_aborted"
+    # The work the sweep really did is still on the record.
+    assert audit.payload["replayed"] == 1
+    assert "unreachable" not in str(audit.payload)
+
+
+async def test_a_failing_abort_audit_does_not_replace_the_sweeps_own_cause(
+    db_session, minio_storage, monkeypatch
+):
+    # `_audit_abort` writes through the same `session_factory` that may be WHY
+    # the sweep died. Unguarded, the audit-write error becomes the task's
+    # failure and the real cause survives only as `__context__`.
+    await _seed_failure(db_session, "cand-cause")
+
+    def _broker_is_down(job_id: int) -> None:
+        raise BrokerRefused("broker refused the message")
+
+    def _audit_is_down(**kwargs):
+        raise RuntimeError("the audit table is unreachable")
+
+    monkeypatch.setattr("backend.app.services.sync.replay.enqueue_job", _broker_is_down)
+    monkeypatch.setattr("backend.app.services.sync.replay.AuditLog", _audit_is_down)
+
+    with pytest.raises(BrokerRefused):
+        await replay_failed(AsyncSessionLocal, ReplayAdapter(), now=NOW, max_attempts=MAX_ATTEMPTS)
 
 
 async def test_an_item_the_source_no_longer_has_spends_an_attempt(

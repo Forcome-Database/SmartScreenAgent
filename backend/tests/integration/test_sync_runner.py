@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from backend.app.database import AsyncSessionLocal
 from backend.app.models import JD, AuditLog, IngestionJob, SyncCursor, SyncSourceItem
 from backend.app.services.storage.resume_storage import ResumeStorageService
+from backend.app.services.sync import runner as sync_runner
 from backend.app.services.sync.adapter import (
     FetchedResume,
     ItemUnavailable,
@@ -23,6 +24,10 @@ from backend.app.services.sync.runner import run_sync, sync_jd_metadata
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 NOW = datetime.now(timezone.utc)
+
+
+class BrokerRefused(Exception):
+    """A distinctive cause, so a test can prove the audit did not replace it."""
 
 
 def _pdf(marker: str) -> bytes:
@@ -439,6 +444,98 @@ async def test_an_abort_inside_the_batch_still_leaves_an_audit_row(
         await db_session.execute(select(func.count()).select_from(SyncCursor))
     ).scalar_one()
     assert cursors == 0
+
+
+async def test_a_failing_abort_audit_does_not_replace_the_runs_own_cause(
+    db_session, minio_storage, monkeypatch
+):
+    """The audit is written through the session factory that may be WHY it aborted.
+
+    If the database is the failure, the audit write raises from inside the
+    `except`, the run's real cause survives only as `__context__`, and Celery
+    records the audit-write error as the task's failure — destroying the
+    diagnosis at the exact moment it is needed, in the handler whose only job is
+    to leave evidence. The abort must still report what killed the run.
+    """
+
+    def _broker_is_down(job_id: int) -> None:
+        raise BrokerRefused("broker refused the message")
+
+    async def _audit_is_down(*args, **kwargs) -> None:
+        raise RuntimeError("the audit table is unreachable")
+
+    monkeypatch.setattr("backend.app.services.sync.runner.enqueue_job", _broker_is_down)
+    monkeypatch.setattr("backend.app.services.sync.runner._audit", _audit_is_down)
+
+    with pytest.raises(BrokerRefused):
+        await run_sync(
+            AsyncSessionLocal,
+            StubAdapter([_item("c1")]),
+            now=NOW,
+            overlap_seconds=300,
+            max_items=200,
+        )
+
+
+async def test_a_failing_listing_audit_does_not_replace_source_unavailable_either(
+    db_session, minio_storage, monkeypatch
+):
+    # The same trap on the other abort path, where the caller is written to
+    # expect `SourceUnavailable` specifically.
+    async def _audit_is_down(*args, **kwargs) -> None:
+        raise RuntimeError("the audit table is unreachable")
+
+    monkeypatch.setattr("backend.app.services.sync.runner._audit", _audit_is_down)
+
+    with pytest.raises(SourceUnavailable):
+        await run_sync(
+            AsyncSessionLocal, BrokenAdapter(), now=NOW, overlap_seconds=300, max_items=200
+        )
+
+
+async def test_a_jd_sync_whose_completion_audit_fails_is_recorded_as_an_abort(
+    db_session, monkeypatch
+):
+    """A JD sync must leave evidence in one direction or the other.
+
+    The completion audit used to sit after the `except`, so a sync whose
+    `jd_sync_completed` write died left neither row: no completion, because the
+    write failed, and no failure, because nothing was watching. `run_sync`
+    already puts its completed audit inside the guarded region; this is the same
+    property for the JD path.
+    """
+    real_audit = sync_runner._audit
+
+    async def _audit(session_factory, *, event_type: str, actor: str, payload: dict) -> None:
+        if event_type == "jd_sync_completed":
+            raise RuntimeError("the audit table is unreachable")
+        await real_audit(session_factory, event_type=event_type, actor=actor, payload=payload)
+
+    monkeypatch.setattr("backend.app.services.sync.runner._audit", _audit)
+
+    with pytest.raises(RuntimeError):
+        await sync_jd_metadata(
+            AsyncSessionLocal,
+            StubJobAdapter([JobMeta(code="AUDIT_JD", name="仓管员", description="x")]),
+            now=NOW,
+        )
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_failed")
+        )
+    ).scalars().one()
+    assert audit.payload["error_code"] == "run_aborted"
+    assert audit.payload["listed"] == 1
+    assert "unreachable" not in str(audit.payload)
+    completed = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.event_type == "jd_sync_completed")
+        )
+    ).scalar_one()
+    assert completed == 0
 
 
 async def test_the_per_run_cap_is_reported_not_silent(db_session, minio_storage):
