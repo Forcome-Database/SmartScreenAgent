@@ -6,16 +6,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import structlog
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
 from backend.app.config import get_settings
-from backend.app.models import AuditLog
+from backend.app.models import JD, AuditLog
 from backend.app.services.ingestion.intake import enqueue_job, ingest_upload
 from backend.app.services.ingestion.jobs import IngestionJobService
 from backend.app.services.storage import ResumeStorageService
 from backend.app.services.sync.adapter import (
     ItemUnavailable,
+    JobSourceAdapter,
     ResumeSourceAdapter,
     SourceItem,
     SourceUnavailable,
@@ -329,6 +331,71 @@ async def run_sync(
         cursor_from=cursor,
         cursor_to=advanced,
     )
+
+
+async def sync_jd_metadata(
+    session_factory: SessionFactory, adapter: JobSourceAdapter, *, now: datetime
+) -> int:
+    """Create missing JDs and refresh their descriptive fields only.
+
+    Design §10: permitted to create a JD that does not exist and to update
+    `name`/`description`; forbidden to touch `jds.active_rule_version_id`,
+    `jds.status`, or `rule_versions.schema_json`. WP6c gates rule publication
+    behind draft -> What-If -> recorded regression -> publish; a background
+    task able to move the active rule version, or flip a JD's status, would be
+    a back door around that gate.
+
+    That boundary is structural, not a promise kept by omission:
+
+    - `JobMeta` — the adapter's own return type — has no `status` and no
+      `active_rule_version_id` field. There is nothing forbidden for this
+      function to even read off of it.
+    - The write below is `sqlalchemy.update(JD)` naming exactly `name` and
+      `description` in one `.values()` call — never a loaded `JD` ORM instance
+      with every mapped column, forbidden ones included, sitting on it ready
+      to be set by a stray line added elsewhere in the function. Widening the
+      write to a third column means widening this one `.values()` call, in
+      full view of anyone reading or reviewing it.
+
+    `now` matches the signature style of `run_sync` for a future caller (e.g.
+    a scheduled task) that wants a stable instant to pass through; this
+    function writes no audit row and no ledger row, so it does not read it.
+
+    `adapter.list_jobs()` is the only network call this function makes, and it
+    runs before the session below is opened — no business transaction is ever
+    held across it, matching every other WP8 sync entry point.
+    """
+    jobs = await adapter.list_jobs()
+    changed = 0
+    async with session_factory() as session:
+        for job in jobs:
+            existing = (
+                await session.execute(
+                    select(JD.id, JD.name, JD.description).where(JD.code == job.code)
+                )
+            ).one_or_none()
+            if existing is None:
+                session.add(
+                    JD(
+                        code=job.code,
+                        name=job.name,
+                        description=job.description,
+                        status="active",
+                    )
+                )
+                changed += 1
+                continue
+            existing_id, existing_name, existing_description = existing
+            if (existing_name, existing_description) == (job.name, job.description):
+                continue
+            await session.execute(
+                update(JD)
+                .where(JD.id == existing_id)
+                .values(name=job.name, description=job.description)
+            )
+            changed += 1
+        await session.commit()
+    return changed
 
 
 async def _record_failure(

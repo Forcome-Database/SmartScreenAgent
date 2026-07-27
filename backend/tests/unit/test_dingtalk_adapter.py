@@ -12,6 +12,7 @@ import respx
 
 from backend.app.services.sync.adapter import (
     ItemUnavailable,
+    JobMeta,
     SourceCapabilityUnavailable,
     SourceItem,
     SourceUnavailable,
@@ -20,10 +21,12 @@ from backend.app.services.sync.dingtalk import (
     MISSING_ATTACHMENT_FILENAME,
     DingTalkRecruitmentAdapter,
     parse_candidates_page,
+    parse_jobs_page,
 )
 
 FIXTURES = Path(__file__).parents[1] / "contracts" / "dingtalk-recruitment" / "v1.0"
 CANDIDATES_URL = "https://api.dingtalk.com/v1.0/recruitment/candidates"
+JOBS_URL = "https://api.dingtalk.com/v1.0/recruitment/jobs"
 DOWNLOAD_URL = "https://example.invalid/d/1001"
 SINCE = datetime(2026, 7, 27, tzinfo=timezone.utc)
 
@@ -116,6 +119,84 @@ def test_a_numeric_job_code_reaches_the_pipeline_as_a_string() -> None:
     items, _ = parse_candidates_page(_row(jobCode=8801))
 
     assert items[0].jd_code == "8801"
+
+
+# --------------------------------------------------------------------------
+# JD metadata (WP8 §10) — a separate page shape, no cursor, no download
+# --------------------------------------------------------------------------
+
+
+def test_a_normal_jobs_page_maps_every_documented_field() -> None:
+    jobs = parse_jobs_page(_load("jobs-page"))
+
+    assert jobs == [
+        JobMeta(code="FOREIGN_TRADE", name="外贸业务员", description="负责海外客户开发与订单跟进"),
+        JobMeta(code="WAREHOUSE_CLERK", name="仓库文员", description=""),
+    ]
+
+
+def test_an_empty_jobs_page_is_not_an_error() -> None:
+    assert parse_jobs_page({"hasMore": False, "nextCursor": None, "list": []}) == []
+
+
+def test_a_job_row_missing_job_code_raises() -> None:
+    # A JD synced with no code can never be matched against a resume's
+    # `SourceItem.jd_code` on any later run.
+    with pytest.raises(ValueError, match="jobCode"):
+        parse_jobs_page({"list": [{"name": "外贸业务员", "description": ""}]})
+
+
+def test_a_job_row_missing_name_raises() -> None:
+    # `jds.name` is NOT NULL; failing here gives a clear cause instead of an
+    # IntegrityError surfacing from deep inside the sync path.
+    with pytest.raises(ValueError, match="name"):
+        parse_jobs_page({"list": [{"jobCode": "FOREIGN_TRADE"}]})
+
+
+def test_a_job_row_with_no_description_becomes_an_empty_string() -> None:
+    jobs = parse_jobs_page({"list": [{"jobCode": "FOREIGN_TRADE", "name": "外贸业务员"}]})
+
+    assert jobs[0].description == ""
+
+
+@respx.mock
+async def test_list_jobs_calls_the_documented_endpoint() -> None:
+    route = respx.get(JOBS_URL).mock(return_value=httpx.Response(200, json=_load("jobs-page")))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    jobs = await adapter.list_jobs()
+
+    assert [j.code for j in jobs] == ["FOREIGN_TRADE", "WAREHOUSE_CLERK"]
+    assert route.calls[0].request.headers["x-acs-dingtalk-access-token"] == "corp-token-1"
+
+
+@respx.mock
+async def test_a_jobs_listing_transport_failure_becomes_source_unavailable() -> None:
+    # `sync_jd_metadata` catches `SourceUnavailable` only; a raw transport
+    # error escaping here would surface as an unhandled exception instead.
+    respx.get(JOBS_URL).mock(side_effect=httpx.ReadTimeout("timeout"))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    with pytest.raises(SourceUnavailable):
+        await adapter.list_jobs()
+
+
+@respx.mock
+async def test_a_jobs_listing_http_status_becomes_source_unavailable() -> None:
+    respx.get(JOBS_URL).mock(return_value=httpx.Response(500, json={"code": "InternalError"}))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    with pytest.raises(SourceUnavailable):
+        await adapter.list_jobs()
+
+
+@respx.mock
+async def test_a_jobs_payload_not_matching_the_recorded_shape_is_source_unavailable() -> None:
+    respx.get(JOBS_URL).mock(return_value=httpx.Response(200, json={"result": {"items": []}}))
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    with pytest.raises(SourceUnavailable):
+        await adapter.list_jobs()
 
 
 # --------------------------------------------------------------------------

@@ -1,0 +1,16 @@
+{
+  "hasMore": false,
+  "nextCursor": null,
+  "list": [
+    {
+      "jobCode": "FOREIGN_TRADE",
+      "name": "外贸业务员",
+      "description": "负责海外客户开发与订单跟进"
+    },
+    {
+      "jobCode": "WAREHOUSE_CLERK",
+      "name": "仓库文员",
+      "description": ""
+    }
+  ]
+}

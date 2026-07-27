@@ -44,6 +44,7 @@ from backend.app.services.dingtalk.oauth import DingTalkCorpTokenClient
 from backend.app.services.sync.adapter import (
     FetchedResume,
     ItemUnavailable,
+    JobMeta,
     SourceCapabilityUnavailable,
     SourceItem,
     SourceUnavailable,
@@ -51,6 +52,8 @@ from backend.app.services.sync.adapter import (
 
 # UNVERIFIED — design §8.2, no oas-ref, absent from the OAS read on 2026-07-27.
 CANDIDATES_PATH = "/v1.0/recruitment/candidates"
+# UNVERIFIED, same status as CANDIDATES_PATH — see the module docstring.
+JOBS_PATH = "/v1.0/recruitment/jobs"
 # VERIFIED — the DingTalk v1.0 credential header, same one `oauth.py` uses.
 ACCESS_TOKEN_HEADER = "x-acs-dingtalk-access-token"
 REQUEST_TIMEOUT_SECONDS = 30.0
@@ -229,6 +232,42 @@ def parse_candidates_page(payload: dict) -> tuple[list[SourceItem], dict[str, st
     return items, urls
 
 
+def parse_jobs_page(payload: dict) -> list[JobMeta]:
+    """Map one documented page of recruitment jobs into `JobMeta`.
+
+    UNVERIFIED shape, by the same standard as `parse_candidates_page` (design
+    §8.2 names no jobs endpoint at all, so this is an extrapolation from the
+    candidates shape, not a documented one): `list[]` of rows carrying
+    `jobCode`, `name`, and `description`.
+
+    Identity and display name are required, the description is not:
+
+    - A row missing `jobCode` or `name` **raises**. A JD synced with no code
+      cannot be matched to a resume's `SourceItem.jd_code` on any later run,
+      and one with no name would violate `jds.name NOT NULL` at the database
+      boundary instead of failing here with a clear cause.
+    - A missing `description` becomes `""` rather than raising: WP6c already
+      treats a JD with no description as ordinary, and it is not a field
+      anything downstream keys on.
+
+    No `active_rule_version_id` and no `status` are read here because
+    `JobMeta` has no such fields — see its docstring in `adapter.py`.
+    """
+    rows = payload.get("list")
+    if not isinstance(rows, list):
+        raise ValueError("recruitment jobs page is missing list")
+
+    jobs: list[JobMeta] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("recruitment job row is not an object")
+        code = str(_require(row, "jobCode"))
+        name = str(_require(row, "name"))
+        description = _optional_text(row.get("description"))
+        jobs.append(JobMeta(code=code, name=name, description=description))
+    return jobs
+
+
 class DingTalkRecruitmentAdapter:
     """DingTalk recruitment source, satisfying `ResumeSourceAdapter`.
 
@@ -307,6 +346,29 @@ class DingTalkRecruitmentAdapter:
         # live probe records which one the real endpoint uses.
         items.sort(key=lambda item: item.updated_at)
         return items[:limit]
+
+    async def list_jobs(self) -> list[JobMeta]:
+        """List every recruitment job as JD metadata — see `parse_jobs_page`.
+
+        Unlike `list_changed`, this has no cursor and no cap: WP8 §10 syncs JD
+        *metadata*, a small, low-churn set, not a growing stream of candidates,
+        so there is nothing here for the bounded-cap and cursor machinery to
+        protect against.
+        """
+        url = f"{self._settings.DINGTALK_RECRUITMENT_BASE_URL}{JOBS_PATH}"
+        try:
+            token = await self._token()
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+                response = await client.get(url, headers={ACCESS_TOKEN_HEADER: token})
+                response.raise_for_status()
+                payload = response.json()
+            return parse_jobs_page(payload)
+        except Exception as exc:
+            # Deliberately total, same reasoning as `list_changed`: this is the
+            # only call `sync_jd_metadata` makes, so a raw transport error
+            # escaping here would surface as an unhandled exception instead of
+            # the `SourceUnavailable` its caller is written to expect.
+            raise SourceUnavailable("recruitment job listing failed") from exc
 
     async def fetch(self, item: SourceItem) -> FetchedResume:
         download_url = self._download_urls.get(item.external_id)

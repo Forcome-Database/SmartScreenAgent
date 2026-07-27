@@ -21,6 +21,7 @@ silently in production.
 | `candidates-page.json` | A normal page: `hasMore`, `nextCursor`, `list[]` of `candidateId`/`updateTime`/`jobCode`/`resume{fileName,fileType,downloadUrl}` |
 | `candidates-empty.json` | An empty result is not an error |
 | `candidates-malformed.json` | A row missing `candidateId` must raise, never yield `None` |
+| `jobs-page.json` | A normal JD metadata page: `list[]` of `jobCode`/`name`/`description`, for WP8 §10 JD sync |
 
 `hasMore` and `nextCursor` are recorded but deliberately unused: the adapter does
 not page (WP8 §9.1 caps a run at `SYNC_MAX_ITEMS_PER_RUN` and the cursor picks up

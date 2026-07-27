@@ -32,6 +32,23 @@ class FetchedResume:
     content_type: str
 
 
+@dataclass(frozen=True)
+class JobMeta:
+    """One JD as the source describes it: identity and descriptive text only.
+
+    Deliberately has no `status` and no rule-version field. Design §10 permits
+    JD metadata sync to create a JD and refresh `name`/`description`, and
+    forbids it from touching `active_rule_version_id`, `rule_versions.schema_json`,
+    or `jds.status` — WP6c's gated publish workflow owns those. Keeping this
+    type narrow means there is nothing forbidden for a caller to even read off
+    of it, let alone write.
+    """
+
+    code: str
+    name: str
+    description: str
+
+
 class SourceUnavailable(Exception):
     """Listing failed: credentials, permission, or the provider itself."""
 
@@ -102,3 +119,22 @@ class ResumeSourceAdapter(Protocol):
         transport failures to `SourceUnavailable` and let the pass abort.
         """
         ...
+
+
+class JobSourceAdapter(Protocol):
+    """A JD-metadata origin — deliberately a second, separate port.
+
+    Not a method added to `ResumeSourceAdapter`. That port is implemented by
+    `runner.py`'s `run_sync`, `replay.py`, and `dingtalk.py`, all reviewed and
+    approved, and is about resumes: listing changed candidates, fetching one,
+    re-deriving one by id. JD metadata is a different capability with a
+    different shape (no cursor, no per-item fetch, no replay), and widening the
+    resume port would force every existing implementation and test double —
+    including the ones already approved — to grow a `list_jobs` it has no use
+    for. `DingTalkRecruitmentAdapter` satisfies both ports; nothing requires an
+    adapter to.
+    """
+
+    source_name: str
+
+    async def list_jobs(self) -> list[JobMeta]: ...

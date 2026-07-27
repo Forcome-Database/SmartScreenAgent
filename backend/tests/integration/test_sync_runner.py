@@ -546,6 +546,44 @@ async def test_the_completed_audit_carries_counts_not_candidate_data(db_session,
     assert "Zhang" not in str(audit.payload)
 
 
+async def test_jd_sync_never_touches_governed_rule_state(db_session, minio_storage):
+    from backend.app.models import JD, RuleVersion
+    from backend.app.services.sync.runner import sync_jd_metadata
+
+    jd = JD(code="GOV_TEST", name="旧名称", description="旧描述", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    version = RuleVersion(
+        jd_id=jd.id, version="v1", published_at=NOW, schema_json={"jd_code": "GOV_TEST"}
+    )
+    db_session.add(version)
+    await db_session.flush()
+    jd.active_rule_version_id = version.id
+    await db_session.commit()
+    pinned = jd.active_rule_version_id
+
+    class JobAdapter:
+        source_name = "dingtalk"
+
+        async def list_jobs(self):
+            from backend.app.services.sync.adapter import JobMeta
+
+            return [JobMeta(code="GOV_TEST", name="新名称", description="新描述")]
+
+    jd_id = jd.id
+    updated = await sync_jd_metadata(AsyncSessionLocal, JobAdapter(), now=NOW)
+    await db_session.commit()
+    db_session.expire_all()
+    reloaded = await db_session.get(JD, jd_id)
+
+    assert updated == 1
+    assert reloaded.name == "新名称"
+    # WP6c gates rule publication behind draft -> What-If -> regression. A
+    # background sync able to move the active version would be a back door.
+    assert reloaded.active_rule_version_id == pinned
+    assert reloaded.status == "active"
+
+
 async def test_a_failing_sync_does_not_block_manual_upload(
     client, db_session, auth_headers, minio_storage, valid_pdf_bytes
 ):
