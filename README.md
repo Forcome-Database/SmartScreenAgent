@@ -770,6 +770,7 @@ GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
 `test_sync_ledger` 8、`test_sync_report_api` 6）58 条；Python 3.10 那条腿
 （`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
 659 通过。
+托管 CI（[PR #11](https://github.com/Forcome-Database/SmartScreenAgent/pull/11)，[run 30247241980](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/30247241980)）三个 job 全绿：integration、unit-and-static 3.10、unit-and-static 3.14，未重跑。
 设计与计划见
 [`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md)
 和 [`WP8 plan`](docs/superpowers/plans/2026-07-27-wp8-dingtalk-sync.md)。
@@ -858,6 +859,8 @@ Hermes 侧能否透传调用者身份，尚未确认，记录在设计 §16.2 �
 集成 296 通过、零 skip，其中 `test_mcp_authorization` 28 条覆盖角色矩阵与内容黑名单；
 Python 3.10 那条腿
 （`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
-659 通过。设计与计划见
+659 通过。
+托管 CI（[PR #11](https://github.com/Forcome-Database/SmartScreenAgent/pull/11)，[run 30247241980](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/30247241980)）三个 job 全绿：integration、unit-and-static 3.10、unit-and-static 3.14，未重跑。
+设计与计划见
 [`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md) §11
 和 [`WP8 MCP plan`](docs/superpowers/plans/2026-07-27-wp8-mcp-server.md)。
