@@ -23,7 +23,27 @@ from starlette.applications import Starlette
 
 from backend.app.config import get_settings
 from backend.app.main import create_app
-from backend.app.mcp.server import McpMountRefused, build_mcp_app, build_mcp_server
+from backend.app.mcp.server import (
+    UNEXPECTED_TOOL_ERROR,
+    McpMountRefused,
+    build_mcp_app,
+    build_mcp_server,
+)
+
+
+async def _call_tool(name: str, arguments: dict[str, object]):
+    """One tool call as a client receives it, driven through the SDK handler.
+
+    Offline: `AsyncSessionLocal()` opens no connection until a statement is
+    issued, and both callers below raise before one is.
+    """
+    result = await build_mcp_server().request_handlers[types.CallToolRequest](
+        types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name=name, arguments=arguments),
+        )
+    )
+    return result.root
 
 
 @pytest.fixture
@@ -127,3 +147,51 @@ async def test_the_server_publishes_exactly_the_four_content_free_tools() -> Non
         "score_summary",
         "operations_summary",
     ]
+
+
+async def test_an_unexpected_failure_reaches_the_model_as_a_fixed_string(monkeypatch) -> None:
+    """The only unbounded string channel in a surface whose whole claim is exactness.
+
+    The SDK catches whatever a handler raises and puts `str(exc)` into
+    `content[0].text`, which a model then reads. A SQLAlchemy `StatementError`
+    ships the statement it failed on, and `operations_summary` reaches into the
+    WP7 reporting service whose exception strings this package does not own —
+    so "no tool returns a name, a quote or an object key" cannot be an absolute
+    unless the error text holds the line too.
+
+    The raised message here is written to look like the leak it stands in for:
+    if the handler is removed, the seeded secret arrives at the caller verbatim.
+    """
+    from backend.app.mcp import server as mcp_server
+
+    async def exploded(db):
+        raise RuntimeError(
+            "(psycopg.errors.UndefinedColumn) [SQL: SELECT name_cipher ...] "
+            "[parameters: {'name': 'private-name'}]"
+        )
+
+    monkeypatch.setattr(mcp_server.tools, "list_jds", exploded)
+
+    result = await _call_tool("list_jds", {})
+
+    assert result.isError is True
+    assert result.content[0].text == UNEXPECTED_TOOL_ERROR
+    # `model_dump()` rather than the text block alone: the whole serialised
+    # result is what leaves the process.
+    assert "private-name" not in str(result.model_dump())
+    assert "SELECT" not in str(result.model_dump())
+
+
+async def test_a_value_error_still_reaches_the_model_verbatim() -> None:
+    """The handler above must not swallow the text the three outcomes depend on.
+
+    `top_candidates`'s `None` has to arrive as "no JD with code '...'" rather
+    than as an empty ranking, and that only works while `ValueError` passes
+    through untouched. Asserted here on the one `ValueError` that needs no
+    database; the JD, score and window cases are asserted over real rows in
+    `backend/tests/integration/test_mcp_authorization.py`.
+    """
+    result = await _call_tool("decrypt_candidate", {})
+
+    assert result.isError is True
+    assert result.content[0].text == "unknown tool: 'decrypt_candidate'"

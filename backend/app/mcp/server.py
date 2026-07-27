@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import FastAPI
 from mcp import types
 from mcp.server import Server
@@ -27,9 +28,25 @@ from backend.app.mcp import tools
 from backend.app.mcp.ceiling import routes_admitting_role
 from backend.app.mcp.identity import McpUnauthorized, resolve_mcp_user
 
+logger = structlog.get_logger(__name__)
+
 
 class McpMountRefused(RuntimeError):
     """The configuration would publish a surface the design does not allow."""
+
+
+class McpToolFailed(RuntimeError):
+    """An unexpected tool failure, carrying a message that names nothing."""
+
+
+# The only unbounded string channel out of this package, and it ends at a
+# language model: the SDK catches whatever a handler raises and puts `str(exc)`
+# straight into `content[0].text`. A SQLAlchemy `StatementError` carries the
+# statement it failed on, and `operations_summary` reaches into the WP7
+# reporting service whose exception strings this package does not own. Every
+# tool's field set is exact by construction, and this is what stops the error
+# text from being the one exception to that.
+UNEXPECTED_TOOL_ERROR = "the tool call failed unexpectedly; details are in the server log"
 
 
 # Argument bounds live in the tool functions, not here. `top_candidates`
@@ -150,8 +167,29 @@ def build_mcp_server() -> Server:
 
     @server.call_tool()
     async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        async with AsyncSessionLocal() as db:
-            return await dispatch(db, name, arguments)
+        try:
+            async with AsyncSessionLocal() as db:
+                return await dispatch(db, name, arguments)
+        except ValueError:
+            # Deliberate, and the only text allowed out. The three
+            # `top_candidates` outcomes are told apart by it — `None` has to
+            # arrive as "no JD with code '...'" rather than as a ranking — and
+            # `operations_summary`'s `InvalidOperationsWindow` subclasses it.
+            # Every one of these is raised in this file or in `tools.py` and
+            # quotes back an argument the caller itself supplied.
+            raise
+        except Exception as exc:
+            # Anything else was written by SQLAlchemy, by the WP7 reporting
+            # service, or by a library none of this package's field-set
+            # guarantees cover. Logged the way `services.sync.runner` logs an
+            # abort — an error code and a type name, never the message.
+            logger.error(
+                "mcp_tool_failed",
+                tool=name,
+                error_code="tool_failed",
+                error_type=type(exc).__name__,
+            )
+            raise McpToolFailed(UNEXPECTED_TOOL_ERROR) from exc
 
     return server
 

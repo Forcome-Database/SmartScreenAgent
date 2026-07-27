@@ -652,6 +652,10 @@ async def test_the_operations_summary_wire_payload_keeps_money_a_string(db_sessi
         "budgets",
     }
     assert isinstance(result.structuredContent["known_cost_cny"], str)
+    # Non-empty first, as its three siblings do: a seed that yielded no budgets
+    # would leave the per-budget field-set assertion below running zero times
+    # and this test green while asserting nothing about a budget at all.
+    assert result.structuredContent["budgets"]
     for budget in result.structuredContent["budgets"]:
         assert set(budget) == {"scope", "state", "spend_cny"}
     _assert_no_seeded_secret(result.model_dump())
@@ -683,13 +687,13 @@ async def test_a_finished_sse_session_completes_its_response_exactly_once(
     await _service_headers(db_session)
     monkeypatch.setattr(get_settings(), "MCP_ENABLED", True)
     app = create_app()
-    sent: list[str] = []
+    sent: list[dict] = []
 
     async def receive() -> dict[str, str]:
         return {"type": "http.disconnect"}
 
     async def send(message) -> None:
-        sent.append(message["type"])
+        sent.append(message)
 
     await asyncio.wait_for(
         app(
@@ -716,4 +720,11 @@ async def test_a_finished_sse_session_completes_its_response_exactly_once(
         timeout=30,
     )
 
-    assert sent.count("http.response.start") == 1
+    starts = [message for message in sent if message["type"] == "http.response.start"]
+    assert len(starts) == 1
+    # The status, not just the count. `ServiceTokenGate` answers 401 with
+    # exactly one `http.response.start` too, so counting alone would go green
+    # having never opened a stream — and the service user is found by role with
+    # `.first()`, so a seeding change is enough to make the bearer stop
+    # resolving. The defect this test exists to catch would return unnoticed.
+    assert starts[0]["status"] == 200

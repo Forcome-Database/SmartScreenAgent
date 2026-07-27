@@ -753,6 +753,19 @@ WP8 的另一半，把系统的**统计面**开成一个 MCP server，让模型�
 配好之后还需要在 `users` 表里有一行 `role = mcp_service` 的用户，否则令牌解析不出身份。
 端点是 `GET /mcp/sse` + `POST /mcp/messages/`（SSE transport）。
 
+### 传输层：为什么是 SSE，以及它带着哪两个已知代价
+
+**SSE 是 MCP 规范里已废弃（deprecated）的传输**，现在推荐的是 Streamable HTTP。这里仍然用
+SSE 不是疏忽：`StreamableHTTPSessionManager.run()` 要求一个 lifespan 拥有的 task group，而
+Starlette **不会运行被 mount 的子应用的 lifespan**——挂在现有 FastAPI 应用下面时它根本起不来。
+换成 Streamable HTTP 意味着重新设计 `/mcp` 的挂载方式（给它自己的 lifespan），留作后续工作。
+如果某个客户端只支持新传输，这是要先解决的事。
+
+`SseServerTransport("/messages/")` 构造时**没有传 `security_settings`**，也就是沿用了 SDK 的
+默认值：**DNS rebinding 保护是关闭的**。在私网里由反向代理终结时这是常见姿势，但它是继承来的
+默认而不是做过的决定。**只要 `/mcp` 会被浏览器可达的 origin 碰到，就必须显式设置
+`allowed_hosts` / `allowed_origins`**——决定在哪里终结 `/mcp` 之前需要知道这两件事。
+
 ### 四个工具，以及「无内容」是什么意思
 
 | 工具 | 返回 |
@@ -766,6 +779,14 @@ WP8 的另一半，把系统的**统计面**开成一个 MCP server，让模型�
 这不是靠出口过滤实现的：`score_summary` 的 SQL 在 PostgreSQL 里就把 judge 载荷折成
 `{id, tier, score}`，引文和推理**从来没进过这个进程**。候选人只以 id 出现，把 id 还原成
 人是一次 PII 读取，而服务身份到不了那条路由。
+
+这条「无内容」也覆盖**报错文本**，因为报错文本同样是模型读的。MCP SDK 会把 handler 抛出的
+任何异常做 `str(exc)` 塞进 `content[0].text`——一个 SQLAlchemy 的 `StatementError` 会把整条
+语句带出去。所以 `build_mcp_server` 里的 handler 只放行 `ValueError`（`top_candidates` 的三种
+结局和 `operations_summary` 的非法窗口靠它的文本区分，回显的都是调用方自己给的参数），
+其余一律换成固定串 `the tool call failed unexpectedly; details are in the server log`，
+原始异常按 `services.sync.runner` 记录 abort 的方式落日志：只有 `error_code` 和
+`error_type`，不带 message。
 
 ### 服务身份的天花板
 
