@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 import structlog
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile
 
@@ -350,51 +351,115 @@ async def sync_jd_metadata(
     - `JobMeta` — the adapter's own return type — has no `status` and no
       `active_rule_version_id` field. There is nothing forbidden for this
       function to even read off of it.
-    - The write below is `sqlalchemy.update(JD)` naming exactly `name` and
-      `description` in one `.values()` call — never a loaded `JD` ORM instance
-      with every mapped column, forbidden ones included, sitting on it ready
-      to be set by a stray line added elsewhere in the function. Widening the
-      write to a third column means widening this one `.values()` call, in
-      full view of anyone reading or reviewing it.
+    - Both writes below are Core constructs with an explicit `.values()` —
+      never a loaded `JD` ORM instance with every mapped column, forbidden ones
+      included, sitting on it ready to be set by a stray line added elsewhere
+      in the function. The update names exactly `name` and `description`; the
+      insert names exactly `code`, `name`, `description` and leaves `status` to
+      the column's own `default="active"`, so neither statement can name a
+      governed column without someone widening this one `.values()` call in
+      full view of a diff.
 
-    `now` matches the signature style of `run_sync` for a future caller (e.g.
-    a scheduled task) that wants a stable instant to pass through; this
-    function writes no audit row and no ledger row, so it does not read it.
+    The create is `INSERT ... ON CONFLICT (code) DO NOTHING`, not a plain
+    `session.add`, because `AsyncSessionLocal` is `autoflush=False`: a `JD`
+    added on one iteration is still pending and invisible to the next
+    iteration's `SELECT`, so one duplicated `jobCode` in a page would take the
+    create branch twice and blow the batch up on `jds.code` at commit —
+    rolling back every unrelated JD's legitimate rename, and doing it again on
+    every tick forever, because the next run re-lists the same duplicate. The
+    same statement closes the concurrent-tick race, where two overlapping runs
+    both see `existing is None`.
+
+    `now` matches the signature style of `run_sync` for a caller that wants a
+    stable instant to pass through; the audit rows below carry no timestamp of
+    their own (`AuditLog.created_at` is server-set), so it is not read.
 
     `adapter.list_jobs()` is the only network call this function makes, and it
     runs before the session below is opened — no business transaction is ever
     held across it, matching every other WP8 sync entry point.
     """
-    jobs = await adapter.list_jobs()
+    source = adapter.source_name
+    actor = f"system:sync:{source}"
+    try:
+        jobs = await adapter.list_jobs()
+    except SourceUnavailable:
+        await _audit(
+            session_factory,
+            event_type="jd_sync_failed",
+            actor=actor,
+            payload={"source": source, "error_code": "source_unavailable"},
+        )
+        logger.error("jd_sync_failed", source=source, error_code="source_unavailable")
+        raise
+
     changed = 0
-    async with session_factory() as session:
-        for job in jobs:
-            existing = (
-                await session.execute(
-                    select(JD.id, JD.name, JD.description).where(JD.code == job.code)
-                )
-            ).one_or_none()
-            if existing is None:
-                session.add(
-                    JD(
-                        code=job.code,
-                        name=job.name,
-                        description=job.description,
-                        status="active",
+    try:
+        async with session_factory() as session:
+            for job in jobs:
+                existing = (
+                    await session.execute(
+                        select(JD.id, JD.name, JD.description).where(JD.code == job.code)
                     )
+                ).one_or_none()
+                if existing is None:
+                    created = await session.execute(
+                        pg_insert(JD)
+                        .values(
+                            code=job.code,
+                            name=job.name,
+                            description=job.description,
+                        )
+                        .on_conflict_do_nothing(index_elements=["code"])
+                        .returning(JD.id)
+                    )
+                    # No row back means another run inserted this code between
+                    # the select and here. Nothing was created and nothing was
+                    # changed, so it must not be counted as either.
+                    if created.first() is not None:
+                        changed += 1
+                    continue
+                existing_id, existing_name, existing_description = existing
+                if (existing_name, existing_description) == (job.name, job.description):
+                    continue
+                await session.execute(
+                    update(JD)
+                    .where(JD.id == existing_id)
+                    .values(name=job.name, description=job.description)
                 )
                 changed += 1
-                continue
-            existing_id, existing_name, existing_description = existing
-            if (existing_name, existing_description) == (job.name, job.description):
-                continue
-            await session.execute(
-                update(JD)
-                .where(JD.id == existing_id)
-                .values(name=job.name, description=job.description)
-            )
-            changed += 1
-        await session.commit()
+            await session.commit()
+    except Exception as exc:
+        # Without this row a JD sync that dies leaves no evidence at all — not
+        # even the distinction between "the tick never fired" and "the tick
+        # fired and the write blew up". Unlike `run_sync`, the whole batch is
+        # one transaction, so the abort rolled everything back; the count is
+        # how far the run got, which is why it is not named `changed`.
+        await _audit(
+            session_factory,
+            event_type="jd_sync_failed",
+            actor=actor,
+            payload={
+                "source": source,
+                "listed": len(jobs),
+                "changed_before_abort": changed,
+                "error_code": "run_aborted",
+            },
+        )
+        logger.error(
+            "jd_sync_failed",
+            source=source,
+            error_code="run_aborted",
+            error_type=type(exc).__name__,
+        )
+        raise
+
+    await _audit(
+        session_factory,
+        event_type="jd_sync_completed",
+        actor=actor,
+        payload={"source": source, "listed": len(jobs), "changed": changed},
+    )
+    logger.info("jd_sync_completed", source=source, listed=len(jobs), changed=changed)
     return changed
 
 

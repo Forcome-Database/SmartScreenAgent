@@ -52,6 +52,42 @@ def pull_dingtalk_task() -> dict:
     return asyncio.run(_runner())
 
 
+@celery_app.task(name="sync.pull_jds")
+def pull_jds_task() -> dict:
+    """Create missing JDs and refresh their name/description from the source.
+
+    Deliberately its own task with its own Beat entry, not a step chained onto
+    `sync.pull_dingtalk`. `JOBS_PATH` is a separate unverified endpoint that may
+    not be permission-granted even when the candidates one is, and `list_jobs`
+    maps every failure to `SourceUnavailable`. Chained in-process, a standing
+    403 on jobs would take resume ingestion down with it indefinitely — the
+    exact opposite of this package's exit gate, that sync is additive and never
+    load-bearing.
+    """
+
+    async def _runner() -> dict:
+        settings = get_settings()
+        # Same second line of defence as the pull above: the Beat entry is
+        # absent while the switch is off, but a manual `send_task` is not.
+        if not settings.DINGTALK_SYNC_ENABLED:
+            return {"skipped": "disabled"}
+
+        from backend.app.services.sync.dingtalk import DingTalkRecruitmentAdapter
+        from backend.app.services.sync.runner import sync_jd_metadata
+
+        try:
+            changed = await sync_jd_metadata(
+                AsyncSessionLocal,
+                DingTalkRecruitmentAdapter(),
+                now=datetime.now(timezone.utc),
+            )
+        finally:
+            await engine.dispose()
+        return {"changed": changed}
+
+    return asyncio.run(_runner())
+
+
 @celery_app.task(name="sync.replay_failed")
 def replay_failed_task() -> dict:
     """Re-drive failed ledger items by external id, up to their attempt bound."""

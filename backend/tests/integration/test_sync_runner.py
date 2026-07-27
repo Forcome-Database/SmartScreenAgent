@@ -9,15 +9,16 @@ from pypdf import PdfWriter
 from sqlalchemy import func, select
 
 from backend.app.database import AsyncSessionLocal
-from backend.app.models import AuditLog, IngestionJob, SyncCursor, SyncSourceItem
+from backend.app.models import JD, AuditLog, IngestionJob, SyncCursor, SyncSourceItem
 from backend.app.services.storage.resume_storage import ResumeStorageService
 from backend.app.services.sync.adapter import (
     FetchedResume,
     ItemUnavailable,
+    JobMeta,
     SourceItem,
     SourceUnavailable,
 )
-from backend.app.services.sync.runner import run_sync
+from backend.app.services.sync.runner import run_sync, sync_jd_metadata
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -97,6 +98,30 @@ class BrokenAdapter:
         # See `StubAdapter.describe`: the port has three methods and a double
         # that implements two of them is not the port.
         raise AssertionError("must not be reached")
+
+
+class StubJobAdapter:
+    """A `JobSourceAdapter` double: `source_name` and `list_jobs`, nothing else.
+
+    Deliberately not a `ResumeSourceAdapter` — the JD port is a separate one,
+    and a double that grew `list_changed`/`fetch`/`describe` would stop being
+    evidence of that.
+    """
+
+    source_name = STUB_SOURCE
+
+    def __init__(self, jobs: list[JobMeta]) -> None:
+        self.jobs = jobs
+
+    async def list_jobs(self) -> list[JobMeta]:
+        return list(self.jobs)
+
+
+class BrokenJobAdapter:
+    source_name = STUB_SOURCE
+
+    async def list_jobs(self) -> list[JobMeta]:
+        raise SourceUnavailable("jobs scope not granted")
 
 
 class TrackingSessions:
@@ -571,10 +596,12 @@ async def test_jd_sync_never_touches_governed_rule_state(db_session, minio_stora
             return [JobMeta(code="GOV_TEST", name="新名称", description="新描述")]
 
     jd_id = jd.id
+    version_id = version.id
     updated = await sync_jd_metadata(AsyncSessionLocal, JobAdapter(), now=NOW)
     await db_session.commit()
     db_session.expire_all()
     reloaded = await db_session.get(JD, jd_id)
+    reloaded_version = await db_session.get(RuleVersion, version_id)
 
     assert updated == 1
     assert reloaded.name == "新名称"
@@ -582,6 +609,124 @@ async def test_jd_sync_never_touches_governed_rule_state(db_session, minio_stora
     # background sync able to move the active version would be a back door.
     assert reloaded.active_rule_version_id == pinned
     assert reloaded.status == "active"
+    # The third §10 forbidden target. The rule schema is what actually scores a
+    # candidate; a sync able to rewrite it could change every future score
+    # without a published version, a What-If, or a recorded regression.
+    assert reloaded_version.schema_json == {"jd_code": "GOV_TEST"}
+
+
+async def test_jd_sync_creates_a_missing_jd(db_session):
+    changed = await sync_jd_metadata(
+        AsyncSessionLocal,
+        StubJobAdapter([JobMeta(code="NEW_JD", name="外贸业务员", description="岗位描述")]),
+        now=NOW,
+    )
+    await db_session.commit()
+
+    assert changed == 1
+    created = (await db_session.execute(select(JD).where(JD.code == "NEW_JD"))).scalar_one()
+    assert created.name == "外贸业务员"
+    assert created.description == "岗位描述"
+    # `status` is never named in the insert's `.values()` — the create path is
+    # structurally incapable of naming a §10-forbidden column, exactly like the
+    # update path. This asserts the column default really does fill it in, so
+    # the omission is not quietly writing NULL or leaving the row unusable.
+    assert created.status == "active"
+    assert created.active_rule_version_id is None
+
+
+async def test_a_duplicated_job_code_in_one_page_creates_one_jd_and_does_not_raise(
+    db_session,
+):
+    """One page listing the same `jobCode` twice must not kill JD sync forever.
+
+    `AsyncSessionLocal` is `autoflush=False`, so a `session.add`-ed JD is still
+    pending and invisible to the next iteration's `SELECT`: both iterations take
+    the create branch and the commit violates `jds.code`. The whole batch rolls
+    back — every unrelated JD's legitimate rename with it — and it is not
+    self-healing, because the next tick re-lists the same duplicate and dies
+    identically. The endpoint is unverified, so "the server would not do that"
+    is not an argument available to us.
+    """
+    jobs = [
+        JobMeta(code="DUPE", name="仓管员", description="第一次"),
+        JobMeta(code="DUPE", name="仓管员", description="第一次"),
+    ]
+
+    changed = await sync_jd_metadata(AsyncSessionLocal, StubJobAdapter(jobs), now=NOW)
+    await db_session.commit()
+
+    rows = (
+        (await db_session.execute(select(JD).where(JD.code == "DUPE"))).scalars().all()
+    )
+    assert len(rows) == 1
+    assert rows[0].name == "仓管员"
+    # The second sighting created nothing and changed nothing.
+    assert changed == 1
+
+
+async def test_an_unchanged_jd_is_not_counted_as_changed(db_session):
+    db_session.add(JD(code="SAME", name="仓管员", description="不变", status="active"))
+    await db_session.commit()
+
+    changed = await sync_jd_metadata(
+        AsyncSessionLocal,
+        StubJobAdapter([JobMeta(code="SAME", name="仓管员", description="不变")]),
+        now=NOW,
+    )
+    await db_session.commit()
+
+    # A count that ticked on every listed job would make "the payload shape
+    # drifted and we synced nothing real" indistinguishable from a healthy run.
+    assert changed == 0
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_completed")
+        )
+    ).scalar_one()
+    assert audit.payload["listed"] == 1
+    assert audit.payload["changed"] == 0
+
+
+async def test_a_completed_jd_sync_leaves_counts_an_operator_can_read(db_session):
+    changed = await sync_jd_metadata(
+        AsyncSessionLocal,
+        StubJobAdapter(
+            [
+                JobMeta(code="JD_A", name="甲", description="a"),
+                JobMeta(code="JD_B", name="乙", description="b"),
+            ]
+        ),
+        now=NOW,
+    )
+    await db_session.commit()
+
+    assert changed == 2
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_completed")
+        )
+    ).scalar_one()
+    assert audit.actor == f"system:sync:{STUB_SOURCE}"
+    assert set(audit.payload) == {"source", "listed", "changed"}
+    assert (audit.payload["listed"], audit.payload["changed"]) == (2, 2)
+
+
+async def test_a_failing_jd_sync_leaves_an_audit_row_and_re_raises(db_session):
+    """Its own task now, so a silent failure would have no operator-visible trace."""
+    with pytest.raises(SourceUnavailable):
+        await sync_jd_metadata(AsyncSessionLocal, BrokenJobAdapter(), now=NOW)
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_failed")
+        )
+    ).scalar_one()
+    assert audit.payload["error_code"] == "source_unavailable"
+    # Codes only: the provider's own words are not ours to store.
+    assert "scope not granted" not in str(audit.payload)
+    jds = (await db_session.execute(select(func.count()).select_from(JD))).scalar_one()
+    assert jds == 0
 
 
 async def test_a_failing_sync_does_not_block_manual_upload(

@@ -73,6 +73,15 @@ def build_beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
             "task": "sync.replay_failed",
             "schedule": float(settings.SYNC_REPLAY_INTERVAL_SECONDS),
         }
+        # Its own entry, never chained onto the resume pull: the jobs endpoint
+        # is separately permission-granted, and a standing 403 there must not
+        # be able to stop resume ingestion. Reuses the pull's interval on
+        # purpose — JD metadata changes rarely, and a second knob would only be
+        # one more value to get wrong.
+        schedule["wp8-sync-jds"] = {
+            "task": "sync.pull_jds",
+            "schedule": float(settings.DINGTALK_SYNC_INTERVAL_SECONDS),
+        }
     return schedule
 
 

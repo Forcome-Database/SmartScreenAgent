@@ -22,7 +22,9 @@ def _schedule(*, enabled: bool) -> dict:
 def test_wp8_tasks_are_registered_under_their_published_names() -> None:
     import backend.app.tasks.wp8  # noqa: F401
 
-    assert {"sync.pull_dingtalk", "sync.replay_failed"} <= set(celery_app.tasks)
+    assert {"sync.pull_dingtalk", "sync.replay_failed", "sync.pull_jds"} <= set(
+        celery_app.tasks
+    )
 
 
 def test_sync_is_not_scheduled_while_disabled() -> None:
@@ -33,6 +35,28 @@ def test_sync_is_not_scheduled_while_disabled() -> None:
     assert get_settings().DINGTALK_SYNC_ENABLED is False
     assert "wp8-pull-dingtalk" not in celery_app.conf.beat_schedule
     assert "wp8-replay-failed" not in celery_app.conf.beat_schedule
+    assert "wp8-sync-jds" not in celery_app.conf.beat_schedule
+
+
+def test_the_jd_sync_is_scheduled_independently_of_the_resume_pull() -> None:
+    """JD sync must be its own entry, not a step inside the resume pull.
+
+    `list_jobs` maps every failure to `SourceUnavailable`, and the jobs endpoint
+    is separately permission-granted. Chained in-process, a standing 403 there
+    would take resume ingestion down with it — which is exactly what
+    `test_a_failing_sync_does_not_block_manual_upload` says must never happen.
+    """
+    settings = get_settings()
+    schedule = _schedule(enabled=True)
+
+    assert schedule["wp8-sync-jds"]["task"] == "sync.pull_jds"
+    # Reuses the pull's interval rather than adding a Settings field: JD
+    # metadata changes rarely and the extra knob is not worth the surface.
+    assert schedule["wp8-sync-jds"]["schedule"] == float(
+        settings.DINGTALK_SYNC_INTERVAL_SECONDS
+    )
+    # Two entries, two dispatches: neither can be the other's failure mode.
+    assert schedule["wp8-pull-dingtalk"]["task"] == "sync.pull_dingtalk"
 
 
 def test_the_switch_schedules_both_sync_tasks_when_it_is_on() -> None:
@@ -64,8 +88,9 @@ def test_the_switch_schedules_neither_sync_task_when_it_is_off() -> None:
 
     assert "wp8-pull-dingtalk" not in schedule
     assert "wp8-replay-failed" not in schedule
+    assert "wp8-sync-jds" not in schedule
     assert {entry["task"] for entry in schedule.values()}.isdisjoint(
-        {"sync.pull_dingtalk", "sync.replay_failed"}
+        {"sync.pull_dingtalk", "sync.replay_failed", "sync.pull_jds"}
     )
     assert "ingestion-sweep" in schedule
 
@@ -80,6 +105,7 @@ def test_no_scheduled_task_names_a_wp8_task_while_disabled() -> None:
 
     assert "sync.pull_dingtalk" not in scheduled
     assert "sync.replay_failed" not in scheduled
+    assert "sync.pull_jds" not in scheduled
 
 
 def test_the_wp7_schedules_survive() -> None:
