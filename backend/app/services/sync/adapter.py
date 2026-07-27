@@ -97,6 +97,17 @@ class ResumeSourceAdapter(Protocol):
         recovery is a recruiter attaching the resume later, an edit that need
         not bump the candidate record's timestamp.
 
+        AN IMPLEMENTATION MUST ALSO RECORD WHATEVER `fetch` NEEDS TO REACH THE
+        CONTENT. `SourceItem` carries no transport detail by design, so an
+        adapter that keeps download URLs in a side-map filled only by
+        `list_changed` will return an item its own `fetch` cannot resolve: on
+        the replay path the adapter instance is fresh and that map is empty, so
+        every described row raises `ItemUnavailable`, spends an attempt, and
+        across a sweep drives the whole failed queue terminal — which is the
+        permanent silent loss `SourceCapabilityUnavailable` exists to prevent,
+        re-entered through another door. Returning a well-formed `SourceItem`
+        is only half of satisfying this method.
+
         Three failures, three meanings, and the sweeper answers each one
         differently — so an implementation that conflates them destroys data:
 

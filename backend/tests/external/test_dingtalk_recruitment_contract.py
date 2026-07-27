@@ -40,8 +40,10 @@ from backend.app.services.sync.dingtalk import (
     ACCEPTED_SUFFIXES,
     ACCESS_TOKEN_HEADER,
     CANDIDATES_PATH,
+    MISSING_ATTACHMENT_FILENAME,
     REQUEST_TIMEOUT_SECONDS,
     DingTalkRecruitmentAdapter,
+    list_params,
     parse_candidates_page,
 )
 
@@ -65,6 +67,14 @@ async def test_the_recruitment_endpoint_exists_and_matches_our_parser() -> None:
     for item in items:
         assert item.external_id
         assert item.updated_at.tzinfo is not None
+        if item.filename == MISSING_ATTACHMENT_FILENAME:
+            # A candidate row with no attachment — an ordinary ATS state the
+            # adapter emits deliberately so the cursor can move past it. It
+            # carries no suffix BY DESIGN. Asserting one would turn the first
+            # real page containing such a row into a red probe reading "the
+            # endpoint does not match our parser", discrediting the one
+            # artifact that settles the whole unverified binding.
+            continue
         # The sync path validates on the suffix alone; an item arriving without
         # one would be rejected as `unsupported_attachment` on every run.
         assert PurePosixPath(item.filename).suffix.lower() in ACCEPTED_SUFFIXES
@@ -84,8 +94,11 @@ async def test_the_raw_page_arrives_oldest_first() -> None:
     NAME the order it saw.
 
     The request is issued here rather than through `list_changed` precisely
-    because `list_changed` sorts; the endpoint constants still come from the
-    adapter module, which remains the only place that knows them.
+    because `list_changed` sorts; the endpoint constants and the query itself
+    still come from the adapter module through `list_params`, which remains the
+    only place that knows them. Re-inlining `{"since": ..., "maxResults": ...}`
+    here would be a second copy of two UNVERIFIED facts and would need editing
+    twice the day this probe reports.
     """
     settings = get_settings()
     url = f"{settings.DINGTALK_RECRUITMENT_BASE_URL}{CANDIDATES_PATH}"
@@ -93,7 +106,7 @@ async def test_the_raw_page_arrives_oldest_first() -> None:
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.get(
             url,
-            params={"since": since.isoformat(), "maxResults": 20},
+            params=list_params(since, 20),
             headers={ACCESS_TOKEN_HEADER: TOKEN or ""},
         )
     response.raise_for_status()

@@ -35,6 +35,10 @@ def test_sync_defaults_are_off_and_bounded() -> None:
         ("SYNC_OVERLAP_SECONDS", "-1"),
         ("SYNC_MAX_ITEMS_PER_RUN", "0"),
         ("SYNC_MAX_ITEM_ATTEMPTS", "0"),
+        # The upper bound, which only this field has. `le=10` is what stops a
+        # typo turning the replay sweeper's bounded re-drive into an unbounded
+        # one; a lower bound alone would leave it uncovered.
+        ("SYNC_MAX_ITEM_ATTEMPTS", "11"),
         ("DINGTALK_SYNC_INTERVAL_SECONDS", "0"),
         ("SYNC_REPLAY_INTERVAL_SECONDS", "0"),
     ],

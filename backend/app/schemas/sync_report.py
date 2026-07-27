@@ -9,6 +9,13 @@ from pydantic import BaseModel
 # bytes of their resume; neither answers "is sync working, and what is stuck?",
 # so neither may ever gain a home in this file — nor may a filename, an object
 # key, a ciphertext, or any extracted candidate field.
+#
+# This is one clause of the WP8 `external_id` policy, which is one rule across
+# four modules: a `source_external_id` MAY be stored in the ledger and MAY
+# appear in a structlog line; it MUST NOT reach an audit payload, an API
+# response (this file), or an exception message. The other three are
+# `services/sync/runner.py`, `services/sync/replay.py`, and
+# `services/sync/dingtalk.py`.
 
 
 class SyncSourceReport(BaseModel):
