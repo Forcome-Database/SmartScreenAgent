@@ -599,6 +599,11 @@ WP8 让后台定期从钉钉招聘拉取候选人简历，并把它们交给 WP3
 [`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md) §16.1，
 连带记着「招聘接口没有按 id 查单个候选人的方式」这条发现——它是回放清扫空转的根因。
 
+**22 不是全部。** JD 那一侧的 `/v1.0/recruitment/jobs`（以及它的 `jobCode` / `name` /
+`description` 三个字段）状态与出处完全相同——§16.1 原话是「exactly the same status and
+the same provenance」——只是它由设计 §10 在清单成型之后才补进来，没有计进这个数字。
+所以请把招聘命名空间**整体**当作未验证，而不是「22 条之外的都验过了」。
+
 结算它们的唯一手段，是拿到接口权限后跑实测探针：
 
 ```bash
@@ -635,6 +640,40 @@ uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m ex
 3. 置 `DINGTALK_SYNC_ENABLED=true`，重启 worker 与 beat。
 4. 用 `GET /api/v1/sync/report` 确认游标在推进，且 `failed_terminal_total` 为 0。
 
+### 权限落地当天的第一份检查清单
+
+下面六件事在权限落地之前都咬不到人，落地当天全部同时生效。按这个顺序处理：
+
+1. **先把服务端的分页顺序定下来**（设计 §16.1 的 E 行与 G 行）。`list_changed` 的升序排序
+   只保护「已经拿回来的那一页」。如果服务端自己按 `maxResults` 截断、又是新到旧排，那被
+   截掉的那批永远不会再被列出：游标已经跳到返回页的最大值，而 `truncated` 只会报
+   `dropped_at_least: 1`。探针里的 `test_the_raw_page_arrives_oldest_first` 就是用来记
+   真实顺序的；确认之前不要把 `SYNC_MAX_ITEMS_PER_RUN` 当成安全边界。
+2. **给 `describe` 绑真实接口时，必须同时把 `fetch` 取内容要用的东西一起记下来。**
+   `fetch` 的下载 URL 来自 `self._download_urls`——一张只有 `list_changed` 会填的旁挂表，
+   而回放路径上的适配器实例是新的，这张表是空的。只把 `describe` 绑上、让它返回一个格式
+   正确的 `SourceItem`，每条回放行都会栽在 `ItemUnavailable("no download url for item")`
+   上，白花一次 attempt，几轮之后整个失败队列变成 terminal——正是现在
+   `SourceCapabilityUnavailable` 挡着的那种永久静默丢失，换个门再进来一次。
+   `adapter.py` 的 `describe` 文档里写了这条，运维也需要知道。
+3. **打开回放之前，先给它加一个每轮批次上限。** 今天 `replay_failed` 的选行谓词只有
+   `outcome='failed' AND attempts < SYNC_MAX_ITEM_ATTEMPTS`，没有 `limit`：它是**总量**
+   有界（每行最多试 `SYNC_MAX_ITEM_ATTEMPTS` 次），不是**每轮**有界。积压大的时候，一轮
+   扫描会把积压里的每一行都试一遍。
+4. **重新核 `SYNC_MAX_ITEMS_PER_RUN` 与实测单条成本、以及任务软超时的关系。** 今天是
+   200 条对着 `SYNC_SOFT_TIME_LIMIT_SECONDS = 1500`（硬限 1740），而每条要花一次 HTTP
+   下载（自带 30 秒超时）、一次 MinIO 上传和几次库往返——推算依据写在
+   `backend/app/tasks/wp8.py` 顶部。量到真实耗时之后，要么降条数要么调超时；软超时必须
+   留得下写审计那一步的余量，被硬限杀掉的进程连 `resume_sync_failed` 都写不出来。
+5. **等探针报出真实 host，再回来给 `downloadUrl` 补白名单。** 今天 `_download_headers`
+   只做一件事：URL 不是 HTTPS、或者 host 不等于 `DINGTALK_RECRUITMENT_BASE_URL` 的 host，
+   就不带 token。它保护的是**我们的凭据不外流**，不限制我们会去连哪台机器。真实响应指向
+   哪些 host 现在是未知的，所以此刻写不出白名单；探针给出答案之后再写。
+6. **跑 `backend/tests/external/test_dingtalk_recruitment_contract.py`，并且在翻转 §16.1
+   那些 UNVERIFIED 标记的同一个提交里**，把 `README.md` 和
+   `docs/superpowers/plans/README.md` 里「22 项……未验证」的说法一起改掉。只翻转 §16.1，
+   README 就会在集成已经验证之后，继续告诉运维它没验证。
+
 ### 未评分窗口：同步建出来的 JD 必须先发规则
 
 同步**允许**创建缺失的 JD 并刷新它的 `name` / `description`；**禁止**触碰
@@ -670,8 +709,12 @@ uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m ex
 
 游标推进到**这一轮处理过的所有条目中最新的那个源时间戳**——**失败的条目也计入**。这个值由
 `next_cursor` 在整批跑完之后一次性取最大值算出，不是 `now`，也永不回退。所以失败条目会被游标
-越过，不会留在窗口里等下一轮重新列出，捞回它们是下一节那个回放清扫器的事；运行中途崩溃则
-从上一个好点接着来。运行级失败（权限撤销、凭证过期、provider 宕机）**不推进游标**，
+越过，不会留在窗口里等下一轮重新列出，捞回它们是下一节那个回放清扫器的事。
+
+正因为游标是整批跑完才写的一次，运行中途崩溃时它**根本没被写过**：下一轮从**原来的游标**
+重开同一个窗口，不是从上一个好点接着来。这样是安全的，不只是可以忍——崩溃前已经入库的
+条目都在账本里带着完整的三元组，重开只花一次重列和重下，不会再解析、抽取或评分一次，
+也就是不会再花第二遍钱。运行级失败（权限撤销、凭证过期、provider 宕机）**不推进游标**，
 写一条 `resume_sync_failed` 审计，下一次 Beat tick 重试同一个窗口——任务内不做重试循环，
 碰上权限问题那只会空转。
 
@@ -718,8 +761,11 @@ GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
 是同一个坑，接口本身分不出「健康且空闲」和「从未运行」，看到空数组请当作后者，并去
 `audit_logs` 查 `resume_sync_failed`。开关关着时这个接口照常可用，读的是历史留下的表。
 
-本地门禁：后端 offline 629 通过；WP8 集成套件（`test_sync_runner` 22、`test_sync_replay` 17、
-`test_sync_ledger` 6、`test_sync_report_api` 6）51 通过；Ruff 与 mypy（125 个源文件）干净。
+本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 655 通过；
+集成 296 通过、零 skip，其中 WP8 同步套件（`test_sync_runner` 25、`test_sync_replay` 19、
+`test_sync_ledger` 8、`test_sync_report_api` 6）58 条；Python 3.10 那条腿
+（`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
+655 通过。
 设计与计划见
 [`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md)
 和 [`WP8 plan`](docs/superpowers/plans/2026-07-27-wp8-dingtalk-sync.md)。
@@ -802,3 +848,12 @@ Starlette **不会运行被 mount 的子应用的 lifespan**——挂在现有 F
 的程度——这也是它无内容的另一个原因。按端用户身份授权（谁问就按谁的角色答）取决于
 Hermes 侧能否透传调用者身份，尚未确认，记录在设计 §16.2 留给后续工作包。在那之前不要
 把这个 server 当作「模型可以代替 HR 登录」的入口。
+
+本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 655 通过，
+其中 MCP 单元测试 `test_mcp_server` 9、`test_mcp_tools` 5、`test_mcp_ceiling` 3；
+集成 296 通过、零 skip，其中 `test_mcp_authorization` 28 条覆盖角色矩阵与内容黑名单；
+Python 3.10 那条腿
+（`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
+655 通过。设计与计划见
+[`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md) §11
+和 [`WP8 MCP plan`](docs/superpowers/plans/2026-07-27-wp8-mcp-server.md)。

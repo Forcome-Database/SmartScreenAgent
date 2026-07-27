@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27
 
-**Status:** Draft
+**Status:** Approved
 
 **Work package:** WP8
 
@@ -197,10 +197,22 @@ redundant; together they mean "re-see items cheaply rather than miss them".
 
 ### 8.2 Advancement
 
-The cursor advances to **the source timestamp of the last successfully
-persisted item**, after that item's ingestion job is durable — never to `now`,
-and never only at end of page. A crash mid-page therefore resumes from the last
-good point, and the items after it are re-listed on the next run.
+The cursor advances to **the newest source timestamp among every item the run
+processed, failed ones included** — `max(updated_at)`, computed by
+`ledger.next_cursor` once, after the whole batch, never to `now` and never
+backwards. §9 requires exactly that of the failures: a failed item is one "the
+cursor has moved past", which is why the bounded replay sweeper exists at all.
+
+Because the advance is written once, at the end, a run that dies part-way
+through never writes a cursor. The next run therefore re-opens the **original**
+window — it does not resume from the last good point.
+
+That is safe, not merely tolerable. Every item the dead run did ingest is
+already in the ledger under the exact `(source, source_external_id,
+content_sha256)` triple of §7, so re-opening the window buys a duplicate of
+nothing: no second parse, no second extraction, no second score. The re-run is
+paid for in re-listing and re-downloading, which is the cheap half; §9.1's
+money is never spent twice.
 
 ### 8.3 The cursor is a timestamp
 
@@ -403,8 +415,13 @@ WP2 verified the MinerU official v4 API.
 ### 13.3 Exit-gate assertions
 
 **Idempotent repeat.** Run the same source data twice. The second run reports
-`ingested=0`, `skipped_duplicate=N`, job and candidate counts unchanged, and
-**no fetch call occurs** — proving the saving is money, not just rows.
+`ingested=0`, `skipped_duplicate=N`, and **creates no ingestion job** — so job
+and candidate counts are unchanged and the repeat costs no MinerU parse and no
+LLM call. That is the saving, and it is money rather than rows. The repeat does
+download again, for the reason §9.1 gives: the dedupe key carries the content
+hash, and nothing can know that hash before paying for the transfer. Asserted by
+`test_a_repeat_run_creates_no_job_and_costs_no_parse` in
+`backend/tests/integration/test_sync_runner.py`.
 
 **MCP parity.** Parameterized role matrix per tool, plus a reverse assertion:
 the MCP service identity calling `GET /candidates/{id}` and the raw-file route
@@ -438,7 +455,9 @@ reversed, and the ledger and cursor are additive tables.
 
 ## 15. Exit Criteria
 
-- Repeated synchronization is idempotent and performs no redundant fetch.
+- Repeated synchronization is idempotent: a repeat creates no ingestion job, and
+  therefore pays for no redundant parse, extraction, or score. It does download
+  again, by §9.1's design.
 - MCP tools enforce the same access and audit policy as REST, and no
   PII-authorizing path is reachable over MCP.
 - A sync failure, at run level or item level, never blocks manual upload.
@@ -519,9 +538,9 @@ taken.
 | B | `fileName` carries a file extension | One is derived from the content type or the URL path when it does not (`_resolve_filename`) |
 | C | `downloadUrl` accepts a plain authenticated GET | Any failure → `ItemUnavailable`, one failed item, the batch continues (`fetch`) |
 | D | `downloadUrl` is on the DingTalk origin | Assumed **not**: the token goes out only over HTTPS to the API host, compared by hostname (`_download_headers`, `_comparable_host`) |
-| E | Pagination via `hasMore` / `nextCursor` | Not implemented. With G's sort in place this is an observability gap — `truncated` under-reports a server-paged run — not data loss. Deliberately not built against an unverified field |
+| E | Pagination via `hasMore` / `nextCursor` | Not implemented, and **under G that can lose data silently**. `list_changed` asks for `maxResults = SYNC_MAX_ITEMS_PER_RUN + 1`. If the server honours that limit, orders newest-first, and more items than that match `since`, the page returned is the *newest* ones. G's sort then keeps the oldest `SYNC_MAX_ITEMS_PER_RUN` **of that page** and the cursor advances to their maximum, which sits near the top of the whole changed set: everything between `since` and that point that the server never returned is never listed again. `truncated` fires, but reports `dropped_at_least: 1` while far more were lost. The sort protects the page that arrived; it cannot protect against server-side truncation under an unknown order. `hasMore` is already in the recorded fixture, so **reading it and emitting a distinct audit event** would turn silent loss into a signal without building pagination against an unverified field. That guard does not exist today |
 | F | `since` / `maxResults` are the filter semantics | Nothing. A wrong filter yields a wrong window, and the probe is the only detector |
-| G | **Page ordering** — whether the feed lists oldest-first or newest-first | Depended on **not at all**: the server's order is unknown, so `list_changed` sorts ascending by `updated_at` *before* the run cap truncates. The cap therefore always keeps the oldest end of the window and the cursor advances minimally under either ordering. The probe `test_the_raw_page_arrives_oldest_first` records the raw order on its first real run |
+| G | **Page ordering** — whether the feed lists oldest-first or newest-first | Depended on **not at all for the page that arrives**: the server's order is unknown, so `list_changed` sorts ascending by `updated_at` *before* the run cap truncates. The cap therefore always keeps the oldest end of **the returned page** and the cursor advances minimally under either ordering. It does not reach a page the server itself truncated — see row E. The probe `test_the_raw_page_arrives_oldest_first` records the raw order on its first real run |
 
 **A further finding: the recruitment surface documents no single-candidate
 lookup.** Established 2026-07-27. §8.2 of the source design names the list path
@@ -550,4 +569,10 @@ recruitment namespace is the only unverified surface in the package.
 
 ## 17. Approval
 
-Pending review.
+Approved on 2026-07-27. Approval means implementation may proceed with both
+halves shipped inert — `DINGTALK_SYNC_ENABLED=false` and `MCP_ENABLED=false`.
+
+It does not authorize enabling the sync, and it does not mark WP8 Complete.
+Completion remains blocked until the recruitment permission is granted and the
+`external_contract` probe of §13.1 settles the §16.1 inventory against a real
+response. `docs/superpowers/plans/README.md` records the same status.

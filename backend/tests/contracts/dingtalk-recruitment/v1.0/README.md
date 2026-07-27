@@ -23,9 +23,21 @@ silently in production.
 | `candidates-malformed.json` | A row missing `candidateId` must raise, never yield `None` |
 | `jobs-page.json` | A normal JD metadata page: `list[]` of `jobCode`/`name`/`description`, for WP8 §10 JD sync |
 
-`hasMore` and `nextCursor` are recorded but deliberately unused: the adapter does
-not page (WP8 §9.1 caps a run at `SYNC_MAX_ITEMS_PER_RUN` and the cursor picks up
-the remainder on the next run).
+`hasMore` and `nextCursor` are recorded but deliberately unread: the adapter does
+not page. WP8 §9.1 caps a run at `SYNC_MAX_ITEMS_PER_RUN`, and the cursor picks up
+what *our own* cap left behind — because `list_changed` sorts the page ascending
+before truncating it, so the kept window is the oldest end and the cursor advances
+minimally.
+
+**That is true only of the page the server actually returned.** If the server
+honours `maxResults`, orders newest-first, and holds more matching items than the
+limit, the page we get is the newest ones; the cursor then jumps near the top of
+the changed set and everything the server withheld is never listed again, with
+`truncated` reporting `dropped_at_least: 1`. Design §16.1 row E states the
+condition; row G records that the ordering is unknown. Reading the recorded
+`hasMore` and emitting a distinct audit event would turn that silent loss into a
+signal without building pagination against an unverified field — no such guard
+exists today.
 
 ## When the permission is granted
 
