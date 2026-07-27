@@ -12,6 +12,7 @@ celery_app = Celery(
         "backend.app.tasks.ingest",
         "backend.app.tasks.sweep",
         "backend.app.tasks.wp7",
+        "backend.app.tasks.wp8",
     ],
 )
 
@@ -47,6 +48,21 @@ celery_app.conf.beat_schedule = {
         "schedule": float(settings.CROSS_ENGINE_SWEEP_INTERVAL_SECONDS),
     },
 }
+
+# WP8 sync is scheduled only while the kill switch is on, and the switch is off
+# by default. The entry is ADDED here rather than registered always and skipped
+# inside the task: a registered schedule wakes a worker every interval forever
+# to do nothing, and it puts a live DingTalk pull one config typo away from an
+# unverified endpoint. Absent means absent.
+if settings.DINGTALK_SYNC_ENABLED:
+    celery_app.conf.beat_schedule["wp8-pull-dingtalk"] = {
+        "task": "sync.pull_dingtalk",
+        "schedule": float(settings.DINGTALK_SYNC_INTERVAL_SECONDS),
+    }
+    celery_app.conf.beat_schedule["wp8-replay-failed"] = {
+        "task": "sync.replay_failed",
+        "schedule": float(settings.SYNC_REPLAY_INTERVAL_SECONDS),
+    }
 
 
 @celery_app.task(name="smartscreen.ping")

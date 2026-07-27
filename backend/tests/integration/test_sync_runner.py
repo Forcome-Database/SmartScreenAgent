@@ -479,3 +479,27 @@ async def test_the_completed_audit_carries_counts_not_candidate_data(db_session,
     assert audit.payload["cursor_to"] == report.cursor_to.isoformat()
     # The filename is candidate-supplied and may be a name.
     assert "Zhang" not in str(audit.payload)
+
+
+async def test_a_failing_sync_does_not_block_manual_upload(
+    client, db_session, auth_headers, minio_storage, valid_pdf_bytes
+):
+    """The exit gate: sync is additive, never load-bearing.
+
+    Manual upload is the fallback the whole work package is measured against.
+    A dead provider must leave it untouched — not degraded, not slower, not
+    holding a connection it needs.
+    """
+    with pytest.raises(SourceUnavailable):
+        await run_sync(
+            AsyncSessionLocal, BrokenAdapter(), now=NOW, overlap_seconds=300, max_items=200
+        )
+
+    response = await client.post(
+        "/api/v1/candidates/upload",
+        files={"file": ("manual.pdf", valid_pdf_bytes, "application/pdf")},
+        headers=await auth_headers("hr"),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["job_id"]

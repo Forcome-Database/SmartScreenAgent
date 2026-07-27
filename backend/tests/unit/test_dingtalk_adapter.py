@@ -10,7 +10,12 @@ import httpx
 import pytest
 import respx
 
-from backend.app.services.sync.adapter import ItemUnavailable, SourceItem, SourceUnavailable
+from backend.app.services.sync.adapter import (
+    ItemUnavailable,
+    SourceCapabilityUnavailable,
+    SourceItem,
+    SourceUnavailable,
+)
 from backend.app.services.sync.dingtalk import (
     MISSING_ATTACHMENT_FILENAME,
     DingTalkRecruitmentAdapter,
@@ -603,3 +608,33 @@ async def test_a_missing_url_failure_names_neither_the_item_nor_its_file() -> No
     message = str(caught.value)
     assert "zhang-san" not in message
     assert "cand-9999" not in message
+
+
+@respx.mock
+async def test_describe_refuses_because_the_endpoint_does_not_exist_yet() -> None:
+    """DingTalk cannot look a candidate up by id, and says so as a capability gap.
+
+    Design §8.2 documents exactly one recruitment path — the list — and the OAS
+    read on 2026-07-27 had no `recruitment` namespace at all. Guessing a
+    single-candidate URL would make every replay 404, and the sweeper would
+    count each 404 as a spent attempt until the row went terminal: permanent
+    data loss manufactured entirely out of a guess. It refuses instead, and the
+    sweeper spends no attempt on a refusal.
+    """
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    with pytest.raises(SourceCapabilityUnavailable) as caught:
+        await adapter.describe("cand-1001")
+
+    # No route is registered on the respx mock, so any HTTP call at all would
+    # raise instead of reaching this assertion.
+    assert "cand-1001" not in str(caught.value)
+
+
+async def test_describe_carries_no_candidate_identifier() -> None:
+    adapter = DingTalkRecruitmentAdapter(access_token="corp-token-1")
+
+    with pytest.raises(SourceCapabilityUnavailable) as caught:
+        await adapter.describe("zhang-san-13800138000")
+
+    assert "zhang-san" not in str(caught.value)

@@ -40,6 +40,22 @@ class ItemUnavailable(Exception):
     """One item could not be fetched; the rest of the run continues."""
 
 
+class SourceCapabilityUnavailable(Exception):
+    """The adapter cannot answer this kind of question at all.
+
+    Deliberately NOT a subclass of `ItemUnavailable`. That one means "this item
+    failed", and the replay sweeper answers it by spending one of the item's
+    bounded attempts. This means "this source has no such lookup", which is a
+    fact about the adapter, not about any item — and the remedy is to build the
+    binding, not to retry.
+
+    Conflating them would be silent data loss: an adapter that simply cannot
+    look items up by id would burn every failed row's attempts down to the
+    bound and make them all terminal, destroying exactly the rows the sweeper
+    exists to rescue, without a single real failure having occurred.
+    """
+
+
 class ResumeSourceAdapter(Protocol):
     """A resume origin. Implementations own endpoints; nothing else may."""
 
@@ -48,3 +64,23 @@ class ResumeSourceAdapter(Protocol):
     async def list_changed(self, since: datetime, limit: int) -> list[SourceItem]: ...
 
     async def fetch(self, item: SourceItem) -> FetchedResume: ...
+
+    async def describe(self, external_id: str) -> SourceItem:
+        """Re-derive one item from the source's own identifier.
+
+        This is the only way a failed ledger row can be re-driven. Design §9:
+        "A failed item cannot be rediscovered by the cursor — the cursor has
+        moved past it and the 300-second overlap will not reach back." The
+        ledger keeps `source_external_id` and nothing else usable — no download
+        URL (a pre-signed URL is both candidate-identifying and short-lived)
+        and no source timestamp — so replay must ask by id.
+
+        Asking by id also means a re-attempt does not require the source's
+        `updateTime` to have moved, which matters because the most common real
+        recovery is a recruiter attaching the resume later, an edit that need
+        not bump the candidate record's timestamp.
+
+        Raises `ItemUnavailable` when the source has the lookup but not this
+        item, and `SourceCapabilityUnavailable` when it has no such lookup.
+        """
+        ...

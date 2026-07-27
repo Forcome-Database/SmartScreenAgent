@@ -12,6 +12,15 @@ What IS verified: the corp access token this adapter authenticates with. That
 endpoint (`POST /v1.0/oauth2/accessToken`) is read from the authoritative OAS —
 see `backend.app.services.dingtalk.oauth.DingTalkCorpTokenClient`.
 
+A THIRD fact about this API was established on 2026-07-27 and belongs in the
+same inventory: **the recruitment surface documents no single-candidate
+lookup.** Design §8.2 names the list path and nothing else — no
+`GET /candidates/{id}`, and no id filter on the list. That is a finding about
+the API, not an implementation note, and it is the first thing to re-check when
+the permission is granted, because `describe` (and therefore the whole bounded
+replay of failed items) cannot be bound until it is answered. See `describe`
+below.
+
 The unverified surface is contained here on purpose: this is the only file in
 the codebase that knows these endpoints exist. Recorded fixtures in
 `backend/tests/contracts/dingtalk-recruitment/v1.0/` pin our reading of the
@@ -35,6 +44,7 @@ from backend.app.services.dingtalk.oauth import DingTalkCorpTokenClient
 from backend.app.services.sync.adapter import (
     FetchedResume,
     ItemUnavailable,
+    SourceCapabilityUnavailable,
     SourceItem,
     SourceUnavailable,
 )
@@ -327,6 +337,36 @@ class DingTalkRecruitmentAdapter:
             sha256=sha256(content).hexdigest(),
             filename=item.filename,
             content_type=item.content_type,
+        )
+
+    async def describe(self, external_id: str) -> SourceItem:
+        """Refuse, because DingTalk documents no way to ask.
+
+        The recruitment surface has one documented path — the list (§8.2) — and
+        the OAS read on 2026-07-27 had no `recruitment` namespace at all. There
+        is no single-candidate GET and no id filter to guess from.
+
+        Guessing one would be actively destructive rather than merely wrong. A
+        wrong URL answers 404, `fetch` would never run, and the sweeper would
+        record a spent attempt for every failed row on every pass until each
+        one crossed `SYNC_MAX_ITEM_ATTEMPTS` and stopped being selected —
+        permanent, silent loss of precisely the rows replay exists to recover,
+        manufactured entirely out of a guess. Refusing costs nothing: the rows
+        wait, keeping their attempts and their real error codes, until this is
+        bound for real.
+
+        `SourceCapabilityUnavailable`, not `ItemUnavailable`: the sweeper
+        spends an attempt on the latter and nothing on this one.
+
+        No request is made — deliberately, since there is no endpoint to make it
+        against. When the recruitment permission is granted, this method and its
+        fixture are what change; the sweeper does not.
+        """
+        # `external_id` is a real person's identifier in the recruiting system
+        # and never reaches the message, matching every other raise in this file.
+        raise SourceCapabilityUnavailable(
+            "dingtalk recruitment documents no single-candidate lookup; "
+            "replay stays inert until the recruitment permission is granted"
         )
 
     async def _token(self) -> str:
