@@ -53,6 +53,14 @@ def create_app() -> FastAPI:
     async def root() -> dict[str, str]:
         return {"service": "smartscreen-agent", "status": "ok"}
 
+    # Last, because `build_mcp_app` refuses to mount when the service role is
+    # admitted by any route guard registered above — and imported here so a
+    # deployment with the switch off never loads the MCP SDK at all.
+    if settings.MCP_ENABLED:
+        from backend.app.mcp.server import build_mcp_app
+
+        app.mount("/mcp", build_mcp_app(app))
+
     return app
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -122,6 +123,29 @@ async def _seed_score(db_session) -> tuple[Candidate, Score]:
 
 async def _jd_code(db_session, jd_id: int) -> str:
     return (await db_session.execute(select(JD.code).where(JD.id == jd_id))).scalar_one()
+
+
+async def _call_tool(name: str, arguments: dict[str, object]):
+    """One tool call as a client receives it — not as the tool returns it.
+
+    Goes through the handler the low-level server registers, so what is
+    asserted is the `CallToolResult` that leaves the process: the structured
+    content, the text block serialised beside it, and the error flag. The tool
+    functions' own return values are asserted elsewhere in this file; a
+    serialisation layer that flattened `None` into `[]` would pass every one of
+    those and still lie to a model.
+    """
+    from mcp import types
+
+    from backend.app.mcp.server import build_mcp_server
+
+    result = await build_mcp_server().request_handlers[types.CallToolRequest](
+        types.CallToolRequest(
+            method="tools/call",
+            params=types.CallToolRequestParams(name=name, arguments=arguments),
+        )
+    )
+    return result.root
 
 
 async def test_the_service_role_cannot_reach_pii_routes(client, db_session):
@@ -484,3 +508,212 @@ async def test_operations_summary_returns_an_exact_field_set(db_session):
 
     with pytest.raises(InvalidOperationsWindow):
         await operations_summary(db_session, window="all-time")
+
+
+async def test_mcp_is_not_mounted_while_disabled(client):
+    from backend.app.config import get_settings
+
+    assert get_settings().MCP_ENABLED is False
+
+    # Disabled must mean absent, not merely guarded: an unmounted route cannot
+    # be reached by a misconfigured proxy either.
+    response = await client.post("/mcp", json={})
+
+    assert response.status_code == 404
+
+
+async def test_an_unknown_jd_leaves_as_a_refusal_not_as_an_empty_ranking(db_session):
+    """The whole point of `top_candidates` returning `None`, kept intact on the wire.
+
+    A model handed `null` or `[]` for a code that names no JD reports "there
+    are no top candidates for JD-X" as a fact about a JD that does not exist.
+    So this outcome leaves as an error carrying the code it could not find,
+    which is a claim about the JD and not about any candidate.
+    """
+    await _seed_score(db_session)
+
+    result = await _call_tool("top_candidates", {"jd_code": "MCP_NO_SUCH_JD"})
+
+    assert result.isError is True
+    assert result.structuredContent is None
+    assert result.content[0].text == "no JD with code 'MCP_NO_SUCH_JD'"
+
+
+async def test_a_jd_that_ranks_nobody_leaves_as_an_empty_ranking(db_session):
+    """The other of the three outcomes: the JD exists and ranks nobody.
+
+    This one *is* a claim about candidates, and is answered as data.
+    """
+    await _seed_score(db_session)
+    unpublished = JD(
+        code=f"MCP_{uuid4().hex[:6]}", name="unpublished", description="", status="active"
+    )
+    db_session.add(unpublished)
+    await db_session.commit()
+
+    result = await _call_tool("top_candidates", {"jd_code": unpublished.code})
+
+    assert result.isError is False
+    assert result.structuredContent == {"jd_code": unpublished.code, "candidates": []}
+
+
+async def test_a_window_that_can_contain_nothing_leaves_as_a_refusal(db_session):
+    """The third outcome: a bad argument, told apart from both of the above."""
+    _candidate, seeded = await _seed_score(db_session)
+    jd_code = await _jd_code(db_session, seeded.jd_id)
+
+    result = await _call_tool("top_candidates", {"jd_code": jd_code, "days": 0})
+
+    assert result.isError is True
+    assert result.content[0].text == "days must be at least 1, got 0"
+
+
+async def test_the_top_candidates_wire_payload_carries_ids_and_nothing_else(db_session):
+    """The exact field set of what goes on the wire, not of what the tool returned.
+
+    `result.model_dump()` covers the text block too — the serialisation a model
+    actually reads — so a widening that only reached the unstructured content
+    would fail here.
+    """
+    _candidate, score = await _seed_score(db_session)
+    jd_code = await _jd_code(db_session, score.jd_id)
+
+    result = await _call_tool("top_candidates", {"jd_code": jd_code, "n": 10, "days": 7})
+
+    assert result.isError is False
+    assert set(result.structuredContent) == {"jd_code", "candidates"}
+    assert result.structuredContent["candidates"]
+    for row in result.structuredContent["candidates"]:
+        assert set(row) == {"candidate_id", "total_score", "grade", "scored_at"}
+    _assert_no_seeded_secret(result.model_dump())
+
+
+async def test_the_score_summary_wire_payload_carries_no_evidence(db_session):
+    _candidate, score = await _seed_score(db_session)
+
+    result = await _call_tool("score_summary", {"score_id": score.id})
+
+    assert result.isError is False
+    assert set(result.structuredContent) == {
+        "score_id",
+        "jd_code",
+        "total_score",
+        "grade",
+        "hard_filter_rejected",
+        "dimensions",
+    }
+    assert len(result.structuredContent["dimensions"]) == 2
+    for dimension in result.structuredContent["dimensions"]:
+        assert set(dimension) == {"id", "tier", "score"}
+    _assert_no_seeded_secret(result.model_dump())
+
+
+async def test_a_missing_score_leaves_as_a_refusal_not_as_an_empty_scorecard(db_session):
+    """`score_summary`'s `None` has the same failure mode as `top_candidates`'s."""
+    await _seed_score(db_session)
+
+    result = await _call_tool("score_summary", {"score_id": -1})
+
+    assert result.isError is True
+    assert result.content[0].text == "no score with id -1"
+
+
+async def test_the_list_jds_wire_payload_is_an_object_rather_than_a_bare_list(db_session):
+    """Every tool answers with an object, and it is not a stylistic choice.
+
+    The low-level server routes a returned `dict` to `structuredContent` and
+    serialises it into the text block beside it. Any other iterable it takes
+    for a list of content blocks, which then fails model validation and is
+    reported to the caller as a tool error — so a bare list would turn a
+    working tool into a permanent failure.
+    """
+    await _seed_score(db_session)
+
+    result = await _call_tool("list_jds", {})
+
+    assert result.isError is False
+    assert set(result.structuredContent) == {"jds"}
+    assert result.structuredContent["jds"]
+    for row in result.structuredContent["jds"]:
+        assert set(row) == {"jd_code", "name", "active_rule_version"}
+    _assert_no_seeded_secret(result.model_dump())
+
+
+async def test_the_operations_summary_wire_payload_keeps_money_a_string(db_session):
+    await _seed_score(db_session)
+
+    result = await _call_tool("operations_summary", {"window": "7d"})
+
+    assert result.isError is False
+    assert set(result.structuredContent) == {
+        "window",
+        "known_cost_cny",
+        "attempt_count",
+        "budgets",
+    }
+    assert isinstance(result.structuredContent["known_cost_cny"], str)
+    for budget in result.structuredContent["budgets"]:
+        assert set(budget) == {"scope", "state", "spend_cny"}
+    _assert_no_seeded_secret(result.model_dump())
+
+
+async def test_an_unknown_tool_name_is_refused(db_session):
+    result = await _call_tool("decrypt_candidate", {})
+
+    assert result.isError is True
+    assert result.content[0].text == "unknown tool: 'decrypt_candidate'"
+
+
+async def test_a_finished_sse_session_completes_its_response_exactly_once(
+    db_session, monkeypatch
+):
+    """The SSE endpoint is ASGI-shaped, and that is not a matter of style.
+
+    `connect_sse` has already completed the HTTP response by the time it
+    returns, so a `request -> response` endpoint — the shape the SDK's own
+    example uses, ending in an empty `Response()` — emits a second
+    `http.response.start` after it. That is an unhandled ASGI error on every
+    client disconnect, and under this app's `AccessLogMiddleware` it surfaces
+    as a bare `AssertionError` from inside Starlette rather than as anything
+    naming MCP. Driven here as raw ASGI because the duplicate is a protocol
+    event, invisible to an HTTP client that has already gone away.
+    """
+    from backend.app.main import create_app
+
+    await _service_headers(db_session)
+    monkeypatch.setattr(get_settings(), "MCP_ENABLED", True)
+    app = create_app()
+    sent: list[str] = []
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message) -> None:
+        sent.append(message["type"])
+
+    await asyncio.wait_for(
+        app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "GET",
+                "path": "/mcp/sse",
+                "raw_path": b"/mcp/sse",
+                "root_path": "",
+                "scheme": "http",
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"authorization", f"Bearer {get_settings().MCP_SERVICE_TOKEN}".encode()),
+                ],
+                "client": ("127.0.0.1", 1234),
+                "server": ("testserver", 80),
+            },
+            receive,
+            send,
+        ),
+        timeout=30,
+    )
+
+    assert sent.count("http.response.start") == 1

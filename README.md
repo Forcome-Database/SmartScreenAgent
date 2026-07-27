@@ -723,3 +723,61 @@ GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
 设计与计划见
 [`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md)
 和 [`WP8 plan`](docs/superpowers/plans/2026-07-27-wp8-dingtalk-sync.md)。
+
+## WP8 — MCP 会话式访问
+
+WP8 的另一半，把系统的**统计面**开成一个 MCP server，让模型客户端能问
+「哪些岗位在跑」「这个岗位这周分最高的是谁」「这张评分卡长什么样」「这周花了多少钱」。
+和同步那半一样是纯增量能力，默认**关闭**。
+
+### 开关：关着等于不存在
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `MCP_ENABLED` | `false` | 总开关 |
+| `MCP_SERVICE_TOKEN` | 空 | 客户端要在 `Authorization: Bearer` 里出示的共享令牌 |
+| `MCP_SERVICE_ROLE` | `mcp_service` | 该令牌映射到的服务身份角色 |
+
+开关关着时 `/mcp` **根本不会挂载**——不是挂载了在里面拒绝。所以配错的反向代理也够不到它，
+`POST /mcp` 得到的是 404。进程启动时 MCP SDK 也不会被 import。
+
+开关打开时有两种配置会让进程**直接起不来**，而不是带着问题跑：
+
+- `MCP_SERVICE_ROLE` 出现在**任何一条**路由的 `require_roles` 白名单里。
+  `MCP_SERVICE_ROLE=hr` 会一句话废掉整个天花板，而所有天花板测试仍然全绿——因为它们
+  断言的是「当前配置的那个角色」。这个检查只能放在 `build_mcp_app()`：它在所有路由注册
+  完之后运行，而 `config.py` 不引入循环就看不到路由。
+- `MCP_ENABLED=true` 但 `MCP_SERVICE_TOKEN` 为空。空令牌谁都出示不了，这样的挂载是
+  fail-closed 但永久无用，属于配置写错，必须看起来像配置写错。
+
+配好之后还需要在 `users` 表里有一行 `role = mcp_service` 的用户，否则令牌解析不出身份。
+端点是 `GET /mcp/sse` + `POST /mcp/messages/`（SSE transport）。
+
+### 四个工具，以及「无内容」是什么意思
+
+| 工具 | 返回 |
+|---|---|
+| `list_jds` | 每个岗位的 code、名称、当前 active 规则版本 |
+| `top_candidates` | 某岗位近 `days` 天的高分候选人，**只给 candidate_id** |
+| `score_summary` | 一张评分卡的总分、等级、硬性过滤结论、各维度的 tier 与分数 |
+| `operations_summary` | 某窗口的花费与预算状态（金额是字符串） |
+
+**没有任何工具会返回**姓名、电话、邮箱、密文、对象键、证据引文或推理文本（设计 §11.3）。
+这不是靠出口过滤实现的：`score_summary` 的 SQL 在 PostgreSQL 里就把 judge 载荷折成
+`{id, tier, score}`，引文和推理**从来没进过这个进程**。候选人只以 id 出现，把 id 还原成
+人是一次 PII 读取，而服务身份到不了那条路由。
+
+### 服务身份的天花板
+
+服务角色**不出现在任何一条 REST 路由的角色元组里**（设计 §11.3.2）。工具直接读服务层，
+不发 HTTP 请求，所以没有哪条路由是这个凭据需要的——包括 `GET /api/v1/jds` 这种不碰
+候选人数据的聚合接口。持有真实服务令牌去打 `/api/v1/candidates/{id}` 得到的是 403。
+这条性质由 `backend/tests/unit/test_mcp_ceiling.py` 遍历整张路由表来断言，并由上面那条
+启动检查兜住测试看不见的那种配错。
+
+### 端用户身份透传：推迟
+
+现在是**单一共享服务身份**，不区分是哪个 HR 在提问，所以工具面必须窄到「任何 HR 都能看」
+的程度——这也是它无内容的另一个原因。按端用户身份授权（谁问就按谁的角色答）取决于
+Hermes 侧能否透传调用者身份，尚未确认，记录在设计 §16.2 留给后续工作包。在那之前不要
+把这个 server 当作「模型可以代替 HR 登录」的入口。

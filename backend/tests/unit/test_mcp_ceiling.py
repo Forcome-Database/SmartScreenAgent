@@ -5,14 +5,19 @@ These live in the offline gate rather than beside the HTTP tests in
 database, and the accident they exist to catch — someone naming `mcp_service`
 in a router's `require_roles` tuple — is one a contributor would otherwise
 commit against a green local run.
+
+The walk itself lives in `backend/app/mcp/ceiling.py`, because `build_mcp_app`
+enforces the same property at startup and catches the accident these tests
+cannot: they assert about whatever `MCP_SERVICE_ROLE` they are handed, so
+`MCP_SERVICE_ROLE=hr` in production collapses the ceiling with this file still
+green.
 """
 
 from __future__ import annotations
 
-from fastapi.routing import APIRoute
-
 from backend.app.config import get_settings
 from backend.app.main import app
+from backend.app.mcp.ceiling import api_routes, role_guards, route_methods, routes_admitting_role
 
 # The only routes that carry no `require_roles` guard, each a deliberate
 # choice: the service banner, the unauthenticated login exchange that mints the
@@ -26,34 +31,6 @@ PUBLIC_BY_DESIGN = {
 }
 
 
-def _api_routes() -> list[APIRoute]:
-    return [route for route in app.routes if isinstance(route, APIRoute)]
-
-
-def _methods(route: APIRoute) -> set[str]:
-    return route.methods - {"HEAD", "OPTIONS"}
-
-
-def _role_guards(route: APIRoute) -> list[frozenset[str]]:
-    """Every `require_roles(...)` allow-set reachable from one route.
-
-    Read out of the dependency closure rather than re-derived from the router
-    source, so what is asserted is what FastAPI will actually enforce at
-    request time — including a guard inherited from a nested dependency.
-    """
-    guards: list[frozenset[str]] = []
-    pending = list(route.dependant.dependencies)
-    while pending:
-        dependant = pending.pop()
-        call = getattr(dependant, "call", None)
-        if call is not None and getattr(call, "__qualname__", "").startswith("require_roles."):
-            free_vars = call.__code__.co_freevars
-            cells = call.__closure__ or ()
-            guards.append(frozenset(cells[free_vars.index("allowed")].cell_contents))
-        pending.extend(dependant.dependencies)
-    return guards
-
-
 def test_the_service_role_is_named_by_no_route_guard() -> None:
     """The ceiling, over the whole route table rather than a sample of it.
 
@@ -64,14 +41,7 @@ def test_the_service_role_is_named_by_no_route_guard() -> None:
     """
     service_role = get_settings().MCP_SERVICE_ROLE
 
-    reachable = sorted(
-        f"{method} {route.path}"
-        for route in _api_routes()
-        for method in _methods(route)
-        if any(service_role in guard for guard in _role_guards(route))
-    )
-
-    assert reachable == []
+    assert routes_admitting_role(app.routes, service_role) == []
 
 
 def test_every_route_is_guarded_or_public_by_design() -> None:
@@ -79,14 +49,14 @@ def test_every_route_is_guarded_or_public_by_design() -> None:
 
     This is what makes the assertion above exhaustive rather than a sample: an
     unguarded new route fails here, and so does a refactor that stops
-    `_role_guards` recognizing the guard — every route would then read as
+    `role_guards` recognizing the guard — every route would then read as
     unguarded — so the ceiling assertion can never pass vacuously.
     """
     unguarded = {
         (method, route.path)
-        for route in _api_routes()
-        for method in _methods(route)
-        if not _role_guards(route)
+        for route in api_routes(app.routes)
+        for method in route_methods(route)
+        if not role_guards(route)
     }
 
     assert unguarded == PUBLIC_BY_DESIGN

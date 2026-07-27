@@ -85,6 +85,14 @@ def test_the_score_projection_reads_exactly_three_judge_fields() -> None:
     """
     sql = str(SCORE_SUMMARY_SQL)
 
+    # A wildcard is the one widening both guards miss. `SELECT s.*` names
+    # nothing on the blacklist above, never writes `s.judge_dimensions` so the
+    # extraction counts below are unchanged, and is invisible to the
+    # integration field-set assertions because `score_summary` builds its
+    # output dict from explicit keys — yet every evidence quote would be inside
+    # this process.
+    assert re.search(r"\bs\s*\.\s*\*", sql) is None, "a wildcard would select the quotes"
+
     # Every mention of the judge column, with whatever key it extracts. A bare
     # `s.judge_dimensions` — the wholesale select — matches with an empty key.
     assert re.findall(r"s\.judge_dimensions(\s*->>?\s*'\w+')?", sql) == [
