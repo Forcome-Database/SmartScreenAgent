@@ -269,6 +269,55 @@ async def test_score_summary_reads_nothing_it_would_have_to_audit(db_session):
     assert await score_summary(db_session, score_id=-1) is None
 
 
+async def test_a_hard_filter_rejection_summarises_without_its_reasons(db_session):
+    """The other branch of `hard_filter_rejected`, and a null judge payload.
+
+    A rejected score is stored with `judge_dimensions` NULL and with the
+    filters it failed spelled out beside the flag. The tool reports the flag
+    and none of the reasons: which rule rejected a person is an operator's
+    business, decided against the resume the tool cannot see.
+    """
+    from backend.app.mcp.tools import score_summary
+
+    candidate, seeded = await _seed_score(db_session)
+    # The seeded score already occupies (candidate, jd, rule version), so the
+    # rejection needs a JD of its own.
+    other = JD(code=f"MCP_{uuid4().hex[:6]}", name="other", description="", status="active")
+    db_session.add(other)
+    await db_session.flush()
+    rejected = Score(
+        candidate_id=candidate.id,
+        jd_id=other.id,
+        rule_version_id=seeded.rule_version_id,
+        total_score=0,
+        grade="rejected",
+        hard_filter_result={
+            "rejected": True,
+            "failed_filter_ids": ["age_limit"],
+            "audit_entries": [{"rule": "private-hard-filter-rule"}],
+        },
+        rule_dimensions={},
+        judge_dimensions=None,
+    )
+    db_session.add(rejected)
+    await db_session.commit()
+
+    summary = await score_summary(db_session, score_id=rejected.id)
+
+    assert summary is not None
+    assert set(summary) == {
+        "score_id",
+        "jd_code",
+        "total_score",
+        "grade",
+        "hard_filter_rejected",
+        "dimensions",
+    }
+    assert summary["hard_filter_rejected"] is True
+    assert summary["dimensions"] == []
+    _assert_no_seeded_secret(summary)
+
+
 async def test_top_candidates_exposes_ids_not_identities(db_session):
     from backend.app.mcp.tools import score_summary, top_candidates
 
