@@ -16,6 +16,7 @@ from backend.app.routers import jds as jds_router
 from backend.app.routers import operations as operations_router
 from backend.app.routers import quality as quality_router
 from backend.app.routers import rule_publication as rule_publication_router
+from backend.app.routers import sync_report as sync_report_router
 
 
 def create_app() -> FastAPI:
@@ -46,10 +47,19 @@ def create_app() -> FastAPI:
     app.include_router(quality_router.router)
     app.include_router(batch_report_router.router)
     app.include_router(cross_check_router.router)
+    app.include_router(sync_report_router.router)
 
     @app.get("/")
     async def root() -> dict[str, str]:
         return {"service": "smartscreen-agent", "status": "ok"}
+
+    # Last, because `build_mcp_app` refuses to mount when the service role is
+    # admitted by any route guard registered above — and imported here so a
+    # deployment with the switch off never loads the MCP SDK at all.
+    if settings.MCP_ENABLED:
+        from backend.app.mcp.server import build_mcp_app
+
+        app.mount("/mcp", build_mcp_app(app))
 
     return app
 

@@ -227,3 +227,24 @@ def test_cross_check_numeric_annotations_use_decimal():
     assert hints["secondary_total_score"] == Mapped[Decimal | None]
     assert hints["absolute_diff"] == Mapped[Decimal | None]
     assert hints["threshold_snapshot"] == Mapped[Decimal]
+
+
+def test_wp8_sync_models_expose_required_columns() -> None:
+    from backend.app.models import SyncCursor, SyncSourceItem
+
+    assert {"source", "cursor_value", "last_run_at", "updated_at"} <= set(
+        SyncCursor.__table__.columns.keys()
+    )
+    assert {
+        "source",
+        "source_external_id",
+        "content_sha256",
+        "ingestion_job_id",
+        "outcome",
+        "error_code",
+        "attempts",
+        "first_seen_at",
+        "last_seen_at",
+    } <= set(SyncSourceItem.__table__.columns.keys())
+    constraints = {c.name for c in SyncSourceItem.__table__.constraints}
+    assert "uq_sync_source_items_identity" in constraints

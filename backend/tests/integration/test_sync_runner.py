@@ -1,0 +1,850 @@
+from __future__ import annotations
+
+import io
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256 as _sha256
+
+import pytest
+from pypdf import PdfWriter
+from sqlalchemy import func, select
+
+from backend.app.database import AsyncSessionLocal
+from backend.app.models import JD, AuditLog, IngestionJob, SyncCursor, SyncSourceItem
+from backend.app.services.storage.resume_storage import ResumeStorageService
+from backend.app.services.sync import runner as sync_runner
+from backend.app.services.sync.adapter import (
+    FetchedResume,
+    ItemUnavailable,
+    JobMeta,
+    SourceItem,
+    SourceUnavailable,
+)
+from backend.app.services.sync.runner import run_sync, sync_jd_metadata
+
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+NOW = datetime.now(timezone.utc)
+
+
+class BrokerRefused(Exception):
+    """A distinctive cause, so a test can prove the audit did not replace it."""
+
+
+def _pdf(marker: str) -> bytes:
+    """A real PDF, because WP1 validation opens it with pypdf.
+
+    The marker only rides along as document metadata, which is enough to give
+    every candidate distinct bytes and therefore a distinct sha256.
+    """
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.add_metadata({"/Title": marker})
+    stream = io.BytesIO()
+    writer.write(stream)
+    return stream.getvalue()
+
+
+# Deliberately not "dingtalk": a runner that hardcoded the only source we plan
+# to build would still pass every test below if the stub agreed with it.
+STUB_SOURCE = "stub-source"
+
+
+class StubAdapter:
+    source_name = STUB_SOURCE
+
+    def __init__(self, items: list[SourceItem], *, fail_ids: set[str] | None = None):
+        self.items = items
+        self.fail_ids = fail_ids or set()
+        self.fetched: list[str] = []
+        self.listed = 0
+        self.since_values: list[datetime] = []
+
+    async def list_changed(self, since: datetime, limit: int) -> list[SourceItem]:
+        self.listed += 1
+        self.since_values.append(since)
+        return [i for i in self.items if i.updated_at >= since][:limit]
+
+    async def fetch(self, item: SourceItem) -> FetchedResume:
+        if item.external_id in self.fail_ids:
+            raise ItemUnavailable("attachment missing")
+        self.fetched.append(item.external_id)
+        content = _pdf(item.external_id)
+        return FetchedResume(
+            content=content,
+            sha256=_sha256(content).hexdigest(),
+            filename=item.filename,
+            content_type=item.content_type,
+        )
+
+    async def describe(self, external_id: str) -> SourceItem:
+        """Present so the double is still a `ResumeSourceAdapter`, and loud.
+
+        A pull works from the listing; only the replay sweeper re-derives an
+        item by id. A `run_sync` that reached for this would be doing the
+        sweeper's job, and the test suite should say so rather than quietly
+        agree. A real adapter answers here, raising `ItemUnavailable` when the
+        source has the lookup but not the item, `SourceCapabilityUnavailable`
+        when it has no such lookup, and `SourceUnavailable` when the provider
+        itself is down.
+        """
+        raise AssertionError("run_sync must not describe; replay owns re-drive")
+
+
+class BrokenAdapter:
+    source_name = STUB_SOURCE
+
+    async def list_changed(self, since: datetime, limit: int) -> list[SourceItem]:
+        raise SourceUnavailable("permission revoked")
+
+    async def fetch(self, item: SourceItem) -> FetchedResume:
+        raise AssertionError("must not be reached")
+
+    async def describe(self, external_id: str) -> SourceItem:
+        # See `StubAdapter.describe`: the port has three methods and a double
+        # that implements two of them is not the port.
+        raise AssertionError("must not be reached")
+
+
+class StubJobAdapter:
+    """A `JobSourceAdapter` double: `source_name` and `list_jobs`, nothing else.
+
+    Deliberately not a `ResumeSourceAdapter` — the JD port is a separate one,
+    and a double that grew `list_changed`/`fetch`/`describe` would stop being
+    evidence of that.
+    """
+
+    source_name = STUB_SOURCE
+
+    def __init__(self, jobs: list[JobMeta]) -> None:
+        self.jobs = jobs
+
+    async def list_jobs(self) -> list[JobMeta]:
+        return list(self.jobs)
+
+
+class BrokenJobAdapter:
+    source_name = STUB_SOURCE
+
+    async def list_jobs(self) -> list[JobMeta]:
+        raise SourceUnavailable("jobs scope not granted")
+
+
+class TrackingSessions:
+    """Hands out real sessions but remembers them.
+
+    The runner's own sessions are the ones that matter for "no business
+    transaction across a network call" — asserting on the test's `db_session`
+    would prove nothing, because the runner never touches it.
+    """
+
+    def __init__(self) -> None:
+        self.opened: list = []
+
+    def __call__(self):
+        session = AsyncSessionLocal()
+        self.opened.append(session)
+        return session
+
+    def any_in_transaction(self) -> bool:
+        return any(session.in_transaction() for session in self.opened)
+
+
+def _item(external_id: str, *, minutes_ago: int = 10, filename: str | None = None) -> SourceItem:
+    return SourceItem(
+        external_id=external_id,
+        updated_at=NOW - timedelta(minutes=minutes_ago),
+        filename=filename or f"{external_id}.pdf",
+        content_type="application/pdf",
+        jd_code=None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def enqueued(monkeypatch) -> list[int]:
+    """No runner test may publish a real Celery message.
+
+    The seam is the same module-level `enqueue_job` indirection the upload
+    route uses, so patching it here exercises everything up to `.delay()`.
+    """
+    recorded: list[int] = []
+    monkeypatch.setattr(
+        "backend.app.services.sync.runner.enqueue_job",
+        lambda job_id: recorded.append(job_id),
+    )
+    return recorded
+
+
+async def test_a_repeat_run_creates_no_job_and_costs_no_parse(
+    db_session, minio_storage, enqueued
+):
+    """What design §7 promises a repeat costs: no MinerU parse, no LLM spend.
+
+    The dedupe key is the exact triple, so the answer needs the content hash
+    and the download is what buys it. Re-transferring bytes is the price of
+    never permanently ignoring a revised resume — the transfer is not what the
+    ledger is there to save.
+    """
+    adapter = StubAdapter([_item("c1"), _item("c2")])
+
+    first = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+    assert (first.ingested, first.skipped) == (2, 0)
+    assert adapter.fetched == ["c1", "c2"]
+
+    second = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert (second.ingested, second.skipped) == (0, 2)
+    jobs = (
+        await db_session.execute(select(func.count()).select_from(IngestionJob))
+    ).scalar_one()
+    # No new job, so no second parse and no second extraction: the whole
+    # downstream cost of the repeat is zero.
+    assert jobs == 2
+    assert len(enqueued) == 2
+    # And no new candidate can appear, because no new job was ever queued.
+    ledger = (
+        await db_session.execute(select(func.count()).select_from(SyncSourceItem))
+    ).scalar_one()
+    assert ledger == 2
+
+
+async def test_a_changed_resume_is_ingested_again(db_session, minio_storage):
+    """Design §7: keying on (source, external_id) alone would ignore this."""
+
+    class Revising(StubAdapter):
+        marker = "v1"
+
+        async def fetch(self, item: SourceItem) -> FetchedResume:
+            self.fetched.append(item.external_id)
+            content = _pdf(self.marker)
+            return FetchedResume(
+                content=content,
+                sha256=_sha256(content).hexdigest(),
+                filename=item.filename,
+                content_type=item.content_type,
+            )
+
+    adapter = Revising([_item("c1")])
+    await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
+
+    later = NOW + timedelta(hours=1)
+    adapter.marker = "v2"
+    adapter.items = [
+        SourceItem(
+            external_id="c1",
+            updated_at=later,
+            filename="c1-v2.pdf",
+            content_type="application/pdf",
+            jd_code=None,
+        )
+    ]
+
+    report = await run_sync(
+        AsyncSessionLocal,
+        adapter,
+        now=later + timedelta(minutes=1),
+        overlap_seconds=300,
+        max_items=200,
+    )
+
+    assert report.ingested == 1
+    assert adapter.fetched == ["c1", "c1"]
+    rows = (
+        (
+            await db_session.execute(
+                select(SyncSourceItem).where(SyncSourceItem.source_external_id == "c1")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 2
+    assert {row.outcome for row in rows} == {"ingested"}
+
+
+async def test_one_bad_item_does_not_abort_the_run(db_session, minio_storage):
+    adapter = StubAdapter([_item("good1"), _item("bad"), _item("good2")], fail_ids={"bad"})
+
+    report = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert (report.ingested, report.failed) == (2, 1)
+    failed = (
+        await db_session.execute(
+            select(SyncSourceItem).where(SyncSourceItem.outcome == "failed")
+        )
+    ).scalar_one()
+    assert failed.source_external_id == "bad"
+    assert failed.error_code == "item_unavailable"
+
+
+async def test_the_cursor_advances_past_a_failed_item(db_session, minio_storage):
+    """Design §9: a failed item is the replay sweeper's job, not the cursor's.
+
+    If the newest item in the window always fails and the cursor waits for it,
+    the cursor never moves: every run re-lists and re-downloads a window that
+    grows without bound until it truncates at `max_items` and starts starving
+    new candidates.
+    """
+    good = _item("good", minutes_ago=30)
+    poison = _item("poison", minutes_ago=1)
+    adapter = StubAdapter([good, poison], fail_ids={"poison"})
+
+    first = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert (first.ingested, first.failed) == (1, 1)
+    # Not `good.updated_at`: the run looked at the failure and moved past it.
+    assert first.cursor_to == poison.updated_at
+    stored = (await db_session.execute(select(SyncCursor))).scalar_one()
+    assert datetime.fromisoformat(stored.cursor_value) == poison.updated_at
+
+    second = await run_sync(
+        AsyncSessionLocal,
+        adapter,
+        now=NOW + timedelta(minutes=30),
+        overlap_seconds=0,
+        max_items=200,
+    )
+
+    # The next window opens at the failure, so nothing before it is re-listed.
+    assert adapter.since_values[-1] == poison.updated_at
+    assert second.listed == 1
+    assert adapter.fetched == ["good"], "an already-ingested item was re-downloaded"
+
+
+async def test_an_unsupported_attachment_is_one_failed_item(db_session, minio_storage):
+    """A recruitment attachment is not guaranteed to be a format WP1 accepts."""
+
+    class Spreadsheets(StubAdapter):
+        async def fetch(self, item: SourceItem) -> FetchedResume:
+            self.fetched.append(item.external_id)
+            content = b"external_id,score\n"
+            return FetchedResume(
+                content=content,
+                sha256=_sha256(content).hexdigest(),
+                filename="notes.csv",
+                content_type="text/csv",
+            )
+
+    adapter = Spreadsheets([_item("c1")])
+
+    report = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert (report.ingested, report.failed) == (0, 1)
+    failed = (await db_session.execute(select(SyncSourceItem))).scalar_one()
+    assert failed.error_code == "unsupported_attachment"
+    assert failed.outcome == "failed"
+    jobs = (
+        await db_session.execute(select(func.count()).select_from(IngestionJob))
+    ).scalar_one()
+    assert jobs == 0
+
+
+async def test_a_synced_attachment_is_malware_scanned(db_session, minio_storage, monkeypatch):
+    """A downloaded attachment is less trusted than an HR upload, not more."""
+
+    class Rejecting:
+        def __init__(self) -> None:
+            self.scanned: list[str] = []
+
+        async def scan(self, artifact) -> None:
+            self.scanned.append(artifact.sha256)
+            raise RuntimeError("infected")
+
+    scanner = Rejecting()
+    monkeypatch.setattr(
+        "backend.app.services.sync.runner.get_malware_scanner", lambda mode: scanner
+    )
+    adapter = StubAdapter([_item("c1")])
+
+    report = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert scanner.scanned, "the sync path must scan what it downloads"
+    assert (report.ingested, report.failed) == (0, 1)
+    # Rejected before the object was stored, so nothing was left behind.
+    assert minio_storage.list_object_keys(prefix="resumes/") == []
+
+
+async def test_a_listing_failure_leaves_the_cursor_untouched(db_session, minio_storage):
+    with pytest.raises(SourceUnavailable):
+        await run_sync(
+            AsyncSessionLocal, BrokenAdapter(), now=NOW, overlap_seconds=300, max_items=200
+        )
+
+    items = (
+        await db_session.execute(select(func.count()).select_from(SyncSourceItem))
+    ).scalar_one()
+    assert items == 0
+    cursors = (
+        await db_session.execute(select(func.count()).select_from(SyncCursor))
+    ).scalar_one()
+    assert cursors == 0
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_failed")
+        )
+    ).scalar_one()
+    assert audit.payload["error_code"] == "source_unavailable"
+    # The provider's own words may name a person; only our codes may be stored.
+    assert "permission revoked" not in str(audit.payload)
+
+
+async def test_an_abort_inside_the_batch_still_leaves_an_audit_row(
+    db_session, minio_storage, monkeypatch
+):
+    """A run that dies mid-loop has already committed and enqueued items.
+
+    Only the listing failure was audited before: anything raised from inside
+    the per-item loop propagated past the cursor write and past the audit,
+    leaving neither `resume_sync_completed` nor `resume_sync_failed` — a run
+    that really happened, with jobs really queued, and no `resume_sync_*`
+    evidence at all to distinguish it from a Beat tick that never fired.
+    """
+
+    def _broker_is_down(job_id: int) -> None:
+        raise RuntimeError("broker refused the message")
+
+    monkeypatch.setattr("backend.app.services.sync.runner.enqueue_job", _broker_is_down)
+    adapter = StubAdapter([_item("c1", filename="Zhang Wei resume.pdf"), _item("c2")])
+
+    with pytest.raises(RuntimeError):
+        await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_failed")
+        )
+    ).scalars().one()
+    assert audit.payload["error_code"] == "run_aborted"
+    assert audit.payload["listed"] == 2
+    # Counts as far as the run got, and nothing a candidate supplied.
+    assert audit.payload["ingested"] == 0
+    assert "Zhang" not in str(audit.payload)
+    assert "broker refused" not in str(audit.payload)
+    completed = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.event_type == "resume_sync_completed")
+        )
+    ).scalar_one()
+    assert completed == 0
+    # The cursor is still unwritten, so the next run re-opens the same window.
+    cursors = (
+        await db_session.execute(select(func.count()).select_from(SyncCursor))
+    ).scalar_one()
+    assert cursors == 0
+
+
+async def test_a_failing_abort_audit_does_not_replace_the_runs_own_cause(
+    db_session, minio_storage, monkeypatch
+):
+    """The audit is written through the session factory that may be WHY it aborted.
+
+    If the database is the failure, the audit write raises from inside the
+    `except`, the run's real cause survives only as `__context__`, and Celery
+    records the audit-write error as the task's failure — destroying the
+    diagnosis at the exact moment it is needed, in the handler whose only job is
+    to leave evidence. The abort must still report what killed the run.
+    """
+
+    def _broker_is_down(job_id: int) -> None:
+        raise BrokerRefused("broker refused the message")
+
+    async def _audit_is_down(*args, **kwargs) -> None:
+        raise RuntimeError("the audit table is unreachable")
+
+    monkeypatch.setattr("backend.app.services.sync.runner.enqueue_job", _broker_is_down)
+    monkeypatch.setattr("backend.app.services.sync.runner._audit", _audit_is_down)
+
+    with pytest.raises(BrokerRefused):
+        await run_sync(
+            AsyncSessionLocal,
+            StubAdapter([_item("c1")]),
+            now=NOW,
+            overlap_seconds=300,
+            max_items=200,
+        )
+
+
+async def test_a_failing_listing_audit_does_not_replace_source_unavailable_either(
+    db_session, minio_storage, monkeypatch
+):
+    # The same trap on the other abort path, where the caller is written to
+    # expect `SourceUnavailable` specifically.
+    async def _audit_is_down(*args, **kwargs) -> None:
+        raise RuntimeError("the audit table is unreachable")
+
+    monkeypatch.setattr("backend.app.services.sync.runner._audit", _audit_is_down)
+
+    with pytest.raises(SourceUnavailable):
+        await run_sync(
+            AsyncSessionLocal, BrokenAdapter(), now=NOW, overlap_seconds=300, max_items=200
+        )
+
+
+async def test_a_jd_sync_whose_completion_audit_fails_is_recorded_as_an_abort(
+    db_session, monkeypatch
+):
+    """A JD sync must leave evidence in one direction or the other.
+
+    The completion audit used to sit after the `except`, so a sync whose
+    `jd_sync_completed` write died left neither row: no completion, because the
+    write failed, and no failure, because nothing was watching. `run_sync`
+    already puts its completed audit inside the guarded region; this is the same
+    property for the JD path.
+    """
+    real_audit = sync_runner._audit
+
+    async def _audit(session_factory, *, event_type: str, actor: str, payload: dict) -> None:
+        if event_type == "jd_sync_completed":
+            raise RuntimeError("the audit table is unreachable")
+        await real_audit(session_factory, event_type=event_type, actor=actor, payload=payload)
+
+    monkeypatch.setattr("backend.app.services.sync.runner._audit", _audit)
+
+    with pytest.raises(RuntimeError):
+        await sync_jd_metadata(
+            AsyncSessionLocal,
+            StubJobAdapter([JobMeta(code="AUDIT_JD", name="仓管员", description="x")]),
+            now=NOW,
+        )
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_failed")
+        )
+    ).scalars().one()
+    assert audit.payload["error_code"] == "run_aborted"
+    assert audit.payload["listed"] == 1
+    assert "unreachable" not in str(audit.payload)
+    completed = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.event_type == "jd_sync_completed")
+        )
+    ).scalar_one()
+    assert completed == 0
+
+
+async def test_the_per_run_cap_is_reported_not_silent(db_session, minio_storage):
+    adapter = StubAdapter([_item(f"c{i}") for i in range(5)])
+
+    report = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=2
+    )
+
+    assert report.ingested == 2
+    # Silent truncation would read as "sync finished". `truncated` is the fact
+    # the run can state exactly; `dropped_at_least` is only a floor, so an
+    # operator alerting on the magnitude would never fire.
+    assert report.truncated is True
+    assert report.dropped_at_least >= 1
+    assert report.listed == 2
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_completed")
+        )
+    ).scalar_one()
+    assert audit.payload["truncated"] is True
+    assert audit.payload["dropped_at_least"] == report.dropped_at_least
+
+
+async def test_a_run_inside_the_cap_is_not_reported_as_truncated(db_session, minio_storage):
+    adapter = StubAdapter([_item("c1"), _item("c2")])
+
+    report = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert report.truncated is False
+    assert report.dropped_at_least == 0
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_completed")
+        )
+    ).scalar_one()
+    assert audit.payload["truncated"] is False
+
+
+async def test_no_business_transaction_is_held_across_the_fetch(db_session, minio_storage):
+    sessions = TrackingSessions()
+
+    class Asserting(StubAdapter):
+        async def fetch(self, item):
+            assert not sessions.any_in_transaction()
+            return await super().fetch(item)
+
+    adapter = Asserting([_item("c1")])
+
+    await run_sync(sessions, adapter, now=NOW, overlap_seconds=300, max_items=200)
+
+    assert adapter.fetched == ["c1"]
+
+
+async def test_no_business_transaction_is_held_across_the_object_store(
+    db_session, minio_storage, monkeypatch
+):
+    sessions = TrackingSessions()
+    real_store = ResumeStorageService.store
+    observed: list[bool] = []
+
+    async def guarded_store(self, artifact):
+        observed.append(sessions.any_in_transaction())
+        return await real_store(self, artifact)
+
+    monkeypatch.setattr(ResumeStorageService, "store", guarded_store)
+
+    await run_sync(
+        sessions, StubAdapter([_item("c1")]), now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    assert observed == [False]
+
+
+async def test_ingested_candidates_carry_their_source(db_session, minio_storage):
+    adapter = StubAdapter([_item("cand-42")])
+
+    await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
+
+    job = (await db_session.execute(select(IngestionJob))).scalar_one()
+    # The stub's source name is not the provider the runner was written for, so
+    # this can only pass if the value flowed from the adapter.
+    assert job.source == STUB_SOURCE
+    assert job.source_external_id == "cand-42"
+
+
+async def test_only_newly_created_jobs_are_enqueued(db_session, minio_storage, enqueued):
+    adapter = StubAdapter([_item("c1")])
+
+    await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
+
+    job = (await db_session.execute(select(IngestionJob))).scalar_one()
+    assert enqueued == [job.id]
+
+    await run_sync(AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200)
+
+    # A repeat is deduplicated before it can queue a second parse.
+    assert enqueued == [job.id]
+
+
+async def test_the_completed_audit_carries_counts_not_candidate_data(db_session, minio_storage):
+    adapter = StubAdapter([_item("c1", filename="Zhang Wei resume.pdf")])
+
+    report = await run_sync(
+        AsyncSessionLocal, adapter, now=NOW, overlap_seconds=300, max_items=200
+    )
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "resume_sync_completed")
+        )
+    ).scalar_one()
+    assert set(audit.payload) == {
+        "source",
+        "cursor_from",
+        "cursor_to",
+        "listed",
+        "ingested",
+        "skipped",
+        "failed",
+        "truncated",
+        "dropped_at_least",
+    }
+    assert audit.payload["ingested"] == 1
+    assert audit.payload["cursor_to"] == report.cursor_to.isoformat()
+    # The filename is candidate-supplied and may be a name.
+    assert "Zhang" not in str(audit.payload)
+
+
+async def test_jd_sync_never_touches_governed_rule_state(db_session, minio_storage):
+    from backend.app.models import JD, RuleVersion
+    from backend.app.services.sync.runner import sync_jd_metadata
+
+    jd = JD(code="GOV_TEST", name="旧名称", description="旧描述", status="active")
+    db_session.add(jd)
+    await db_session.flush()
+    version = RuleVersion(
+        jd_id=jd.id, version="v1", published_at=NOW, schema_json={"jd_code": "GOV_TEST"}
+    )
+    db_session.add(version)
+    await db_session.flush()
+    jd.active_rule_version_id = version.id
+    await db_session.commit()
+    pinned = jd.active_rule_version_id
+
+    class JobAdapter:
+        source_name = "dingtalk"
+
+        async def list_jobs(self):
+            from backend.app.services.sync.adapter import JobMeta
+
+            return [JobMeta(code="GOV_TEST", name="新名称", description="新描述")]
+
+    jd_id = jd.id
+    version_id = version.id
+    updated = await sync_jd_metadata(AsyncSessionLocal, JobAdapter(), now=NOW)
+    await db_session.commit()
+    db_session.expire_all()
+    reloaded = await db_session.get(JD, jd_id)
+    reloaded_version = await db_session.get(RuleVersion, version_id)
+
+    assert updated == 1
+    assert reloaded.name == "新名称"
+    # WP6c gates rule publication behind draft -> What-If -> regression. A
+    # background sync able to move the active version would be a back door.
+    assert reloaded.active_rule_version_id == pinned
+    assert reloaded.status == "active"
+    # The third §10 forbidden target. The rule schema is what actually scores a
+    # candidate; a sync able to rewrite it could change every future score
+    # without a published version, a What-If, or a recorded regression.
+    assert reloaded_version.schema_json == {"jd_code": "GOV_TEST"}
+
+
+async def test_jd_sync_creates_a_missing_jd(db_session):
+    changed = await sync_jd_metadata(
+        AsyncSessionLocal,
+        StubJobAdapter([JobMeta(code="NEW_JD", name="外贸业务员", description="岗位描述")]),
+        now=NOW,
+    )
+    await db_session.commit()
+
+    assert changed == 1
+    created = (await db_session.execute(select(JD).where(JD.code == "NEW_JD"))).scalar_one()
+    assert created.name == "外贸业务员"
+    assert created.description == "岗位描述"
+    # `status` is never named in the insert's `.values()` — the create path is
+    # structurally incapable of naming a §10-forbidden column, exactly like the
+    # update path. This asserts the column default really does fill it in, so
+    # the omission is not quietly writing NULL or leaving the row unusable.
+    assert created.status == "active"
+    assert created.active_rule_version_id is None
+
+
+async def test_a_duplicated_job_code_in_one_page_creates_one_jd_and_does_not_raise(
+    db_session,
+):
+    """One page listing the same `jobCode` twice must not kill JD sync forever.
+
+    `AsyncSessionLocal` is `autoflush=False`, so a `session.add`-ed JD is still
+    pending and invisible to the next iteration's `SELECT`: both iterations take
+    the create branch and the commit violates `jds.code`. The whole batch rolls
+    back — every unrelated JD's legitimate rename with it — and it is not
+    self-healing, because the next tick re-lists the same duplicate and dies
+    identically. The endpoint is unverified, so "the server would not do that"
+    is not an argument available to us.
+    """
+    jobs = [
+        JobMeta(code="DUPE", name="仓管员", description="第一次"),
+        JobMeta(code="DUPE", name="仓管员", description="第一次"),
+    ]
+
+    changed = await sync_jd_metadata(AsyncSessionLocal, StubJobAdapter(jobs), now=NOW)
+    await db_session.commit()
+
+    rows = (
+        (await db_session.execute(select(JD).where(JD.code == "DUPE"))).scalars().all()
+    )
+    assert len(rows) == 1
+    assert rows[0].name == "仓管员"
+    # The second sighting created nothing and changed nothing.
+    assert changed == 1
+
+
+async def test_an_unchanged_jd_is_not_counted_as_changed(db_session):
+    db_session.add(JD(code="SAME", name="仓管员", description="不变", status="active"))
+    await db_session.commit()
+
+    changed = await sync_jd_metadata(
+        AsyncSessionLocal,
+        StubJobAdapter([JobMeta(code="SAME", name="仓管员", description="不变")]),
+        now=NOW,
+    )
+    await db_session.commit()
+
+    # A count that ticked on every listed job would make "the payload shape
+    # drifted and we synced nothing real" indistinguishable from a healthy run.
+    assert changed == 0
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_completed")
+        )
+    ).scalar_one()
+    assert audit.payload["listed"] == 1
+    assert audit.payload["changed"] == 0
+
+
+async def test_a_completed_jd_sync_leaves_counts_an_operator_can_read(db_session):
+    changed = await sync_jd_metadata(
+        AsyncSessionLocal,
+        StubJobAdapter(
+            [
+                JobMeta(code="JD_A", name="甲", description="a"),
+                JobMeta(code="JD_B", name="乙", description="b"),
+            ]
+        ),
+        now=NOW,
+    )
+    await db_session.commit()
+
+    assert changed == 2
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_completed")
+        )
+    ).scalar_one()
+    assert audit.actor == f"system:sync:{STUB_SOURCE}"
+    assert set(audit.payload) == {"source", "listed", "changed"}
+    assert (audit.payload["listed"], audit.payload["changed"]) == (2, 2)
+
+
+async def test_a_failing_jd_sync_leaves_an_audit_row_and_re_raises(db_session):
+    """Its own task now, so a silent failure would have no operator-visible trace."""
+    with pytest.raises(SourceUnavailable):
+        await sync_jd_metadata(AsyncSessionLocal, BrokenJobAdapter(), now=NOW)
+
+    audit = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.event_type == "jd_sync_failed")
+        )
+    ).scalar_one()
+    assert audit.payload["error_code"] == "source_unavailable"
+    # Codes only: the provider's own words are not ours to store.
+    assert "scope not granted" not in str(audit.payload)
+    jds = (await db_session.execute(select(func.count()).select_from(JD))).scalar_one()
+    assert jds == 0
+
+
+async def test_a_failing_sync_does_not_block_manual_upload(
+    client, db_session, auth_headers, minio_storage, valid_pdf_bytes
+):
+    """The exit gate: sync is additive, never load-bearing.
+
+    Manual upload is the fallback the whole work package is measured against.
+    A dead provider must leave it untouched — not degraded, not slower, not
+    holding a connection it needs.
+    """
+    with pytest.raises(SourceUnavailable):
+        await run_sync(
+            AsyncSessionLocal, BrokenAdapter(), now=NOW, overlap_seconds=300, max_items=200
+        )
+
+    response = await client.post(
+        "/api/v1/candidates/upload",
+        files={"file": ("manual.pdf", valid_pdf_bytes, "application/pdf")},
+        headers=await auth_headers("hr"),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["job_id"]

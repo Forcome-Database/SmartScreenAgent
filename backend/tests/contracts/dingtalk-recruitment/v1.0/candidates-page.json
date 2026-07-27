@@ -1,0 +1,26 @@
+{
+  "hasMore": true,
+  "nextCursor": "1753592400000",
+  "list": [
+    {
+      "candidateId": "cand-1001",
+      "updateTime": "2026-07-27T04:30:00Z",
+      "jobCode": "FOREIGN_TRADE",
+      "resume": {
+        "fileName": "zhang.pdf",
+        "fileType": "application/pdf",
+        "downloadUrl": "https://example.invalid/d/1001"
+      }
+    },
+    {
+      "candidateId": "cand-1002",
+      "updateTime": "2026-07-27T04:45:00Z",
+      "jobCode": null,
+      "resume": {
+        "fileName": "li.docx",
+        "fileType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "downloadUrl": "https://example.invalid/d/1002"
+      }
+    }
+  ]
+}

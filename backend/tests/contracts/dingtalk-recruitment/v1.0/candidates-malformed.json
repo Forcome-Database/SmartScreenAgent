@@ -1,0 +1,15 @@
+{
+  "hasMore": false,
+  "nextCursor": null,
+  "list": [
+    {
+      "updateTime": "2026-07-27T04:30:00Z",
+      "jobCode": "FOREIGN_TRADE",
+      "resume": {
+        "fileName": "x.pdf",
+        "fileType": "application/pdf",
+        "downloadUrl": "https://example.invalid/d/x"
+      }
+    }
+  ]
+}

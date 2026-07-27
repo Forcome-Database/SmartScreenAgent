@@ -13,7 +13,7 @@ from backend.app.database import get_db
 from backend.app.deps import require_roles
 from backend.app.models import JD, IngestionJob, User
 from backend.app.scoring.pipeline import ScoringPipeline
-from backend.app.security.crypto import encrypt_pii
+from backend.app.services.ingestion.intake import enqueue_job, ingest_upload
 from backend.app.services.ingestion.jobs import IngestionJobService
 from backend.app.services.llm.errors import (
     LLMConfigurationError,
@@ -28,9 +28,8 @@ from backend.app.services.parser.errors import (
     MinerUTaskError,
     MinerUUnavailableError,
 )
-from backend.app.services.storage import ResumeStorageService, StorageError, StoredResume
+from backend.app.services.storage import ResumeStorageService, StorageError
 from backend.app.services.upload import UploadValidationError, UploadValidator, get_malware_scanner
-from backend.app.tasks.ingest import RawFileReference
 
 logger = structlog.get_logger(__name__)
 
@@ -87,19 +86,6 @@ def _external_service_error(exc: Exception) -> HTTPException | None:
     return None
 
 
-def enqueue_job(job_id: int) -> None:
-    """Hand a queued ingestion job off to the Celery worker.
-
-    A thin, module-level wrapper so tests can monkeypatch enqueuing without
-    touching Celery. The import is deferred to keep `backend.app.tasks.ingest`
-    (and its Celery task registration) out of this module's import-time
-    dependency graph.
-    """
-    from backend.app.tasks.ingest import parse_and_score_task
-
-    parse_and_score_task.delay(job_id)
-
-
 async def _process_one_file(
     file: UploadFile,
     *,
@@ -109,69 +95,29 @@ async def _process_one_file(
     db: AsyncSession,
     settings: Settings,
 ) -> tuple[IngestionJob, bool]:
-    """Validate, scan, store, and create/reuse an ingestion job for one file.
+    """Run the shared intake sequence for one manually uploaded file.
 
     Shared by `upload_resume` (single) and `upload_batch` (once per file) so
-    both routes fail identically for a given file: on success the job row is
-    committed and `(job, created)` is returned. On ANY failure — validation,
-    storage, or otherwise — the DB session is rolled back and, if this
-    file's object was already stored in MinIO, that object is deleted
-    before the exception is re-raised (mirrors the `owns_new_object`
-    compensating-delete pattern in
-    `backend.app.tasks.ingest.run_parse_and_score`). The caller decides how
-    to map the propagated exception to a response.
+    both routes fail identically for a given file. The sequence itself —
+    validate, scan, encrypt the name, store, create-or-reuse, compensate —
+    lives in `backend.app.services.ingestion.intake` because the background
+    resume sync runs exactly the same one; this wrapper only supplies what is
+    specific to a manual upload.
     """
-    artifact = await UploadValidator().validate(file)
-    storage: ResumeStorageService | None = None
-    stored: StoredResume | None = None
-    object_needs_cleanup = False
-    try:
-        await get_malware_scanner(settings.MALWARE_SCAN_MODE).scan(artifact)
-        original_name_cipher = encrypt_pii(artifact.original_filename)
-        storage = ResumeStorageService()
-        stored = await storage.store(artifact)
-        object_needs_cleanup = True
-        raw_file = RawFileReference(
-            object_key=stored.object_key,
-            sha256=stored.sha256,
-            size_bytes=stored.size_bytes,
-            content_type=stored.content_type,
-            original_name_cipher=original_name_cipher,
-        )
-        job, created = await IngestionJobService(db).create_or_reuse(
-            raw_file=raw_file,
-            source="upload",
-            source_external_id=None,
-            jd_code=jd_code,
-            actor=actor,
-            batch_id=batch_id,
-            trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
-        )
-        if not created:
-            # Idempotent resubmission of the same sha256: an active job for
-            # this file already exists, so the object just stored above is
-            # redundant — drop it rather than leaving two copies in MinIO.
-            await storage.delete(stored.object_key)
-            object_needs_cleanup = False
-        await db.commit()
-        object_needs_cleanup = False
-        return job, created
-    except Exception:
-        await db.rollback()
-        if object_needs_cleanup and storage is not None and stored is not None:
-            try:
-                await storage.delete(stored.object_key)
-            except StorageError as cleanup_exc:
-                logger.critical(
-                    "raw_file_cleanup_failed",
-                    trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
-                    object_key=stored.object_key,
-                    sha256=stored.sha256,
-                    error_type=type(cleanup_exc).__name__,
-                )
-        raise
-    finally:
-        artifact.cleanup()
+    return await ingest_upload(
+        file,
+        db=db,
+        validator=UploadValidator(),
+        scanner=get_malware_scanner(settings.MALWARE_SCAN_MODE),
+        storage=ResumeStorageService(),
+        jobs=IngestionJobService(db),
+        source="upload",
+        source_external_id=None,
+        jd_code=jd_code,
+        actor=actor,
+        batch_id=batch_id,
+        trace_id=structlog.contextvars.get_contextvars().get("trace_id"),
+    )
 
 
 @router.post("/upload", response_model=UploadResponse, status_code=202)

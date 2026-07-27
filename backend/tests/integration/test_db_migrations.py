@@ -17,7 +17,15 @@ pytestmark = pytest.mark.integration
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BASELINE_REVISION = "3884ec28fea9"
 WP1_REVISION = "b57c2f9e1a6d"
-WP7_HEAD_REVISION = "7d3c9b1a4e62"
+WP7_REVISION = "7d3c9b1a4e62"
+WP7_HEAD_REVISION = "9a4f2c7b31de"
+WP8_TABLES = {"sync_cursors", "sync_source_items"}
+WP8_NAMED_CONSTRAINTS = {
+    "uq_sync_source_items_identity",
+    "ck_sync_source_items_outcome",
+    "ck_sync_source_items_attempts",
+}
+WP8_INDEX_NAME = "ix_sync_source_items_outcome_attempts"
 WP7_TABLES = {
     "llm_usage_attempts",
     "operations_reconciliation_state",
@@ -472,6 +480,20 @@ async def test_alembic_round_trip_from_base() -> None:
         assert rule_columns["published_at"] == "YES"
         assert ("rule_versions", "ck_rule_versions_status") in constraints
         assert ("rule_versions", "uq_rule_versions_jd_version") in constraints
+        assert WP8_TABLES <= tables
+        assert WP8_NAMED_CONSTRAINTS <= {name for _, name in constraints}
+        assert WP8_INDEX_NAME in indexes
+
+        downgrade = _alembic("downgrade", WP7_REVISION, env=env)
+        assert downgrade.returncode == 0, downgrade.stderr
+        connection = await asyncpg.connect(urls.sync_url)
+        try:
+            wp8_downgraded_tables, _, _, _, _ = await _schema_objects(connection)
+        finally:
+            await connection.close()
+
+        assert WP8_TABLES.isdisjoint(wp8_downgraded_tables)
+        assert "llm_usage_attempts" in wp8_downgraded_tables
 
         downgrade = _alembic("downgrade", "25954dc70368", env=env)
         assert downgrade.returncode == 0, downgrade.stderr

@@ -583,3 +583,284 @@ WP7 让 LLM 运行成本与评分质量可以从一手记录中被度量。
 托管 CI（[verify run 30209777661](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/30209777661)，PR #8）三个作业全绿：Python 3.10、Python 3.14、strict integration。
 托管 CI 还抓到两个本地门禁无法发现的缺陷并已修复：`from datetime import UTC` 需要 Python 3.11 而项目支持 3.10；
 p2 端到端测试与 `scripts/verify.py` 启动的真实 Celery worker 抢认领。WP7 现为 **Complete**，WP8 与 WP9 已解除阻塞。
+
+## WP8 — 钉钉招聘同步
+
+WP8 让后台定期从钉钉招聘拉取候选人简历，并把它们交给 WP3 已有的入库管线。
+它是**纯增量能力**：同步整个坏掉，手工上传、评分、所有既有接口都照常工作。
+默认**全部关闭**，打开之前请把下面几段读完。
+
+### 先读这一条：招聘接口尚未验证
+
+钉钉官方 OAS 中**没有 `recruitment` 命名空间**。适配器依赖的 22 项事实——接口路径、
+`since` 与 `maxResults` 两个查询参数、`candidateId` / `updateTime` / `resume.downloadUrl`
+等字段名，以及分页、排序等 7 条行为假设——**全部推断自设计文档，没有一项见过真实响应**。
+逐条清单在
+[`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md) §16.1，
+连带记着「招聘接口没有按 id 查单个候选人的方式」这条发现——它是回放清扫空转的根因。
+
+**22 不是全部。** JD 那一侧的 `/v1.0/recruitment/jobs`（以及它的 `jobCode` / `name` /
+`description` 三个字段）状态与出处完全相同——§16.1 原话是「exactly the same status and
+the same provenance」——只是它由设计 §10 在清单成型之后才补进来，没有计进这个数字。
+所以请把招聘命名空间**整体**当作未验证，而不是「22 条之外的都验过了」。
+
+结算它们的唯一手段，是拿到接口权限后跑实测探针：
+
+```bash
+uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m external_contract
+```
+
+在这个探针跑绿之前，请把这套集成当作**未验证**。离线与集成测试全绿只证明代码与设计文档
+一致，不证明代码与钉钉一致。
+
+### 环境变量与打开顺序
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `DINGTALK_SYNC_ENABLED` | `false` | 总开关 |
+| `DINGTALK_SYNC_INTERVAL_SECONDS` | `1800` | 简历拉取与 JD 同步的间隔（秒）。开关打开时**下限 1741**：必须大于任务自带的硬超时 1740 秒，否则进程直接拒绝启动（改小会让 Beat 在上一轮被杀掉之前就发下一次，多轮叠着跑） |
+| `DINGTALK_RECRUITMENT_BASE_URL` | `https://api.dingtalk.com` | 招聘接口 host |
+| `SYNC_OVERLAP_SECONDS` | `300` | 每次从「游标减去该值」起查 |
+| `SYNC_MAX_ITEMS_PER_RUN` | `200` | 单次运行处理条数上限 |
+| `SYNC_MAX_ITEM_ATTEMPTS` | `3` | 失败行的重投上限，到达即终止 |
+| `SYNC_REPLAY_INTERVAL_SECONDS` | `3600` | 回放清扫间隔（秒） |
+
+拉取用的是企业内部应用 token，因此 `DINGTALK_APP_KEY`、`DINGTALK_APP_SECRET`、
+`DINGTALK_CORP_ID` 也必须配好。
+
+开关关着时，三个 Beat 条目 `wp8-pull-dingtalk`、`wp8-replay-failed`、`wp8-sync-jds`
+**根本不会注册**——不是注册了在任务体里跳过。所以关着的时候 worker 不会被空唤醒，
+也不存在「配置写错一个字就打到未验证接口」的余地。Beat 计划在进程启动时读取一次，
+改完开关必须**同时重启 worker 与 beat**，否则计划不会变。
+
+建议的打开顺序：
+
+1. 拿到招聘接口权限，跑上面的 external_contract 探针，直到它绿。
+2. 为同步会碰到的每个岗位走 WP6c 发布流程，发出 active 规则版本（原因见下一节）。
+3. 置 `DINGTALK_SYNC_ENABLED=true`，重启 worker 与 beat。
+4. 用 `GET /api/v1/sync/report` 确认游标在推进，且 `failed_terminal_total` 为 0。
+
+### 权限落地当天的第一份检查清单
+
+下面六件事在权限落地之前都咬不到人，落地当天全部同时生效。按这个顺序处理：
+
+1. **先把服务端的分页顺序定下来**（设计 §16.1 的 E 行与 G 行）。`list_changed` 的升序排序
+   只保护「已经拿回来的那一页」。如果服务端自己按 `maxResults` 截断、又是新到旧排，那被
+   截掉的那批永远不会再被列出：游标已经跳到返回页的最大值，而 `truncated` 只会报
+   `dropped_at_least: 1`。探针里的 `test_the_raw_page_arrives_oldest_first` 就是用来记
+   真实顺序的；确认之前不要把 `SYNC_MAX_ITEMS_PER_RUN` 当成安全边界。
+2. **给 `describe` 绑真实接口时，必须同时把 `fetch` 取内容要用的东西一起记下来。**
+   `fetch` 的下载 URL 来自 `self._download_urls`——一张只有 `list_changed` 会填的旁挂表，
+   而回放路径上的适配器实例是新的，这张表是空的。只把 `describe` 绑上、让它返回一个格式
+   正确的 `SourceItem`，每条回放行都会栽在 `ItemUnavailable("no download url for item")`
+   上，白花一次 attempt，几轮之后整个失败队列变成 terminal——正是现在
+   `SourceCapabilityUnavailable` 挡着的那种永久静默丢失，换个门再进来一次。
+   `adapter.py` 的 `describe` 文档里写了这条，运维也需要知道。
+3. **打开回放之前，先给它加一个每轮批次上限。** 今天 `replay_failed` 的选行谓词只有
+   `outcome='failed' AND attempts < SYNC_MAX_ITEM_ATTEMPTS`，没有 `limit`：它是**总量**
+   有界（每行最多试 `SYNC_MAX_ITEM_ATTEMPTS` 次），不是**每轮**有界。积压大的时候，一轮
+   扫描会把积压里的每一行都试一遍。
+4. **重新核 `SYNC_MAX_ITEMS_PER_RUN` 与实测单条成本、以及任务软超时的关系。** 今天是
+   200 条对着 `SYNC_SOFT_TIME_LIMIT_SECONDS = 1500`（硬限 1740），而每条要花一次 HTTP
+   下载（自带 30 秒超时）、一次 MinIO 上传和几次库往返——推算依据写在
+   `backend/app/tasks/wp8.py` 顶部。量到真实耗时之后，要么降条数要么调超时；软超时必须
+   留得下写审计那一步的余量，被硬限杀掉的进程连 `resume_sync_failed` 都写不出来。
+5. **等探针报出真实 host，再回来给 `downloadUrl` 补白名单。** 今天 `_download_headers`
+   只做一件事：URL 不是 HTTPS、或者 host 不等于 `DINGTALK_RECRUITMENT_BASE_URL` 的 host，
+   就不带 token。它保护的是**我们的凭据不外流**，不限制我们会去连哪台机器。真实响应指向
+   哪些 host 现在是未知的，所以此刻写不出白名单；探针给出答案之后再写。
+6. **跑 `backend/tests/external/test_dingtalk_recruitment_contract.py`，并且在翻转 §16.1
+   那些 UNVERIFIED 标记的同一个提交里**，把 `README.md` 和
+   `docs/superpowers/plans/README.md` 里「22 项……未验证」的说法一起改掉。只翻转 §16.1，
+   README 就会在集成已经验证之后，继续告诉运维它没验证。
+
+### 未评分窗口：同步建出来的 JD 必须先发规则
+
+同步**允许**创建缺失的 JD 并刷新它的 `name` / `description`；**禁止**触碰
+`jds.active_rule_version_id`、`jds.status` 和 `rule_versions.schema_json`——那是 WP6c
+的发布门禁，后台任务不得从后门绕过。
+
+代价是：同步新建的 JD 没有 active 规则版本，此时到达该岗位的简历会被下载、解析、抽取、
+落成 Candidate，**但永远不会被评分**。候选人只通过 `Score.jd_id` 浮现，而代码库里
+**没有任何补评分路径**：回放清扫只重投 `failed` 行，去重账本又挡住重新拉取。
+也就是说，从「岗位出现」到「有人发布规则版本」之间同步进来的每一份简历，都是入了库
+但看不见的。
+
+因此有两条运维硬规则：
+
+- 在岗位开始吸引投递**之前**就为它发布规则版本，而不是之后。
+- 把同步创建的 JD 一律视为未完成，直到 WP6c 的发布流程对它跑过一次。
+
+彻底关掉这个窗口需要「首次发布规则版本时重评已入库候选人」的补跑能力，那超出 WP8 范围，
+记录在此留给后续工作包。
+
+### 幂等三层，以及为什么重叠窗口和账本是一对
+
+- **内容层（继承自 WP1/WP3）**：`ingestion_jobs.raw_file_sha256` 上的部分唯一索引挡住同一份
+  字节同时在飞，`candidates.pii_hash` 挡住重复的人。
+- **来源层（WP8 新增）**：`sync_source_items` 以 `(source, source_external_id, content_sha256)`
+  三元组去重。内容哈希在键里是刻意的——只按 `(source, source_external_id)` 去重，会让改简历
+  重投的候选人被永久忽略。这一层省下的是 MinerU 解析和 LLM 调用，也就是真正花钱的部分。
+- **游标层（WP8 新增）**：每次从 `cursor_value - SYNC_OVERLAP_SECONDS` 起查。
+
+重叠窗口和去重账本是**一对**：单看任何一个都像冗余，合起来才是「宁可便宜地重看，也不漏」。
+源端时间戳会打平、时钟会偏、翻页期间条目会变，所以窗口必须往回盖一段；而往回盖必然重看，
+所以必须有账本让重看几乎不花钱。
+
+游标推进到**这一轮处理过的所有条目中最新的那个源时间戳**——**失败的条目也计入**。这个值由
+`next_cursor` 在整批跑完之后一次性取最大值算出，不是 `now`，也永不回退。所以失败条目会被游标
+越过，不会留在窗口里等下一轮重新列出，捞回它们是下一节那个回放清扫器的事。
+
+正因为游标是整批跑完才写的一次，运行中途崩溃时它**根本没被写过**：下一轮从**原来的游标**
+重开同一个窗口，不是从上一个好点接着来。这样是安全的，不只是可以忍——崩溃前已经入库的
+条目都在账本里带着完整的三元组，重开只花一次重列和重下，不会再解析、抽取或评分一次，
+也就是不会再花第二遍钱。运行级失败（权限撤销、凭证过期、provider 宕机）**不推进游标**，
+写一条 `resume_sync_failed` 审计，下一次 Beat tick 重试同一个窗口——任务内不做重试循环，
+碰上权限问题那只会空转。
+
+### 回放当前是空转的，`failed: 0` 不等于队列干净
+
+条目级失败会记成 `outcome='failed'` 并继续下一条。游标已经越过它，300 秒重叠也够不回去，
+所以这些行由 `sync.replay_failed` 清扫器按 `attempts < SYNC_MAX_ITEM_ATTEMPTS` 重投，到达
+上限即终止，不再被任何东西选中。
+
+但在招聘权限落地之前，这条恢复路径是**空转**的：钉钉没有按 id 查单个候选人的接口，适配器的
+`describe` 直接抛 `SourceCapabilityUnavailable`。清扫器为此**不花掉任何一次 attempt**，并把
+这些条目单独计成 `undescribable`，不并进 `failed`。所以看到
+`{"replayed": 0, "failed": 0}` **不要读成队列干净**——同时看 `undescribable`，它非零就说明这
+一轮根本没问过源端。这个字段在两个地方能看到：`sync.replay_failed` 这个 Celery 任务的返回值，
+以及 `audit_logs` 里 `resume_sync_replayed` 事件的 payload（清扫中途放弃时则是
+`resume_sync_replay_failed`）。同步报表接口**刻意不带它**——报表报的是账本行现在的状态，不是
+某一轮清扫做了什么。同理，`GET /api/v1/sync/report` 里 `failed_retrying_total` 长期不降，在
+权限落地前是预期行为，不是清扫器坏了。
+
+### 同步报表
+
+```
+GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
+```
+
+按来源各一行，回答「同步在不在走、有什么卡住了」：
+
+| 字段 | 含义 |
+|---|---|
+| `source` | 来源标识，钉钉招聘为 `dingtalk_recruitment` |
+| `cursor_value` | 游标位置（ISO-8601 瞬时）；首次成功运行前为 `null` |
+| `last_run_at` | 上次成功写游标的时刻 |
+| `ingested_total` | 已入库条目数，**开库以来的累计值**，不是窗口计数——只增不减，涨了也只说明历史总量，会动的健康信号是 `last_run_at` 和 `cursor_value` |
+| `failed_retrying_total` | 失败且 `attempts <` 上限——清扫器还会再试，不用管 |
+| `failed_terminal_total` | 失败且 `attempts >=` 上限——**永远不会再被自动重试，需要人介入** |
+
+顶层还带一个 `max_item_attempts`，即上面这条分界线的当前取值。响应只有计数、游标和来源名：
+`source_external_id` 是招聘系统里指向某个真实的人的标识，不出现在这里，姓名、密文、对象键、
+简历文本同理。要看单条卡住的行，去查 `sync_source_items` 表的 `error_code`。
+
+有游标没账本行（这一轮没东西可拿）和有账本行没游标（首次运行中途崩了）都会照常列出来——
+只报其中一张表会正好藏掉后一种故障。而 `items` 为**空数组**只说明两张表里一行都没有：要么同步
+从没跑过，要么每一轮都在写下任何东西之前就挂了。**它不等于队列干净**——和上一节 `failed: 0`
+是同一个坑，接口本身分不出「健康且空闲」和「从未运行」，看到空数组请当作后者，并去
+`audit_logs` 查 `resume_sync_failed`。但**数据库整体挂掉时 `audit_logs` 里同样一行都没有**——
+审计行走的是同一个 session factory，它写不进去时异常会被吞掉以保住原始故障，证据只留在 worker
+日志里。拉取与 JD 同步搜 `sync_audit_write_failed`，重放清扫搜
+`sync_replay_audit_write_failed`——**两个事件名不同，只搜前者会漏掉整条重放路径**；两者都带
+`error_code=audit_write_failed`。开关关着时这个接口照常可用，读的是历史留下的表。
+
+本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 659 通过；
+集成 296 通过、零 skip，其中 WP8 同步套件（`test_sync_runner` 25、`test_sync_replay` 19、
+`test_sync_ledger` 8、`test_sync_report_api` 6）58 条；Python 3.10 那条腿
+（`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
+659 通过。
+托管 CI（[PR #11](https://github.com/Forcome-Database/SmartScreenAgent/pull/11)，[run 30247241980](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/30247241980)）三个 job 全绿：integration、unit-and-static 3.10、unit-and-static 3.14，未重跑。
+设计与计划见
+[`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md)
+和 [`WP8 plan`](docs/superpowers/plans/2026-07-27-wp8-dingtalk-sync.md)。
+
+## WP8 — MCP 会话式访问
+
+WP8 的另一半，把系统的**统计面**开成一个 MCP server，让模型客户端能问
+「哪些岗位在跑」「这个岗位这周分最高的是谁」「这张评分卡长什么样」「这周花了多少钱」。
+和同步那半一样是纯增量能力，默认**关闭**。
+
+### 开关：关着等于不存在
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `MCP_ENABLED` | `false` | 总开关 |
+| `MCP_SERVICE_TOKEN` | 空 | 客户端要在 `Authorization: Bearer` 里出示的共享令牌 |
+| `MCP_SERVICE_ROLE` | `mcp_service` | 该令牌映射到的服务身份角色 |
+
+开关关着时 `/mcp` **根本不会挂载**——不是挂载了在里面拒绝。所以配错的反向代理也够不到它，
+`POST /mcp` 得到的是 404。进程启动时 MCP SDK 也不会被 import。
+
+开关打开时有两种配置会让进程**直接起不来**，而不是带着问题跑：
+
+- `MCP_SERVICE_ROLE` 出现在**任何一条**路由的 `require_roles` 白名单里。
+  `MCP_SERVICE_ROLE=hr` 会一句话废掉整个天花板，而所有天花板测试仍然全绿——因为它们
+  断言的是「当前配置的那个角色」。这个检查只能放在 `build_mcp_app()`：它在所有路由注册
+  完之后运行，而 `config.py` 不引入循环就看不到路由。
+- `MCP_ENABLED=true` 但 `MCP_SERVICE_TOKEN` 为空。空令牌谁都出示不了，这样的挂载是
+  fail-closed 但永久无用，属于配置写错，必须看起来像配置写错。
+
+配好之后还需要在 `users` 表里有一行 `role = mcp_service` 的用户，否则令牌解析不出身份。
+端点是 `GET /mcp/sse` + `POST /mcp/messages/`（SSE transport）。
+
+### 传输层：为什么是 SSE，以及它带着哪两个已知代价
+
+**SSE 是 MCP 规范里已废弃（deprecated）的传输**，现在推荐的是 Streamable HTTP。这里仍然用
+SSE 不是疏忽：`StreamableHTTPSessionManager.run()` 要求一个 lifespan 拥有的 task group，而
+Starlette **不会运行被 mount 的子应用的 lifespan**——挂在现有 FastAPI 应用下面时它根本起不来。
+换成 Streamable HTTP 意味着重新设计 `/mcp` 的挂载方式（给它自己的 lifespan），留作后续工作。
+如果某个客户端只支持新传输，这是要先解决的事。
+
+`SseServerTransport("/messages/")` 构造时**没有传 `security_settings`**，也就是沿用了 SDK 的
+默认值：**DNS rebinding 保护是关闭的**。在私网里由反向代理终结时这是常见姿势，但它是继承来的
+默认而不是做过的决定。**只要 `/mcp` 会被浏览器可达的 origin 碰到，就必须显式设置
+`allowed_hosts` / `allowed_origins`**——决定在哪里终结 `/mcp` 之前需要知道这两件事。
+
+### 四个工具，以及「无内容」是什么意思
+
+| 工具 | 返回 |
+|---|---|
+| `list_jds` | 每个岗位的 code、名称、当前 active 规则版本 |
+| `top_candidates` | 某岗位近 `days` 天的高分候选人，**只给 candidate_id** |
+| `score_summary` | 一张评分卡的总分、等级、硬性过滤结论、各维度的 tier 与分数 |
+| `operations_summary` | 某窗口的花费与预算状态（金额是字符串） |
+
+**没有任何工具会返回**姓名、电话、邮箱、密文、对象键、证据引文或推理文本（设计 §11.3）。
+这不是靠出口过滤实现的：`score_summary` 的 SQL 在 PostgreSQL 里就把 judge 载荷折成
+`{id, tier, score}`，引文和推理**从来没进过这个进程**。候选人只以 id 出现，把 id 还原成
+人是一次 PII 读取，而服务身份到不了那条路由。
+
+这条「无内容」也覆盖**报错文本**，因为报错文本同样是模型读的。MCP SDK 会把 handler 抛出的
+任何异常做 `str(exc)` 塞进 `content[0].text`——一个 SQLAlchemy 的 `StatementError` 会把整条
+语句带出去。所以 `build_mcp_server` 里的 handler 只放行 `ValueError`（`top_candidates` 的三种
+结局和 `operations_summary` 的非法窗口靠它的文本区分，回显的都是调用方自己给的参数），
+其余一律换成固定串 `the tool call failed unexpectedly; details are in the server log`，
+原始异常按 `services.sync.runner` 记录 abort 的方式落日志：只有 `error_code` 和
+`error_type`，不带 message。
+
+### 服务身份的天花板
+
+服务角色**不出现在任何一条 REST 路由的角色元组里**（设计 §11.3.2）。工具直接读服务层，
+不发 HTTP 请求，所以没有哪条路由是这个凭据需要的——包括 `GET /api/v1/jds` 这种不碰
+候选人数据的聚合接口。持有真实服务令牌去打 `/api/v1/candidates/{id}` 得到的是 403。
+这条性质由 `backend/tests/unit/test_mcp_ceiling.py` 遍历整张路由表来断言，并由上面那条
+启动检查兜住测试看不见的那种配错。
+
+### 端用户身份透传：推迟
+
+现在是**单一共享服务身份**，不区分是哪个 HR 在提问，所以工具面必须窄到「任何 HR 都能看」
+的程度——这也是它无内容的另一个原因。按端用户身份授权（谁问就按谁的角色答）取决于
+Hermes 侧能否透传调用者身份，尚未确认，记录在设计 §16.2 留给后续工作包。在那之前不要
+把这个 server 当作「模型可以代替 HR 登录」的入口。
+
+本地门禁（当前 HEAD）：Ruff 干净、mypy 干净（130 个源文件）；后端 offline 659 通过，
+其中 MCP 单元测试 `test_mcp_server` 9、`test_mcp_tools` 5、`test_mcp_ceiling` 3；
+集成 296 通过、零 skip，其中 `test_mcp_authorization` 28 条覆盖角色矩阵与内容黑名单；
+Python 3.10 那条腿
+（`uv run --python 3.10 --extra dev pytest -m "not integration and not external_contract"`）
+659 通过。
+托管 CI（[PR #11](https://github.com/Forcome-Database/SmartScreenAgent/pull/11)，[run 30247241980](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/30247241980)）三个 job 全绿：integration、unit-and-static 3.10、unit-and-static 3.14，未重跑。
+设计与计划见
+[`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md) §11
+和 [`WP8 MCP plan`](docs/superpowers/plans/2026-07-27-wp8-mcp-server.md)。

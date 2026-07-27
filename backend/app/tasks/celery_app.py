@@ -1,6 +1,6 @@
 from celery import Celery
 
-from backend.app.config import get_settings
+from backend.app.config import Settings, get_settings
 
 settings = get_settings()
 
@@ -12,6 +12,7 @@ celery_app = Celery(
         "backend.app.tasks.ingest",
         "backend.app.tasks.sweep",
         "backend.app.tasks.wp7",
+        "backend.app.tasks.wp8",
     ],
 )
 
@@ -29,24 +30,62 @@ celery_app.conf.update(
     worker_max_tasks_per_child=100,
 )
 
-celery_app.conf.beat_schedule = {
-    "ingestion-sweep": {
-        "task": "ingest.sweep",
-        "schedule": float(settings.INGESTION_SWEEP_INTERVAL_SECONDS),
-    },
-    "wp7-reconcile-budgets": {
-        "task": "wp7.reconcile_budgets",
-        "schedule": 300.0,
-    },
-    "wp7-sweep-stale-usage": {
-        "task": "wp7.sweep_stale_usage",
-        "schedule": 60.0,
-    },
-    "wp7-sweep-cross-checks": {
-        "task": "wp7.sweep_cross_checks",
-        "schedule": float(settings.CROSS_ENGINE_SWEEP_INTERVAL_SECONDS),
-    },
-}
+def build_beat_schedule(settings: Settings) -> dict[str, dict[str, object]]:
+    """The Beat schedule these settings imply.
+
+    A pure function of the settings, so the kill switch can be tested in BOTH
+    directions. The module-level schedule below is read once at import from the
+    process's own settings, which the test suite pins to
+    `DINGTALK_SYNC_ENABLED=false`; a test that could only ever see the disabled
+    branch would leave the switch's real job — actually scheduling the pull when
+    it is on — with no coverage at all, and deleting the whole block would keep
+    the suite green.
+    """
+    schedule: dict[str, dict[str, object]] = {
+        "ingestion-sweep": {
+            "task": "ingest.sweep",
+            "schedule": float(settings.INGESTION_SWEEP_INTERVAL_SECONDS),
+        },
+        "wp7-reconcile-budgets": {
+            "task": "wp7.reconcile_budgets",
+            "schedule": 300.0,
+        },
+        "wp7-sweep-stale-usage": {
+            "task": "wp7.sweep_stale_usage",
+            "schedule": 60.0,
+        },
+        "wp7-sweep-cross-checks": {
+            "task": "wp7.sweep_cross_checks",
+            "schedule": float(settings.CROSS_ENGINE_SWEEP_INTERVAL_SECONDS),
+        },
+    }
+    # WP8 sync is scheduled only while the kill switch is on, and the switch is
+    # off by default. The entry is ADDED rather than registered always and
+    # skipped inside the task: a registered schedule wakes a worker every
+    # interval forever to do nothing, and it puts a live DingTalk pull one
+    # config typo away from an unverified endpoint. Absent means absent.
+    if settings.DINGTALK_SYNC_ENABLED:
+        schedule["wp8-pull-dingtalk"] = {
+            "task": "sync.pull_dingtalk",
+            "schedule": float(settings.DINGTALK_SYNC_INTERVAL_SECONDS),
+        }
+        schedule["wp8-replay-failed"] = {
+            "task": "sync.replay_failed",
+            "schedule": float(settings.SYNC_REPLAY_INTERVAL_SECONDS),
+        }
+        # Its own entry, never chained onto the resume pull: the jobs endpoint
+        # is separately permission-granted, and a standing 403 there must not
+        # be able to stop resume ingestion. Reuses the pull's interval on
+        # purpose — JD metadata changes rarely, and a second knob would only be
+        # one more value to get wrong.
+        schedule["wp8-sync-jds"] = {
+            "task": "sync.pull_jds",
+            "schedule": float(settings.DINGTALK_SYNC_INTERVAL_SECONDS),
+        }
+    return schedule
+
+
+celery_app.conf.beat_schedule = build_beat_schedule(settings)
 
 
 @celery_app.task(name="smartscreen.ping")
