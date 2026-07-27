@@ -595,7 +595,9 @@ WP8 让后台定期从钉钉招聘拉取候选人简历，并把它们交给 WP3
 钉钉官方 OAS 中**没有 `recruitment` 命名空间**。适配器依赖的 22 项事实——接口路径、
 `since` 与 `maxResults` 两个查询参数、`candidateId` / `updateTime` / `resume.downloadUrl`
 等字段名，以及分页、排序等 7 条行为假设——**全部推断自设计文档，没有一项见过真实响应**。
-逐条清单在 [`.superpowers/sdd/task-S4-report.md`](.superpowers/sdd/task-S4-report.md) §11.7。
+逐条清单在
+[`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md) §16.1，
+连带记着「招聘接口没有按 id 查单个候选人的方式」这条发现——它是回放清扫空转的根因。
 
 结算它们的唯一手段，是拿到接口权限后跑实测探针：
 
@@ -666,8 +668,10 @@ uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m ex
 源端时间戳会打平、时钟会偏、翻页期间条目会变，所以窗口必须往回盖一段；而往回盖必然重看，
 所以必须有账本让重看几乎不花钱。
 
-游标推进到**最后一条成功处理的条目的源时间戳**，不是 `now`，也不是页尾统一推进；运行中途
-崩溃就从上一个好点接着来。运行级失败（权限撤销、凭证过期、provider 宕机）**不推进游标**，
+游标推进到**这一轮处理过的所有条目中最新的那个源时间戳**——**失败的条目也计入**。这个值由
+`next_cursor` 在整批跑完之后一次性取最大值算出，不是 `now`，也永不回退。所以失败条目会被游标
+越过，不会留在窗口里等下一轮重新列出，捞回它们是下一节那个回放清扫器的事；运行中途崩溃则
+从上一个好点接着来。运行级失败（权限撤销、凭证过期、provider 宕机）**不推进游标**，
 写一条 `resume_sync_failed` 审计，下一次 Beat tick 重试同一个窗口——任务内不做重试循环，
 碰上权限问题那只会空转。
 
@@ -681,7 +685,10 @@ uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m ex
 `describe` 直接抛 `SourceCapabilityUnavailable`。清扫器为此**不花掉任何一次 attempt**，并把
 这些条目单独计成 `undescribable`，不并进 `failed`。所以看到
 `{"replayed": 0, "failed": 0}` **不要读成队列干净**——同时看 `undescribable`，它非零就说明这
-一轮根本没问过源端。同理，`GET /api/v1/sync/report` 里 `failed_retrying_total` 长期不降，在
+一轮根本没问过源端。这个字段在两个地方能看到：`sync.replay_failed` 这个 Celery 任务的返回值，
+以及 `audit_logs` 里 `resume_sync_replayed` 事件的 payload（清扫中途放弃时则是
+`resume_sync_replay_failed`）。同步报表接口**刻意不带它**——报表报的是账本行现在的状态，不是
+某一轮清扫做了什么。同理，`GET /api/v1/sync/report` 里 `failed_retrying_total` 长期不降，在
 权限落地前是预期行为，不是清扫器坏了。
 
 ### 同步报表
@@ -697,7 +704,7 @@ GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
 | `source` | 来源标识，钉钉招聘为 `dingtalk_recruitment` |
 | `cursor_value` | 游标位置（ISO-8601 瞬时）；首次成功运行前为 `null` |
 | `last_run_at` | 上次成功写游标的时刻 |
-| `ingested_total` | 已入库条目数 |
+| `ingested_total` | 已入库条目数，**开库以来的累计值**，不是窗口计数——只增不减，涨了也只说明历史总量，会动的健康信号是 `last_run_at` 和 `cursor_value` |
 | `failed_retrying_total` | 失败且 `attempts <` 上限——清扫器还会再试，不用管 |
 | `failed_terminal_total` | 失败且 `attempts >=` 上限——**永远不会再被自动重试，需要人介入** |
 
@@ -706,7 +713,10 @@ GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
 简历文本同理。要看单条卡住的行，去查 `sync_source_items` 表的 `error_code`。
 
 有游标没账本行（这一轮没东西可拿）和有账本行没游标（首次运行中途崩了）都会照常列出来——
-只报其中一张表会正好藏掉后一种故障。开关关着时这个接口照常可用，读的是历史留下的表。
+只报其中一张表会正好藏掉后一种故障。而 `items` 为**空数组**只说明两张表里一行都没有：要么同步
+从没跑过，要么每一轮都在写下任何东西之前就挂了。**它不等于队列干净**——和上一节 `failed: 0`
+是同一个坑，接口本身分不出「健康且空闲」和「从未运行」，看到空数组请当作后者，并去
+`audit_logs` 查 `resume_sync_failed`。开关关着时这个接口照常可用，读的是历史留下的表。
 
 本地门禁：后端 offline 629 通过；WP8 集成套件（`test_sync_runner` 22、`test_sync_replay` 17、
 `test_sync_ledger` 6、`test_sync_report_api` 6）51 通过；Ruff 与 mypy（125 个源文件）干净。

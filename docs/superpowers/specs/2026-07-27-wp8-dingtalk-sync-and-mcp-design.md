@@ -456,6 +456,98 @@ reversed, and the ledger and cursor are additive tables.
 3. **Attachment formats.** Whether recruitment attachments are always PDF/DOCX,
    or include formats WP1 upload validation currently rejects.
 
+### 16.1 Open question 1, itemized — the UNVERIFIED recruitment-API inventory
+
+This is the committed, authoritative copy of the risk register behind open
+question 1. It lives in the specification rather than in a task report because
+it is the most consequential artifact of this work package: an operator or a
+reviewer in any clone must be able to read exactly what is assumed.
+
+**Provenance.** Every item below is transcribed from
+`docs/specs/2026-05-12-resume-screening-agent-design.md` §8.2, which — unlike
+its OAuth section — carries no `oas-ref:` citation for any of them. A read of
+the project's DingTalk OAS on 2026-07-27 found no `recruitment` namespace at
+all (§2.2), and the recruitment API permission has not been granted, so **not
+one of these has ever been seen in a real response.**
+
+**How they are settled.** One command, once the permission is granted:
+
+```bash
+uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m external_contract
+```
+
+A green offline or integration suite proves the code agrees with this
+document, not that it agrees with DingTalk.
+
+**Containment.** Nothing outside `backend/app/services/sync/dingtalk.py` and
+the recorded fixtures in `backend/tests/contracts/dingtalk-recruitment/v1.0/`
+references any of the 22. If the real shape differs, only that module and those
+fixtures change. The `Site` column names constants and functions rather than
+line numbers on purpose: line numbers in a committed specification rot, and
+every item is anchored inside that one module.
+
+**UNVERIFIED — 15 named endpoint / parameter / field facts**
+
+| # | Kind | Value | Site (`services/sync/dingtalk.py`) |
+|---|---|---|---|
+| 1 | Endpoint path | `/v1.0/recruitment/candidates` | `CANDIDATES_PATH` |
+| 2 | Method | `GET` on that path | `DingTalkRecruitmentAdapter.list_changed` |
+| 3 | Query param | `since` (ISO-8601 with offset) | `list_changed` |
+| 4 | Query param | `maxResults` (integer) | `list_changed` |
+| 5 | Header applies | `x-acs-dingtalk-access-token` accepted by the *recruitment* namespace | `ACCESS_TOKEN_HEADER`, sent by `list_changed` |
+| 6 | Response field | `list` (array) | `parse_candidates_page` |
+| 7 | Response field | `hasMore` (bool) — recorded, deliberately **unread** | fixture only |
+| 8 | Response field | `nextCursor` (string\|null) — recorded, deliberately **unread** | fixture only |
+| 9 | Row field | `candidateId` — **required**, a row without it raises | `parse_candidates_page` |
+| 10 | Row field | `updateTime` — **required**, a row without it raises | `parse_candidates_page` |
+| 11 | Row field | `jobCode` (nullable, `str()`-coerced) | `parse_candidates_page` |
+| 12 | Row field | `resume` (object) — optional | `parse_candidates_page` |
+| 13 | Resume field | `fileName` — optional | `parse_candidates_page`, `_resolve_filename` |
+| 14 | Resume field | `fileType` — optional | `parse_candidates_page` |
+| 15 | Resume field | `downloadUrl` — optional | `parse_candidates_page`, `fetch` |
+
+The JD half of the surface (`/v1.0/recruitment/jobs` and its `jobCode` / `name`
+/ `description` rows, `JOBS_PATH` and `parse_jobs_page`) has exactly the same
+status and the same provenance; §10 added it after this inventory was first
+taken.
+
+**UNVERIFIED — 7 behavioural assumptions**
+
+| # | Assumption | How the code hedges |
+|---|---|---|
+| A | `updateTime` is ISO-8601 | Epoch milliseconds are *also* accepted; a timezone-naive value is refused, never guessed (`_parse_updated_at`) |
+| B | `fileName` carries a file extension | One is derived from the content type or the URL path when it does not (`_resolve_filename`) |
+| C | `downloadUrl` accepts a plain authenticated GET | Any failure → `ItemUnavailable`, one failed item, the batch continues (`fetch`) |
+| D | `downloadUrl` is on the DingTalk origin | Assumed **not**: the token goes out only over HTTPS to the API host, compared by hostname (`_download_headers`, `_comparable_host`) |
+| E | Pagination via `hasMore` / `nextCursor` | Not implemented. With G's sort in place this is an observability gap — `truncated` under-reports a server-paged run — not data loss. Deliberately not built against an unverified field |
+| F | `since` / `maxResults` are the filter semantics | Nothing. A wrong filter yields a wrong window, and the probe is the only detector |
+| G | **Page ordering** — whether the feed lists oldest-first or newest-first | Depended on **not at all**: the server's order is unknown, so `list_changed` sorts ascending by `updated_at` *before* the run cap truncates. The cap therefore always keeps the oldest end of the window and the cursor advances minimally under either ordering. The probe `test_the_raw_page_arrives_oldest_first` records the raw order on its first real run |
+
+**A further finding: the recruitment surface documents no single-candidate
+lookup.** Established 2026-07-27. §8.2 of the source design names the list path
+and nothing else — there is no `GET /candidates/{id}` and no id filter on the
+list. This is a finding about the API rather than one of the 22 assumptions: it
+is an absence in the documentation, not a guess at a shape.
+
+Its consequence is structural. `DingTalkRecruitmentAdapter.describe` raises
+`SourceCapabilityUnavailable` and issues no request, so the bounded replay of
+failed items (§9) is **inert for DingTalk** until this is answered. The sweeper
+spends no attempt on that refusal and counts such rows as `undescribable`,
+never folded into `failed`, so an operator reading `replayed: 0, failed: 0` is
+not told the queue is clean. Guessing a path would be strictly worse than
+refusing: every guessed 404 would spend an attempt, and roughly
+`SYNC_MAX_ITEM_ATTEMPTS` sweeps of that would drive the whole failed queue
+terminal — permanent, silent loss of precisely the rows replay exists to
+recover. This is the first thing to re-check when the permission is granted.
+
+**What is verified, by contrast.** The corp access token this adapter
+authenticates with: `POST /v1.0/oauth2/accessToken` with `appKey` / `appSecret`
+returning `accessToken` / `expireIn` (seconds), read from the authoritative OAS
+and in `backend/app/services/dingtalk/oauth.py`. So is the credential header
+spelling `x-acs-dingtalk-access-token`, already in production use for the user
+token, and the suffix/content-type set the WP1 upload gate accepts. The
+recruitment namespace is the only unverified surface in the package.
+
 ## 17. Approval
 
 Pending review.
