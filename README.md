@@ -583,3 +583,133 @@ WP7 让 LLM 运行成本与评分质量可以从一手记录中被度量。
 托管 CI（[verify run 30209777661](https://github.com/Forcome-Database/SmartScreenAgent/actions/runs/30209777661)，PR #8）三个作业全绿：Python 3.10、Python 3.14、strict integration。
 托管 CI 还抓到两个本地门禁无法发现的缺陷并已修复：`from datetime import UTC` 需要 Python 3.11 而项目支持 3.10；
 p2 端到端测试与 `scripts/verify.py` 启动的真实 Celery worker 抢认领。WP7 现为 **Complete**，WP8 与 WP9 已解除阻塞。
+
+## WP8 — 钉钉招聘同步
+
+WP8 让后台定期从钉钉招聘拉取候选人简历，并把它们交给 WP3 已有的入库管线。
+它是**纯增量能力**：同步整个坏掉，手工上传、评分、所有既有接口都照常工作。
+默认**全部关闭**，打开之前请把下面几段读完。
+
+### 先读这一条：招聘接口尚未验证
+
+钉钉官方 OAS 中**没有 `recruitment` 命名空间**。适配器依赖的 22 项事实——接口路径、
+`since` 与 `maxResults` 两个查询参数、`candidateId` / `updateTime` / `resume.downloadUrl`
+等字段名，以及分页、排序等 7 条行为假设——**全部推断自设计文档，没有一项见过真实响应**。
+逐条清单在 [`.superpowers/sdd/task-S4-report.md`](.superpowers/sdd/task-S4-report.md) §11.7。
+
+结算它们的唯一手段，是拿到接口权限后跑实测探针：
+
+```bash
+uv run pytest backend/tests/external/test_dingtalk_recruitment_contract.py -m external_contract
+```
+
+在这个探针跑绿之前，请把这套集成当作**未验证**。离线与集成测试全绿只证明代码与设计文档
+一致，不证明代码与钉钉一致。
+
+### 环境变量与打开顺序
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `DINGTALK_SYNC_ENABLED` | `false` | 总开关 |
+| `DINGTALK_SYNC_INTERVAL_SECONDS` | `1800` | 简历拉取与 JD 同步的间隔（秒） |
+| `DINGTALK_RECRUITMENT_BASE_URL` | `https://api.dingtalk.com` | 招聘接口 host |
+| `SYNC_OVERLAP_SECONDS` | `300` | 每次从「游标减去该值」起查 |
+| `SYNC_MAX_ITEMS_PER_RUN` | `200` | 单次运行处理条数上限 |
+| `SYNC_MAX_ITEM_ATTEMPTS` | `3` | 失败行的重投上限，到达即终止 |
+| `SYNC_REPLAY_INTERVAL_SECONDS` | `3600` | 回放清扫间隔（秒） |
+
+拉取用的是企业内部应用 token，因此 `DINGTALK_APP_KEY`、`DINGTALK_APP_SECRET`、
+`DINGTALK_CORP_ID` 也必须配好。
+
+开关关着时，三个 Beat 条目 `wp8-pull-dingtalk`、`wp8-replay-failed`、`wp8-sync-jds`
+**根本不会注册**——不是注册了在任务体里跳过。所以关着的时候 worker 不会被空唤醒，
+也不存在「配置写错一个字就打到未验证接口」的余地。Beat 计划在进程启动时读取一次，
+改完开关必须**同时重启 worker 与 beat**，否则计划不会变。
+
+建议的打开顺序：
+
+1. 拿到招聘接口权限，跑上面的 external_contract 探针，直到它绿。
+2. 为同步会碰到的每个岗位走 WP6c 发布流程，发出 active 规则版本（原因见下一节）。
+3. 置 `DINGTALK_SYNC_ENABLED=true`，重启 worker 与 beat。
+4. 用 `GET /api/v1/sync/report` 确认游标在推进，且 `failed_terminal_total` 为 0。
+
+### 未评分窗口：同步建出来的 JD 必须先发规则
+
+同步**允许**创建缺失的 JD 并刷新它的 `name` / `description`；**禁止**触碰
+`jds.active_rule_version_id`、`jds.status` 和 `rule_versions.schema_json`——那是 WP6c
+的发布门禁，后台任务不得从后门绕过。
+
+代价是：同步新建的 JD 没有 active 规则版本，此时到达该岗位的简历会被下载、解析、抽取、
+落成 Candidate，**但永远不会被评分**。候选人只通过 `Score.jd_id` 浮现，而代码库里
+**没有任何补评分路径**：回放清扫只重投 `failed` 行，去重账本又挡住重新拉取。
+也就是说，从「岗位出现」到「有人发布规则版本」之间同步进来的每一份简历，都是入了库
+但看不见的。
+
+因此有两条运维硬规则：
+
+- 在岗位开始吸引投递**之前**就为它发布规则版本，而不是之后。
+- 把同步创建的 JD 一律视为未完成，直到 WP6c 的发布流程对它跑过一次。
+
+彻底关掉这个窗口需要「首次发布规则版本时重评已入库候选人」的补跑能力，那超出 WP8 范围，
+记录在此留给后续工作包。
+
+### 幂等三层，以及为什么重叠窗口和账本是一对
+
+- **内容层（继承自 WP1/WP3）**：`ingestion_jobs.raw_file_sha256` 上的部分唯一索引挡住同一份
+  字节同时在飞，`candidates.pii_hash` 挡住重复的人。
+- **来源层（WP8 新增）**：`sync_source_items` 以 `(source, source_external_id, content_sha256)`
+  三元组去重。内容哈希在键里是刻意的——只按 `(source, source_external_id)` 去重，会让改简历
+  重投的候选人被永久忽略。这一层省下的是 MinerU 解析和 LLM 调用，也就是真正花钱的部分。
+- **游标层（WP8 新增）**：每次从 `cursor_value - SYNC_OVERLAP_SECONDS` 起查。
+
+重叠窗口和去重账本是**一对**：单看任何一个都像冗余，合起来才是「宁可便宜地重看，也不漏」。
+源端时间戳会打平、时钟会偏、翻页期间条目会变，所以窗口必须往回盖一段；而往回盖必然重看，
+所以必须有账本让重看几乎不花钱。
+
+游标推进到**最后一条成功处理的条目的源时间戳**，不是 `now`，也不是页尾统一推进；运行中途
+崩溃就从上一个好点接着来。运行级失败（权限撤销、凭证过期、provider 宕机）**不推进游标**，
+写一条 `resume_sync_failed` 审计，下一次 Beat tick 重试同一个窗口——任务内不做重试循环，
+碰上权限问题那只会空转。
+
+### 回放当前是空转的，`failed: 0` 不等于队列干净
+
+条目级失败会记成 `outcome='failed'` 并继续下一条。游标已经越过它，300 秒重叠也够不回去，
+所以这些行由 `sync.replay_failed` 清扫器按 `attempts < SYNC_MAX_ITEM_ATTEMPTS` 重投，到达
+上限即终止，不再被任何东西选中。
+
+但在招聘权限落地之前，这条恢复路径是**空转**的：钉钉没有按 id 查单个候选人的接口，适配器的
+`describe` 直接抛 `SourceCapabilityUnavailable`。清扫器为此**不花掉任何一次 attempt**，并把
+这些条目单独计成 `undescribable`，不并进 `failed`。所以看到
+`{"replayed": 0, "failed": 0}` **不要读成队列干净**——同时看 `undescribable`，它非零就说明这
+一轮根本没问过源端。同理，`GET /api/v1/sync/report` 里 `failed_retrying_total` 长期不降，在
+权限落地前是预期行为，不是清扫器坏了。
+
+### 同步报表
+
+```
+GET /api/v1/sync/report        # 角色 hr / hr_lead / admin
+```
+
+按来源各一行，回答「同步在不在走、有什么卡住了」：
+
+| 字段 | 含义 |
+|---|---|
+| `source` | 来源标识，钉钉招聘为 `dingtalk_recruitment` |
+| `cursor_value` | 游标位置（ISO-8601 瞬时）；首次成功运行前为 `null` |
+| `last_run_at` | 上次成功写游标的时刻 |
+| `ingested_total` | 已入库条目数 |
+| `failed_retrying_total` | 失败且 `attempts <` 上限——清扫器还会再试，不用管 |
+| `failed_terminal_total` | 失败且 `attempts >=` 上限——**永远不会再被自动重试，需要人介入** |
+
+顶层还带一个 `max_item_attempts`，即上面这条分界线的当前取值。响应只有计数、游标和来源名：
+`source_external_id` 是招聘系统里指向某个真实的人的标识，不出现在这里，姓名、密文、对象键、
+简历文本同理。要看单条卡住的行，去查 `sync_source_items` 表的 `error_code`。
+
+有游标没账本行（这一轮没东西可拿）和有账本行没游标（首次运行中途崩了）都会照常列出来——
+只报其中一张表会正好藏掉后一种故障。开关关着时这个接口照常可用，读的是历史留下的表。
+
+本地门禁：后端 offline 629 通过；WP8 集成套件（`test_sync_runner` 22、`test_sync_replay` 17、
+`test_sync_ledger` 6、`test_sync_report_api` 6）51 通过；Ruff 与 mypy（125 个源文件）干净。
+设计与计划见
+[`WP8 design`](docs/superpowers/specs/2026-07-27-wp8-dingtalk-sync-and-mcp-design.md)
+和 [`WP8 plan`](docs/superpowers/plans/2026-07-27-wp8-dingtalk-sync.md)。

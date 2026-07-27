@@ -16,6 +16,7 @@ from backend.app.routers import jds as jds_router
 from backend.app.routers import operations as operations_router
 from backend.app.routers import quality as quality_router
 from backend.app.routers import rule_publication as rule_publication_router
+from backend.app.routers import sync_report as sync_report_router
 
 
 def create_app() -> FastAPI:
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(quality_router.router)
     app.include_router(batch_report_router.router)
     app.include_router(cross_check_router.router)
+    app.include_router(sync_report_router.router)
 
     @app.get("/")
     async def root() -> dict[str, str]:
